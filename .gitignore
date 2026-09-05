@@ -1,0 +1,52 @@
+# --- build output ---
+build/
+.gradle/
+local.properties
+*.apk
+*.aab
+
+# --- IDE ---
+.idea/
+*.iml
+.kotlin/
+
+# --- OS ---
+.DS_Store
+
+# ============================================================
+# Data policy
+#
+# KEPT in git (small, irreplaceable, or load-bearing):
+#   data/cdt_v2.bin        5.4 MB  the golden file AND the only copy of
+#                                  18 months of flash. Versioning it is
+#                                  deliberate: see prep doc rule 1.
+#   data/mtkparse.py               reference parser, port source
+#   data/dump_v2.log               the only record of the device's
+#                                  self-reported state
+#
+# EXCLUDED below: everything regenerable from cdt_v2.bin, plus dumps
+# that are byte-for-byte redundant with it.
+# ============================================================
+
+# Derived exports — regenerate with:
+#   python3 data/mtkparse.py data/cdt_v2.bin --gpx out.gpx
+data/*.gpx
+data/*.html
+data/geojson_io_link.txt
+
+# Redundant dumps: trip.bin and cdt_full.bin are byte-identical to each
+# other (same MD5) and an exact 4 MB prefix of cdt_v2.bin. Nothing in
+# them is absent from the golden file.
+data/trip.bin
+data/cdt_full.bin
+
+# Independent read-only backup copies of the above. Valuable on disk,
+# pointless in git alongside the file they duplicate.
+data/gps_recovery_backup/
+
+# --- Python bytecode from running mtkparse.py in place ---
+__pycache__/
+*.pyc
+
+# --- local, machine-specific Claude Code settings ---
+.claude/settings.local.json

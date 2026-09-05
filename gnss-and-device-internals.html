@@ -1,0 +1,1069 @@
+<title>How This Thing Knows Where You Are</title>
+<style>
+  /* ---------- tokens: light ---------- */
+  :root {
+    --ground:      #FBFAF7;
+    --surface:     #F2EFE9;
+    --surface-2:   #E7E2D8;
+    --rule:        #D9D2C5;
+    --rule-soft:   #E9E4DA;
+    --ink:         #221E1A;
+    --ink-2:       #4A433B;
+    --muted:       #6B635A;
+    --accent:      #8C5A2B;
+    --accent-soft: #F0E4D6;
+    --measured:    #1F6F6B;
+    --measured-soft:#DEEDEB;
+    --correct:     #A8386B;
+    --correct-soft:#F6E2EC;
+    --shadow:      0 1px 2px rgba(34,30,26,.05), 0 8px 24px -12px rgba(34,30,26,.18);
+
+    --display: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+    --measure: 68ch;
+  }
+
+  /* ---------- tokens: dark (system default, unstamped) ---------- */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #15130F;
+      --surface:     #1E1B15;
+      --surface-2:   #2A251D;
+      --rule:        #38322A;
+      --rule-soft:   #262119;
+      --ink:         #EDE8DE;
+      --ink-2:       #C6BEB1;
+      --muted:       #948B7E;
+      --accent:      #D89A5C;
+      --accent-soft: #33261A;
+      --measured:    #5FBFB3;
+      --measured-soft:#16302E;
+      --correct:     #E7799F;
+      --correct-soft:#331C27;
+      --shadow:      0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.7);
+    }
+  }
+
+  /* ---------- tokens: dark (explicit) ---------- */
+  :root[data-theme="dark"] {
+    --ground:      #15130F;
+    --surface:     #1E1B15;
+    --surface-2:   #2A251D;
+    --rule:        #38322A;
+    --rule-soft:   #262119;
+    --ink:         #EDE8DE;
+    --ink-2:       #C6BEB1;
+    --muted:       #948B7E;
+    --accent:      #D89A5C;
+    --accent-soft: #33261A;
+    --measured:    #5FBFB3;
+    --measured-soft:#16302E;
+    --correct:     #E7799F;
+    --correct-soft:#331C27;
+    --shadow:      0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.7);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 17px;
+    line-height: 1.65;
+    margin: 0;
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+  }
+
+  .wrap {
+    max-width: var(--measure);
+    margin: 0 auto;
+    padding: 0 20px 96px;
+  }
+
+  /* ---------- masthead ---------- */
+  .masthead {
+    border-bottom: 1px solid var(--rule);
+    padding: 56px 0 28px;
+    margin-bottom: 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0;
+  }
+  .masthead h1 {
+    font-family: var(--display);
+    font-size: clamp(30px, 7vw, 46px);
+    line-height: 1.08;
+    letter-spacing: -.025em;
+    font-weight: 700;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .standfirst {
+    color: var(--ink-2);
+    font-size: 18px;
+    margin: 0;
+    max-width: 60ch;
+  }
+  .provenance {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--muted);
+    background: var(--surface);
+    border-left: 2px solid var(--accent);
+    padding: 12px 16px;
+    margin: 0;
+  }
+
+  /* ---------- stat readout ---------- */
+  .readout {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    margin: 0 0 40px;
+  }
+  .readout div {
+    background: var(--ground);
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .readout .n {
+    font-family: var(--mono);
+    font-size: 21px;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -.02em;
+    color: var(--accent);
+  }
+  .readout .l {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  /* ---------- structure ---------- */
+  .part {
+    margin: 72px 0 8px;
+    padding-top: 22px;
+    border-top: 3px solid var(--ink);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .part .tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .part h2 {
+    font-family: var(--display);
+    font-size: clamp(24px, 5.5vw, 32px);
+    letter-spacing: -.02em;
+    line-height: 1.15;
+    font-weight: 700;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  section { margin-top: 44px; }
+  section > h3 {
+    font-family: var(--display);
+    font-size: 22px;
+    line-height: 1.25;
+    letter-spacing: -.015em;
+    font-weight: 660;
+    margin: 0 0 14px;
+    text-wrap: balance;
+  }
+  section > h3 .num {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: .08em;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 5px;
+  }
+  h4 {
+    font-family: var(--display);
+    font-size: 16.5px;
+    font-weight: 660;
+    letter-spacing: -.005em;
+    margin: 30px 0 10px;
+    color: var(--ink);
+  }
+
+  p { margin: 0 0 16px; }
+  a { color: var(--accent); text-underline-offset: 2px; }
+  strong { font-weight: 660; color: var(--ink); }
+  em { font-style: italic; }
+
+  ul, ol { margin: 0 0 18px; padding-left: 22px; }
+  li { margin-bottom: 8px; }
+  li::marker { color: var(--muted); }
+
+  code {
+    font-family: var(--mono);
+    font-size: .875em;
+    background: var(--surface);
+    border: 1px solid var(--rule-soft);
+    border-radius: 3px;
+    padding: 1px 5px;
+    white-space: nowrap;
+  }
+
+  /* ---------- block figures ---------- */
+  figure { margin: 24px 0; }
+  .block {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    overflow-x: auto;
+  }
+  .block pre {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.62;
+    margin: 0;
+    padding: 16px 18px;
+    color: var(--ink-2);
+    white-space: pre;
+  }
+  figcaption {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-top: 8px;
+  }
+
+  /* ---------- tables ---------- */
+  .tw { overflow-x: auto; margin: 24px 0; border: 1px solid var(--rule); }
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+  th, td {
+    text-align: left;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--rule-soft);
+    vertical-align: top;
+  }
+  th {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    background: var(--surface);
+    border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+    font-weight: 500;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.n, th.n { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.n { color: var(--ink); }
+  tr.hi td { background: var(--accent-soft); }
+
+  /* ---------- callouts: encode measured / correction / trap ---------- */
+  .call {
+    border-left: 3px solid var(--rule);
+    background: var(--surface);
+    padding: 14px 18px;
+    margin: 24px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .call .k {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+  }
+  .call p { margin: 0; font-size: 16px; }
+  .call p + p { margin-top: 10px; }
+  .call.measured { border-left-color: var(--measured); background: var(--measured-soft); }
+  .call.measured .k { color: var(--measured); }
+  .call.correct  { border-left-color: var(--correct);  background: var(--correct-soft); }
+  .call.correct .k { color: var(--correct); }
+  .call.trap     { border-left-color: var(--accent);   background: var(--accent-soft); }
+  .call.trap .k { color: var(--accent); }
+
+  /* ---------- diagram ---------- */
+  .fig-svg {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    padding: 18px 12px 10px;
+  }
+  .fig-svg svg { display: block; width: 100%; height: auto; }
+  .svg-ink    { stroke: var(--ink-2); }
+  .svg-muted  { stroke: var(--muted); }
+  .svg-accent { stroke: var(--accent); }
+  .t-ink   { fill: var(--ink); font-family: var(--mono); font-size: 11px; }
+  .t-muted { fill: var(--muted); font-family: var(--mono); font-size: 10px; }
+  .t-acc   { fill: var(--accent); font-family: var(--mono); font-size: 10px; }
+  .sat     { fill: var(--accent); }
+  .rx      { fill: var(--measured); }
+  .earth   { fill: var(--surface-2); stroke: var(--rule); }
+
+  /* ---------- close ---------- */
+  .close {
+    margin-top: 72px;
+    padding-top: 24px;
+    border-top: 3px solid var(--ink);
+  }
+  .verdict {
+    border-left: 3px solid var(--measured);
+    background: var(--measured-soft);
+    padding: 18px 20px;
+    margin-top: 26px;
+  }
+  .verdict .k {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--measured);
+    display: block;
+    margin-bottom: 8px;
+  }
+  .verdict p { margin: 0; }
+
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+  @media (max-width: 640px) {
+    body { font-size: 16.5px; }
+    .masthead { padding-top: 40px; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">btdroid · technical companion</p>
+    <h1>How This Thing Knows Where You Are</h1>
+    <p class="standfirst">What the MTK GPS logger actually measures, how well it measures
+      it, and how it writes the result to flash.</p>
+    <p class="provenance">Every figure attributed to "this device" was measured from
+      cdt_v2.bin — 126,613 fixes, 18 months, 5.4 MB of raw flash — not taken from a
+      datasheet. Where measurement contradicts the conventional figure, both are given.</p>
+  </header>
+
+  <div class="readout">
+    <div><span class="n">126,613</span><span class="l">fixes parsed</span></div>
+    <div><span class="n">0</span><span class="l">checksum fails</span></div>
+    <div><span class="n">98.14%</span><span class="l">SBAS corrected</span></div>
+    <div><span class="n">1.94 m</span><span class="l">σ vertical</span></div>
+  </div>
+
+  <!-- ============ PART I ============ -->
+  <div class="part">
+    <span class="tag">Part I</span>
+    <h2>Positioning</h2>
+  </div>
+
+  <section>
+    <h3><span class="num">§ 01</span>The only thing a receiver actually measures</h3>
+    <p>A GPS receiver does not measure distance, direction, or position. It measures
+      <strong>one number per satellite: arrival time</strong>.</p>
+    <p>Each satellite broadcasts a pseudo-random code on L1 (1575.42 MHz), timestamped by
+      an onboard atomic clock, alongside a navigation message describing where the
+      satellite is and how its clock is behaving. The receiver generates the same code
+      locally, slides its copy until it correlates with the incoming signal, and reads off
+      the time shift. Multiply by the speed of light and you have a <strong>pseudorange</strong>:</p>
+
+    <figure class="block"><pre>ρ = c × (t_received − t_transmitted)</pre></figure>
+
+    <p>It is called <em>pseudo</em> because it is wrong, in a specific and exploitable way.
+      The satellite's clock is atomic and disciplined to nanoseconds. The receiver's clock
+      is a cheap quartz crystal that may be off by a millisecond — and a millisecond of
+      clock error is <strong>300 kilometres</strong> of range error.</p>
+  </section>
+
+  <section>
+    <h3><span class="num">§ 02</span>Four unknowns, four satellites</h3>
+    <p>The receiver's clock offset <code>δt</code> is unknown, but it is the <em>same</em>
+      unknown in every simultaneous pseudorange. That turns a seemingly fatal problem into
+      an ordinary one:</p>
+
+    <figure class="block"><pre>ρᵢ = √((xᵢ−x)² + (yᵢ−y)² + (zᵢ−z)²) + c·δt</pre></figure>
+
+    <p>Four unknowns — <code>x</code>, <code>y</code>, <code>z</code>, <code>δt</code> — so
+      four satellites give four equations. The system is non-linear and solved iteratively:
+      linearize about a guess, apply a least-squares correction, repeat. Three or four
+      passes converge. Satellites beyond the fourth make the system overdetermined, and
+      that redundancy is what buys accuracy.</p>
+    <p>A useful consequence, and the reason GPS underpins so much of the world's timing
+      infrastructure: <strong>a GPS receiver is a clock that happens to also report
+      position.</strong> Solving for position requires solving for time, to nanoseconds,
+      for free.</p>
+  </section>
+
+  <section>
+    <h3><span class="num">§ 03</span>Where the error comes from</h3>
+    <p>Solving those equations perfectly would still give a wrong answer, because the
+      pseudoranges are contaminated. The standard accounting is <strong>User Equivalent
+      Range Error</strong> — per-satellite range error after the receiver applies whatever
+      corrections it has.</p>
+
+    <div class="tw"><table>
+      <thead><tr><th>Source</th><th class="n">1σ</th><th>What it is</th></tr></thead>
+      <tbody>
+        <tr class="hi"><td><strong>Ionosphere</strong></td><td class="n">4–7 m</td>
+          <td>Free electrons 50–1000 km up delay the signal. Varies with solar activity,
+            time of day, elevation angle. <strong>Dominant.</strong></td></tr>
+        <tr><td>Satellite clock</td><td class="n">~2 m</td><td>Residual drift between ground-segment updates</td></tr>
+        <tr><td>Ephemeris</td><td class="n">~2 m</td><td>Broadcast orbit differs from true orbit</td></tr>
+        <tr><td>Troposphere</td><td class="n">~0.5 m</td><td>Water vapour and pressure. Modelled, not measured</td></tr>
+        <tr><td>Multipath</td><td class="n">0.5–2 m</td><td>Signal arriving via reflection. <strong>Site-dependent</strong></td></tr>
+        <tr><td>Receiver noise</td><td class="n">~0.5 m</td><td>Thermal noise in the correlator</td></tr>
+        <tr><td><strong>Total UERE</strong></td><td class="n"><strong>5–7 m</strong></td><td>Root-sum-square</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Two properties matter for everything that follows. The ionosphere dominates, and it
+      is <strong>spatially correlated</strong> — two receivers 100 km apart see nearly the
+      same delay. That correlation is the entire basis of differential GPS. Multipath, by
+      contrast, is <em>not</em> correlated between sites, which is why no differential
+      technique removes it and why a slot canyon degrades any receiver ever built.</p>
+  </section>
+
+  <section>
+    <h3><span class="num">§ 04</span>Geometry: why vertical is structurally worse</h3>
+    <p>UERE is a range error. How much of it lands in your <em>position</em> depends on
+      where the satellites sit in the sky. That amplification is <strong>Dilution of
+      Precision</strong>:</p>
+
+    <figure class="block"><pre>σ_position = DOP × UERE</pre></figure>
+
+    <p>Satellites spread widely across the sky intersect at sharp angles and pin the
+      solution down. Satellites clustered together intersect at shallow angles, and small
+      range errors smear into large position errors. DOP is reported by component: HDOP
+      horizontal, VDOP vertical, PDOP position, TDOP time.</p>
+
+    <figure>
+      <div class="fig-svg">
+        <svg viewBox="0 0 520 240" role="img" aria-label="Diagram: satellites are visible only above the horizon, so vertical geometry is one-sided">
+          <line x1="20" y1="176" x2="500" y2="176" class="svg-muted" stroke-width="1" stroke-dasharray="4 4"/>
+          <text x="20" y="192" class="t-muted">HORIZON</text>
+          <path d="M40 176 A220 220 0 0 1 480 176 Z" fill="none" class="svg-muted" stroke-width="1" opacity=".45"/>
+          <circle cx="120" cy="96"  r="5" class="sat"/>
+          <circle cx="215" cy="52"  r="5" class="sat"/>
+          <circle cx="310" cy="62"  r="5" class="sat"/>
+          <circle cx="400" cy="112" r="5" class="sat"/>
+          <circle cx="168" cy="140" r="5" class="sat"/>
+          <circle cx="356" cy="150" r="5" class="sat"/>
+          <g class="svg-accent" stroke-width="1" opacity=".5">
+            <line x1="260" y1="176" x2="120" y2="96"/>
+            <line x1="260" y1="176" x2="215" y2="52"/>
+            <line x1="260" y1="176" x2="310" y2="62"/>
+            <line x1="260" y1="176" x2="400" y2="112"/>
+            <line x1="260" y1="176" x2="168" y2="140"/>
+            <line x1="260" y1="176" x2="356" y2="150"/>
+          </g>
+          <circle cx="260" cy="176" r="6" class="rx"/>
+          <text x="272" y="172" class="t-ink">receiver</text>
+          <rect x="20" y="180" width="480" height="46" class="earth" stroke-width="1"/>
+          <text x="196" y="208" class="t-muted">NO SATELLITE IS EVER BELOW YOU</text>
+          <text x="330" y="36" class="t-acc">horizontal errors cancel · vertical errors do not</text>
+        </svg>
+      </div>
+      <figcaption>Fig. 1 — the vertical channel's permanent handicap</figcaption>
+    </figure>
+
+    <p><strong>The vertical channel is handicapped by geometry that cannot be fixed.</strong>
+      Horizontally, satellites surround you — some north, some south, east, west — and
+      their errors partially cancel. Vertically they are all <em>above</em> you. There is no
+      satellite beneath your feet, because the Earth is in the way. Every vertical
+      measurement is one-sided.</p>
+    <p>The standard consequence is <code>VDOP ≈ 1.5–2 × HDOP</code>. This is not an
+      implementation weakness. It is a property of standing on top of an opaque sphere.</p>
+  </section>
+
+  <section>
+    <h3><span class="num">§ 05</span>SPS, DGPS, and SBAS</h3>
+    <p><strong>SPS — Standard Positioning Service.</strong> The receiver alone. It applies a
+      <em>modelled</em> ionospheric correction — the Klobuchar model, whose coefficients the
+      satellites broadcast — removing roughly half the ionospheric error on a good day.
+      UERE 5–7 m.</p>
+    <p><strong>DGPS — Differential GPS.</strong> A reference receiver at a surveyed location
+      computes what the pseudoranges <em>should</em> be, compares to what it <em>measures</em>,
+      and broadcasts the difference. A nearby rover cancels everything spatially
+      correlated: ionosphere, satellite clock, ephemeris. What survives is multipath and
+      receiver noise — both local.</p>
+    <p><strong>SBAS — Satellite-Based Augmentation.</strong> DGPS delivered from orbit with
+      no local radio link. Reference stations feed a master station, which uplinks
+      corrections to <strong>geostationary</strong> satellites that rebroadcast on the same
+      L1 frequency the receiver already listens to. No extra hardware, no subscription.
+      Regionally: WAAS (North America), EGNOS (Europe), MSAS (Japan), GAGAN (India).</p>
+
+    <p>SBAS transmits three distinct products:</p>
+    <ul>
+      <li><strong>Fast corrections</strong> — rapidly changing satellite clock error</li>
+      <li><strong>Long-term corrections</strong> — slow ephemeris and clock drift</li>
+      <li><strong>Ionospheric grid</strong> — vertical delay at fixed geographic grid points,
+        interpolated along each line of sight</li>
+    </ul>
+
+    <p>That third product is the important one, and it is why SBAS helps the vertical
+      channel disproportionately: it replaces a <em>model</em> of the largest error source
+      with a <em>measurement</em> of it. Typical corrected UERE is <strong>1–2 m</strong>,
+      roughly a 4× improvement.</p>
+
+    <div class="call trap">
+      <span class="k">Field caveat</span>
+      <p>SBAS satellites are geostationary, so they sit over the equator — low in the
+        <strong>southern</strong> sky from North America, and lower the further north you go.
+        A ridge, canyon wall, or dense canopy to your south blocks the correction stream
+        while the GPS constellation itself stays perfectly visible. The receiver silently
+        drops from DGPS to SPS. This is the mechanism behind most of this device's
+        degraded fixes.</p>
+    </div>
+  </section>
+
+  <section>
+    <h3><span class="num">§ 06</span>What this device's data shows</h3>
+    <p>The logger records a <code>VALID</code> field with every fix. Across all 126,613:</p>
+
+    <div class="tw"><table>
+      <thead><tr><th class="n">VALID</th><th>Meaning</th><th class="n">Count</th><th class="n">Share</th></tr></thead>
+      <tbody>
+        <tr class="hi"><td class="n">4</td><td><strong>DGPS</strong> — SBAS corrected</td><td class="n">124,259</td><td class="n">98.14%</td></tr>
+        <tr><td class="n">2</td><td>SPS — uncorrected</td><td class="n">2,333</td><td class="n">1.84%</td></tr>
+        <tr><td class="n">1</td><td>No fix</td><td class="n">13</td><td class="n">0.010%</td></tr>
+        <tr><td class="n">64</td><td>Estimated / dead reckoning</td><td class="n">8</td><td class="n">0.006%</td></tr>
+      </tbody>
+    </table></div>
+
+    <h4>6.1 — Measured accuracy</h4>
+    <p>Isolating 103 stationary periods longer than 30 minutes — where the device was
+      demonstrably not moving, so all scatter is measurement error — and computing
+      dispersion in local north/east/up coordinates:</p>
+
+    <div class="tw"><table>
+      <thead><tr><th>Statistic</th><th class="n">Median over 103 stops</th></tr></thead>
+      <tbody>
+        <tr><td>σ north</td><td class="n">1.43 m</td></tr>
+        <tr><td>σ east</td><td class="n">1.18 m</td></tr>
+        <tr class="hi"><td><strong>σ horizontal</strong> — DRMS, matches HDOP</td><td class="n"><strong>1.91 m</strong></td></tr>
+        <tr class="hi"><td><strong>σ vertical</strong> — matches VDOP</td><td class="n"><strong>1.94 m</strong></td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Roughly <strong>2 m 1σ in both channels</strong> — squarely SBAS-corrected territory,
+      about 3× better than an uncorrected receiver would manage.</p>
+
+    <h4>6.2 — The vertical/horizontal ratio is not one number</h4>
+    <p>§ 04 predicts vertical error 1.5–2× horizontal. Earlier analysis of this device's
+      exported GPX reported <strong>0.72</strong>, appearing to falsify that and raising the
+      question of whether altitude came from a barometer instead.</p>
+    <p>Both figures are real. They measure different timescales.</p>
+
+    <div class="tw"><table>
+      <thead><tr><th>Timescale</th><th class="n">V/H</th><th>What it reflects</th></tr></thead>
+      <tbody>
+        <tr><td>20 s consecutive differences</td><td class="n">0.71</td><td>The receiver's tracking filter</td></tr>
+        <tr class="hi"><td>30–90 min dispersion</td><td class="n">1.14</td><td>The actual error budget <span style="color:var(--muted)">(IQR 0.57–1.66)</span></td></tr>
+      </tbody>
+    </table></div>
+
+    <p>At 20 seconds you are not measuring GNSS accuracy. You are measuring how hard the
+      receiver's Kalman filter is smoothing — and it smooths vertical harder precisely
+      <em>because</em> vertical is noisier. Differencing adjacent samples of a smoothed
+      series measures the smoother, not the signal.</p>
+    <p>At 30–90 minutes the filter's memory has washed out and the true budget shows: a
+      ratio of <strong>1.14</strong>, below textbook but with an interquartile range that
+      spans it. The residual suppression is consistent with SBAS correcting the ionosphere,
+      the error source that hurts vertical most.</p>
+
+    <div class="call measured">
+      <span class="k">Measured</span>
+      <p>The original 0.72 was not wrong. It was an answer to a different question.</p>
+    </div>
+
+    <h4>6.3 — Proof the vertical channel is GNSS, not barometric</h4>
+    <p>The timescale argument explains the anomaly but does not rule out a barometer. This
+      does. Splitting the <em>same</em> stationary analysis by fix quality:</p>
+
+    <div class="tw"><table>
+      <thead><tr><th>Fix quality</th><th class="n">n</th><th class="n">Vertical step, mean</th><th class="n">p95</th></tr></thead>
+      <tbody>
+        <tr><td>DGPS — SBAS corrected</td><td class="n">124,259</td><td class="n">0.182 m</td><td class="n">0.356 m</td></tr>
+        <tr class="hi"><td>SPS — uncorrected</td><td class="n">2,333</td><td class="n"><strong>1.366 m</strong></td><td class="n"><strong>6.964 m</strong></td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Losing the SBAS correction degrades the vertical channel <strong>7.5× in the mean and
+      20× at p95</strong>.</p>
+
+    <div class="call measured">
+      <span class="k">Verdict</span>
+      <p>A barometric altimeter does not know or care whether the GPS receiver is receiving
+        WAAS corrections. If altitude came from a pressure sensor, these two rows would be
+        identical. They differ by nearly an order of magnitude.</p>
+      <p><strong>HEIGHT is GNSS-derived. There is no barometer in this device.</strong> The
+        question was settled by data that sat in the flash the whole time — the GPX exporter
+        simply discarded the <code>VALID</code> field needed to ask it. No NSAT or VDOP
+        required.</p>
+    </div>
+
+    <h4>6.4 — Correction: elevation is not quantized to 0.1 m</h4>
+    <p>Earlier analysis reported 0.10 m elevation quantization and inferred that the fix
+      engine emits decimetres. It does not:</p>
+    <ul>
+      <li><strong>125,140 distinct</strong> height values across 126,592 fixes — 98.9%</li>
+      <li>Smallest gap between distinct values: <strong>0.000031 m</strong></li>
+      <li>f32 resolution at 1500 m altitude: 0.000122 m</li>
+    </ul>
+
+    <div class="call correct">
+      <span class="k">Correction</span>
+      <p>Heights are continuous at f32 precision. The apparent decimetre quantization was
+        an artifact of the GPX exporter writing <code>&lt;ele&gt;</code> with <code>%.1f</code>
+        formatting — the same class of mistake that inflated the sentinel counts. This is
+        the third conclusion that changed once the raw flash was read instead of the
+        export. <strong>Measure the binary, not the derived file.</strong></p>
+    </div>
+
+    <h4>6.5 — Open question: ellipsoidal or mean sea level?</h4>
+    <p>GNSS natively computes height above the <strong>WGS84 ellipsoid</strong>, a smooth
+      mathematical figure. Maps use height above the <strong>geoid</strong> — mean sea level,
+      a lumpy equipotential surface. The difference is about −34 m near the Great Lakes and
+      −8 to −27 m across the mountain west. Consumer receivers usually apply an EGM96
+      correction; loggers often do not.</p>
+    <p>Evidence here is suggestive but not conclusive. Fixes near 41.883 / −87.804 read a
+      median <strong>156.0 m</strong>, against roughly 204 m MSL and roughly 170 m
+      ellipsoidal for that area. Closer to ellipsoidal, but off by enough that the
+      comparison point is doing too much work.</p>
+
+    <div class="call trap">
+      <span class="k">Decisive test</span>
+      <p>Record a fix at a surveyed benchmark of known orthometric height where geoid
+        separation is large, and compare. Repeating at two sites with very different
+        separations distinguishes a constant offset from a geoid-shaped one. Until then,
+        treat absolute elevations as carrying a possible 20–35 m systematic offset.
+        <em>Relative</em> elevation — gain, loss, profile shape — is unaffected, which is what
+        most trail use actually depends on.</p>
+    </div>
+  </section>
+
+  <section>
+    <h3><span class="num">§ 07</span>Speed comes from Doppler, not from positions</h3>
+    <p>There are two ways to produce a speed, and they are not equally good.</p>
+    <p><strong>Position differencing</strong> subtracts consecutive positions and divides by
+      elapsed time. It inherits all the position error, doubled, and is only ever an
+      <em>average</em> over the interval.</p>
+    <p><strong>Doppler</strong> measures carrier frequency shift caused by motion along each
+      satellite's line of sight. Four or more range-rate measurements solve for the 3D
+      velocity vector plus receiver clock <em>drift</em>. This never touches the position
+      solution and is far more precise — typically <strong>0.05 m/s</strong>, because carrier
+      frequency can be measured extremely accurately.</p>
+
+    <p>Across 25,584 samples taken during confirmed stationary periods:</p>
+
+    <div class="tw"><table>
+      <thead><tr><th></th><th class="n">Mean</th><th class="n">Median</th><th class="n">&lt; 0.01 km/h</th></tr></thead>
+      <tbody>
+        <tr><td>Position-differenced over 20 s</td><td class="n">0.0314 km/h</td><td class="n">0.0155</td><td class="n">32.0%</td></tr>
+        <tr class="hi"><td><strong>Device-reported SPEED</strong></td><td class="n">0.0510 km/h</td><td class="n">0.0382</td><td class="n">5.3%</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>The reported speed is <strong>noisier at rest than differencing the logged positions
+      would be</strong> — 1.63× the mean. That rules out the device deriving speed from those
+      positions: if it did, the two rows would match exactly.</p>
+    <p>It is the expected signature of Doppler. Position differencing over a 20-second
+      baseline averages noise down by the length of the interval; Doppler reports an
+      <em>instantaneous</em> velocity at the fix epoch with no averaging at all.
+      Instantaneous-and-precise looks noisier than averaged-and-crude when the target isn't
+      moving, and is dramatically better when it is.</p>
+
+    <div class="call trap">
+      <span class="k">Practical consequence</span>
+      <p>Logged <code>SPEED</code> is a snapshot at the fix instant, not an average over the
+        preceding 20 seconds. <strong>Integrating it does not give distance.</strong> Against a
+        1,042 mi haversine total, integrating logged speed yields ~920 mi — a 12% shortfall,
+        because the samples miss whatever happened between them.</p>
+    </div>
+  </section>
+
+  <section>
+    <h3><span class="num">§ 08</span>Time, and why this device thinks it is 2005</h3>
+    <p>GPS time began at <strong>1980-01-06 00:00:00 UTC</strong> and has run continuously
+      since, with <strong>no leap seconds</strong>. UTC has absorbed 18 leap seconds in that
+      span, so GPS time currently runs 18 s ahead; receivers subtract the offset, which is
+      broadcast in the navigation message.</p>
+    <p>Time is transmitted as <strong>week number + time of week</strong>. In the legacy
+      navigation message the week number field is <strong>10 bits</strong> — 0 to 1023. It
+      rolls over every 1024 weeks, about <strong>19.6 years</strong>:</p>
+
+    <div class="tw"><table>
+      <thead><tr><th>Event</th><th class="n">Date</th></tr></thead>
+      <tbody>
+        <tr><td>Epoch 0 begins</td><td class="n">1980-01-06</td></tr>
+        <tr><td>Rollover 1</td><td class="n">1999-08-22</td></tr>
+        <tr class="hi"><td><strong>Rollover 2</strong></td><td class="n"><strong>2019-04-06</strong></td></tr>
+        <tr><td>Rollover 3</td><td class="n">2038-11-21</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>A receiver only sees the low 10 bits. To recover the true date it must add the right
+      number of 1024-week epochs — and that number is <strong>not transmitted</strong>. It is
+      baked into firmware, typically as a build-date-derived assumption.</p>
+    <p>This device's firmware is <code>AXN_1.30-B_1.3_C01</code>, built well before 2019, and
+      assumes the 1999–2019 window. Since 2019-04-06 the broadcast week number has wrapped
+      to 0, and the firmware maps it back into the previous window — producing timestamps
+      <strong>exactly 1024 weeks (7,168 days, ~19.62 years) early</strong>.</p>
+
+    <figure class="block"><pre>corrected_utc = raw_utc + 1024 × 7 × 86400</pre>
+      <figcaption>Verified, not assumed: +1024 weeks places a known Chief Mountain fix at
+        48.993 / −113.658 on 2025-06-16. +2048 lands it in 2044.</figcaption>
+    </figure>
+
+    <div class="call trap">
+      <span class="k">Two cautions</span>
+      <p>This is a <strong>per-firmware</strong> property, wrong for any other device, so it
+        belongs in configuration rather than compiled in as a constant.</p>
+      <p>And it is <strong>not permanent</strong>. At rollover 3 in November 2038, firmware of
+        this vintage will need +2048 weeks. Any hardcoded 1024 becomes silently wrong on
+        that date.</p>
+    </div>
+  </section>
+
+  <!-- ============ PART II ============ -->
+  <div class="part">
+    <span class="tag">Part II</span>
+    <h2>Device Internals</h2>
+  </div>
+
+  <section>
+    <h3><span class="num">§ 09</span>Identification</h3>
+    <div class="tw"><table>
+      <thead><tr><th>Property</th><th>Value</th><th>How known</th></tr></thead>
+      <tbody>
+        <tr><td>Firmware</td><td class="n">AXN_1.30-B_1.3_C01</td><td>$PMTK605 response</td></tr>
+        <tr><td>Model ID</td><td class="n">0008</td><td>same</td></tr>
+        <tr><td>Chipset family</td><td>MediaTek MT3329 / MT3339 class</td><td>AXN firmware naming</td></tr>
+        <tr><td>Coordinate width</td><td>f64 doubles</td><td>Parses cleanly — <strong>not</strong> the Holux f32 variant</td></tr>
+        <tr><td>Record size</td><td class="n">42 bytes</td><td>Confirmed byte-exact</td></tr>
+        <tr><td>Log interval</td><td class="n">20.0 s</td><td>Sector headers, all 82</td></tr>
+        <tr><td>Fill mode</td><td>OVERLAP — circular</td><td>Log status</td></tr>
+      </tbody>
+    </table></div>
+
+    <h4>9.1 — Everything the device says about itself is wrong</h4>
+    <p>This is the single most important operational fact about the hardware.</p>
+
+    <div class="tw"><table>
+      <thead><tr><th>Query</th><th>Device reports</th><th>Reality</th></tr></thead>
+      <tbody>
+        <tr class="hi"><td>Number of records</td><td class="n">247,133</td><td class="n"><strong>126,613</strong></td></tr>
+        <tr><td>Flash size</td><td>query fails</td><td>forced via MTK_FLASH_BYTES</td></tr>
+        <tr><td>Memory health mask</td><td class="n">all FF</td><td>not meaningfully implemented</td></tr>
+        <tr><td>$PMTK704</td><td>packet_wait() timeout</td><td>unsupported by this firmware</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="call trap">
+      <span class="k">Consequence</span>
+      <p>Only the <strong>bytes on the flash</strong> are trustworthy. Size the download
+        empirically — read until sectors come back as <code>0xFF</code> fill — rather than
+        believing a reported size or record count. Detect buffer wrap from sector-header
+        timestamps, never from a write pointer.</p>
+    </div>
+  </section>
+
+  <section>
+    <h3><span class="num">§ 10</span>Flash geography</h3>
+    <p>The log is a flat array of <strong>64 KiB (0x10000) sectors</strong>. Each is
+      self-describing — a sector carries its own format register — so the log stays
+      parseable from any sector boundary even after a wrap has overwritten earlier
+      sectors.</p>
+
+    <figure>
+      <div class="block"><pre>┌──────────────── sector N (0x10000 bytes) ─────────────────┐
+│ 0x000  header (20 bytes of fields)                        │
+│ 0x014  0xFF fill                                          │
+│ 0x1FA  '*' &lt;cksum&gt; BB BB BB BB   ← header terminator      │
+│ 0x200  first record                                       │
+│        record, record, record, ...                        │
+│        [16-byte dynamic marker]                           │
+│        record, record, ...                                │
+│        0xFF fill to end of sector                         │
+└───────────────────────────────────────────────────────────┘</pre></div>
+      <figcaption>Fig. 2 — sector anatomy</figcaption>
+    </figure>
+
+    <h4>10.1 — Sector header</h4>
+    <p>Verified byte-for-byte against sector 0. This resolves a long-standing ambiguity in
+      the community documentation: the MTK manual describes a 56-byte "sector pattern"
+      while BT747 and derivatives reserve 512 bytes. <strong>Both are correct.</strong> The
+      fields occupy the first 20 bytes; records begin at 0x200.</p>
+
+    <figure>
+      <div class="block"><pre>offset  type  field                observed
+──────  ────  ───────────────────  ──────────────────────────
+0x000   u16   record count         0xFFFF while still writing
+0x002   u32   FMT_REG              0x000A003F
+0x006   u16   mode                 0x0100 / 0x0102
+0x008   u32   time criterion       200  (0.1 s units → 20.0 s)
+0x00C   u32   distance criterion   0    (disabled)
+0x010   u32   speed criterion      0    (disabled)
+0x014   ...   0xFF fill
+0x1FA   —     '*' &lt;cksum&gt; BB BB BB BB</pre></div>
+    </figure>
+
+    <div class="call trap">
+      <span class="k">The record count is a trap</span>
+      <p>The device writes it only when a sector <em>fills</em>; the sector currently being
+        written reads <code>0xFFFF</code>. On this dump the 81 finalized sectors declare
+        125,152 records while the flash actually holds 126,613.</p>
+      <p>A parser that trusts the header count silently discards <strong>1,461 fixes</strong> —
+        and they are the most recent ones, the trip the user just finished. Parse until
+        <code>0xFF</code> fill; treat the count as a cross-check, never as a bound.</p>
+    </div>
+
+    <h4>10.2 — Record layout</h4>
+    <p>Records are a packed struct whose members are selected by the format register, in
+      ascending bit order, little-endian, terminated by <code>'*'</code> and an XOR checksum
+      over the payload. For this device's <code>FMT_REG = 0x000A003F</code>:</p>
+
+    <figure>
+      <div class="block"><pre>offset  width  field       type    notes
+──────  ─────  ──────────  ──────  ─────────────────────────────────
+  0       4    UTC         u32     epoch seconds, needs +1024 weeks
+  4       2    VALID       u16     fix quality bitmask
+  6       8    LATITUDE    f64     degrees
+ 14       8    LONGITUDE   f64     degrees
+ 22       4    HEIGHT      f32     metres (datum unconfirmed, § 6.5)
+ 26       4    SPEED       f32     km/h, Doppler, instantaneous
+ 30       2    RCR         u16     reason for recording
+ 32       8    DISTANCE    f64     odometer — BROKEN, see § 11.2
+ 40       1    '*'         u8      0x2A separator
+ 41       1    checksum    u8      XOR of bytes 0..39
+──────────────────────────────────────────────────────────────────
+ 42 bytes total</pre></div>
+      <figcaption>Fig. 3 — the 42-byte record, byte by byte</figcaption>
+    </figure>
+
+    <div class="call measured">
+      <span class="k">Measured</span>
+      <p>Across all 5.4 MB, <strong>zero records fail checksum</strong>. The flash is entirely
+        healthy — which means any checksum failure in a new parser is a parser defect, not
+        bad hardware. A useful thing to be able to assert.</p>
+    </div>
+
+    <h4>10.3 — The format register</h4>
+    <p><code>FMT_REG</code> is a 32-bit mask. Field order follows ascending bit position, and
+      each set bit contributes a fixed width — with one exception.</p>
+
+    <figure>
+      <div class="block"><pre>bit  field         width   bit  field         width
+───  ────────────  ─────   ───  ────────────  ─────
+ 0   UTC             4      10  HDOP            2
+ 1   VALID           2      11  VDOP            2
+ 2   LATITUDE        8      12  NSAT            2
+ 3   LONGITUDE       8      13  SID          VARIABLE
+ 4   HEIGHT          4      14  ELEVATION       2
+ 5   SPEED           4      15  AZIMUTH         2
+ 6   HEADING         4      16  SNR             2
+ 7   DSTA            2      17  RCR             2
+ 8   DAGE            4      18  MILLISECOND     2
+ 9   PDOP            2      19  DISTANCE        8</pre></div>
+    </figure>
+
+    <div class="call trap">
+      <span class="k">Two traps</span>
+      <p><strong>Bit 14 ELEVATION is satellite elevation <em>angle</em>, not altitude.</strong>
+        Altitude is bit 4, <code>HEIGHT</code>. The names are a decades-old inheritance and
+        have misled many implementations.</p>
+      <p><strong>Bits 13–16 are the per-satellite block, and it is variable length.</strong>
+        When <code>SID</code> is set, record size is no longer a function of bitmask popcount
+        and records must be parsed forward. This device sets none of them, so the parser
+        rejects such formats rather than silently misinterpreting every subsequent byte in
+        the sector.</p>
+    </div>
+
+    <p><code>FMT_REG</code> can change mid-log via a dynamic marker, so it must be re-read per
+      sector rather than latched once. <strong>On this device it never has</strong> — all 82
+      sectors carry <code>0x000A003F</code> and there are zero format-change markers in
+      5.4 MB.</p>
+
+    <h4>10.4 — Dynamic markers</h4>
+    <p>A 16-byte in-band control record, distinguishable from log data by a run of seven
+      <code>0xAA</code> bytes:</p>
+
+    <figure class="block"><pre>AA AA AA AA AA AA AA | type | arg (i32 LE) | BB BB BB BB</pre></figure>
+
+    <p>All 580 markers in the reference dump:</p>
+
+    <div class="tw"><table>
+      <thead><tr><th class="n">Type</th><th class="n">Arg</th><th class="n">Count</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td class="n">0x07</td><td class="n">0x0100</td><td class="n">200</td><td>Log status change — disable</td></tr>
+        <tr><td class="n">0x07</td><td class="n">0x0102</td><td class="n">200</td><td>Log status change — enable</td></tr>
+        <tr><td class="n">0x04</td><td class="n">0</td><td class="n">90</td><td>Distance criterion write — no-op</td></tr>
+        <tr><td class="n">0x05</td><td class="n">0</td><td class="n">90</td><td>Speed criterion write — no-op</td></tr>
+        <tr class="hi"><td class="n">0x02</td><td class="n">—</td><td class="n"><strong>0</strong></td><td><strong>Format change — never occurred</strong></td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="call correct">
+      <span class="k">Correction</span>
+      <p>200 enable/disable pairs, and the exported track breaks into 79 segments at a
+        300-second gap threshold. <strong>The segments are power cycles</strong> — not format
+        changes, not signal loss. Earlier speculation that mid-log format changes explained
+        them is ruled out by the census: type <code>0x02</code> never appears.</p>
+    </div>
+
+    <h4>10.5 — Circular buffer</h4>
+    <p>In <code>OVERLAP</code> mode the log wraps and overwrites the oldest sectors, and the
+      write pointer jumps backwards. Two consequences:</p>
+    <ol>
+      <li><strong>Always download the entire flash</strong>, never up to the write pointer.
+        Everything before the wrap is otherwise silently lost.</li>
+      <li><strong>Detect wrap from sector-header timestamps</strong>, not from the pointer,
+        since the reported pointer and size are both untrustworthy (§ 9.1).</li>
+    </ol>
+    <p>This dump has <strong>not</strong> wrapped: 82 written sectors, sector 82 unwritten,
+      timestamps monotonic across all 126,613 fixes with zero backward steps. That is a
+      current state, not a guarantee.</p>
+  </section>
+
+  <section>
+    <h3><span class="num">§ 11</span>What is logged, and what the export threw away</h3>
+    <p>The GPX export carried time, latitude, longitude and elevation. The flash also
+      holds three more fields.</p>
+
+    <h4>11.1 — The three discarded fields</h4>
+    <ul>
+      <li><strong>VALID</strong> — fix quality. The single most useful field in the record,
+        and the one that answered the barometric question (§ 6.3). Dropped entirely.</li>
+      <li><strong>RCR</strong> — reason for recording. 1,419 records carry <code>BUTTON</code>,
+        meaning the user physically pressed the mark button. These are waypoints and should
+        never be flattened into the track.</li>
+      <li><strong>SPEED</strong> — Doppler velocity (§ 07). Usable, with the
+        instantaneous-sampling caveat.</li>
+    </ul>
+
+    <h4>11.2 — DISTANCE is broken</h4>
+    <p>The <code>DISTANCE</code> field is an odometer, and it does not work:</p>
+    <ul>
+      <li><strong>Not monotonic</strong> — it resets on power cycle</li>
+      <li>Positive deltas sum to <strong>19,082 mi</strong> against an actual
+        <strong>1,042 mi</strong> — an 18× overcount, consistent with accumulating while
+        stationary</li>
+    </ul>
+    <p>Parse it and store it for fidelity. Never surface it as a trip distance. Compute
+      distance from positions instead.</p>
+
+    <h4>11.3 — What cannot be recovered</h4>
+    <p><code>NSAT</code>, <code>HDOP</code>, <code>VDOP</code> and <code>PDOP</code> are absent
+      from <code>0x000A003F</code> and therefore absent from every byte of existing flash.
+      They cannot be recovered from any dump — only obtained going forward, by
+      <strong>writing</strong> a new format register:</p>
+
+    <figure class="block"><pre>0x000A003F | NSAT | HDOP | VDOP  =  0x000A1C3F</pre></figure>
+
+    <p>That grows records from 42 to 48 bytes, a 14% cost in flash-hours. Worth noting: the
+      barometric question this data would have answered is <em>already settled</em> by
+      <code>VALID</code> (§ 6.3), so the case for paying that cost is weaker than it first
+      appears.</p>
+  </section>
+
+  <section>
+    <h3><span class="num">§ 12</span>Talking to it: the PMTK protocol</h3>
+    <p>Commands are NMEA-0183 sentences: <code>$</code>, payload, <code>*</code>, then a
+      two-hex-digit XOR checksum of everything between <code>$</code> and <code>*</code>,
+      then CRLF.</p>
+
+    <figure class="block"><pre>$PMTK182,2,2*39\r\n
+ └──────────┘ └┘
+   payload    XOR of payload bytes</pre></figure>
+
+    <div class="tw"><table>
+      <thead><tr><th>Command</th><th>Purpose</th><th>Response</th></tr></thead>
+      <tbody>
+        <tr><td class="n">$PMTK605</td><td>Firmware release</td><td class="n">PMTK705,...</td></tr>
+        <tr><td class="n">$PMTK182,2,2</td><td>Query format register</td><td class="n">PMTK182,3,2,&lt;hex&gt;</td></tr>
+        <tr><td class="n">$PMTK182,2,7</td><td>Query log status</td><td class="n">PMTK182,3,7,&lt;status&gt;</td></tr>
+        <tr><td class="n">$PMTK182,2,9</td><td>Query flash size</td><td><strong>unreliable here</strong></td></tr>
+        <tr><td class="n">$PMTK182,7,&lt;addr&gt;,&lt;len&gt;</td><td>Read log block</td><td class="n">$PMTK182,8,&lt;addr&gt;,&lt;hex&gt;</td></tr>
+        <tr><td class="n">$PMTK182,1,&lt;id&gt;,&lt;val&gt;</td><td>Set config field</td><td class="n">PMTK001,182,1,3</td></tr>
+        <tr><td class="n">$PMTK182,4 / ,5</td><td>Enable / disable logging</td><td class="n">PMTK001,182,4,3</td></tr>
+        <tr class="hi"><td class="n">$PMTK182,6,1</td><td><strong>Erase flash</strong></td><td>irreversible</td></tr>
+        <tr><td class="n">$PMTK704</td><td>—</td><td><strong>unsupported, do not send</strong></td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Practical notes, each of which costs an afternoon if missed:</p>
+    <ul>
+      <li><strong>Read length must be even.</strong> Odd lengths are rejected outright.</li>
+      <li><strong>Baud is 115200</strong> for this device. 38400 is the Holux M-241 case.</li>
+      <li>Data returns <strong>hex-encoded</strong>, so 5.4 MB of flash is ~10.8 MB on the
+        wire. At 115200 baud with protocol overhead that is <strong>20–25 minutes</strong>.</li>
+      <li>Block reads of <code>0x10000</code> are typical. <strong>Expect to retry</strong> —
+        the transport is a raw byte stream with no framing guarantees, and the reference
+        session shows a checksum error on the very first packet followed by a clean 5.4 MB
+        transfer. A single bad packet is normal; abort on repeated failure, not on one.</li>
+      <li>Erase takes seconds to tens of seconds and needs a far longer ack timeout than
+        normal commands.</li>
+    </ul>
+  </section>
+
+  <!-- ============ CLOSE ============ -->
+  <div class="close">
+    <span class="tag eyebrow" style="color:var(--accent)">§ 13 · Summary</span>
+    <h2 style="font-family:var(--display);font-size:clamp(22px,5vw,28px);letter-spacing:-.02em;margin:6px 0 16px;font-weight:700;">What changed once the flash was read directly</h2>
+
+    <p>Four conclusions changed when the raw flash was parsed instead of the GPX export.
+      All four errors share a single cause: <strong>the export was treated as the data.</strong></p>
+
+    <div class="tw"><table>
+      <thead><tr><th>Original claim</th><th>Revised</th></tr></thead>
+      <tbody>
+        <tr><td>30 × <code>ele == 150.0</code> sentinels, 1 × <code>lat 90/lon 0</code></td>
+            <td><strong>One</strong> bad record carrying all three. Latitude is
+              <code>89.9999999999996</code>, so <code>lat == 90.0</code> matches
+              <em>nothing</em>; <code>ele == 150.0</code> over-matches 16 genuine elevations
+              rounded by <code>%.1f</code></td></tr>
+        <tr><td>Elevation quantized to 0.10 m</td>
+            <td>Continuous at f32 precision; 98.9% of values distinct. The decimetres were
+              output formatting</td></tr>
+        <tr><td>V/H noise ratio 0.72 contradicts GPS theory</td>
+            <td>Timescale-dependent: 0.71 at 20 s measures the tracking filter, 1.14 over
+              30–90 min measures the error budget</td></tr>
+        <tr><td>Segment boundaries may be mid-log format changes</td>
+            <td>Zero format-change markers exist. 200 log enable/disable pairs — they are
+              power cycles</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="verdict">
+      <span class="k">And one question the original data could answer all along</span>
+      <p><strong>Is the vertical channel barometric?</strong> No. Losing SBAS degrades
+        vertical dispersion 7.5×; a pressure sensor would be unaffected. <code>HEIGHT</code>
+        is GNSS-derived. <code>VALID</code> held the answer, and the exporter discarded it.</p>
+    </div>
+  </div>
+
+</div>

@@ -123,6 +123,159 @@ class RoundTripTest {
         }
     }
 
+    /**
+     * Delivers at most [bytesPerRead] bytes per read, with a stall every
+     * [stallEvery] reads.
+     *
+     * Models the property that broke the first real Bluetooth download and that
+     * USB hid completely: a 64 KB block is sub-second over CDC-ACM and tens of
+     * seconds over RFCOMM, so any fixed per-block timeout that passes on one
+     * transport fails on the other.
+     */
+    private class ThrottledTransport(
+        private val inner: SimulatedLoggerTransport,
+        private val bytesPerRead: Int = 512,
+        private val stallEvery: Int = 12,
+    ) : ai.moonlite.btdroid.core.transport.Transport by inner {
+        private var reads = 0
+        override suspend fun read(dest: ByteArray, timeoutMillis: Long): Int {
+            reads++
+            if (reads % stallEvery == 0) return 0        // a beat of silence
+            val window = ByteArray(minOf(bytesPerRead, dest.size))
+            val n = inner.read(window, timeoutMillis)
+            if (n > 0) window.copyInto(dest, 0, 0, n)
+            return n
+        }
+    }
+
+    /** A clock that advances only when the transport is read. */
+    private class TickingClock(private val msPerTick: Long = 400) {
+        var now = 0L
+            private set
+        fun tick() { now += msPerTick }
+        fun read(): Long = now
+    }
+
+    @Test
+    fun `a slow link completes because the timeout is idle-based, not total`() = runBlocking {
+        // The real failure: a 64 KB block is sub-second over USB and tens of
+        // seconds over RFCOMM, so a fixed per-block budget that passes on one
+        // transport fails on the other.
+        //
+        // The clock advances 400 ms per transport read, so a block needing ~130
+        // reads takes ~52 s of simulated time -- far beyond the old fixed
+        // 10 s budget. It must still succeed, because every read makes
+        // progress and progress is what resets the idle timer.
+        val clock = TickingClock(msPerTick = 400)
+        val inner = SimulatedLoggerTransport(flash, chunkSize = 0x200)
+        val transport = object : ai.moonlite.btdroid.core.transport.Transport by inner {
+            override suspend fun read(dest: ByteArray, timeoutMillis: Long): Int {
+                clock.tick()
+                val window = ByteArray(minOf(512, dest.size))
+                val n = inner.read(window, timeoutMillis)
+                if (n > 0) window.copyInto(dest, 0, 0, n)
+                return n
+            }
+        }
+        transport.open()
+        val client = PmtkClient(transport, clock = clock::read)
+
+        val size = FlashDownloader.DEFAULT_BLOCK_SIZE
+        val block = client.readLogBlock(size, size, idleTimeoutMillis = 10_000)
+
+        assertTrue(
+            clock.now > 30_000,
+            "test did not actually simulate a slow link (only ${clock.now} ms elapsed)",
+        )
+        assertTrue(block.isComplete, "got ${block.filled}/$size over a slow link")
+        for (i in 0 until size) {
+            if (flash[size + i] != block.bytes[i]) {
+                throw AssertionError("byte mismatch at 0x%08X".format(size + i))
+            }
+        }
+    }
+
+    @Test
+    fun `a block abandoned mid-transfer does not contaminate the next one`() = runBlocking {
+        // Exactly the observed failure. Block 0 is cut short while the device
+        // is still sending; its late chunks are then sitting in the transport
+        // when block 1 is requested. Without resetStream they are parsed as
+        // block 1's data, land outside its window, and block 1 returns zero
+        // bytes -- which the downloader used to report as end of flash.
+        val inner = SimulatedLoggerTransport(flash, chunkSize = 0x200)
+        val size = FlashDownloader.DEFAULT_BLOCK_SIZE
+
+        // Count reads that actually carried data, so the stall lands inside the
+        // transfer rather than in the pre-request drain, and jump the clock far
+        // enough to trip the idle timeout while the device is still sending.
+        var dataReads = 0
+        var now = 0L
+        val transport = object : ai.moonlite.btdroid.core.transport.Transport by inner {
+            override suspend fun read(dest: ByteArray, timeoutMillis: Long): Int {
+                val window = ByteArray(minOf(512, dest.size))
+                val n = inner.read(window, timeoutMillis)
+                if (n > 0) {
+                    window.copyInto(dest, 0, 0, n)
+                    dataReads++
+                    if (dataReads == 40) now += 60_000
+                }
+                return n
+            }
+        }
+        transport.open()
+        val client = PmtkClient(transport, clock = { now })
+
+        val first = client.readLogBlock(0, size, idleTimeoutMillis = 10_000)
+        assertTrue(!first.isComplete, "block 0 should have been cut short by the stall")
+        assertTrue(first.filled > 0, "block 0 should have partial data")
+
+        // Now the next block, with the device's leftovers still queued.
+        val second = client.readLogBlock(size, size, idleTimeoutMillis = 10_000)
+        assertTrue(
+            second.filled > 0,
+            "block 1 came back empty -- stale chunks from block 0 were absorbed",
+        )
+        assertEquals(flash[size], second.bytes[0], "block 1 starts at the wrong data")
+    }
+
+    @Test
+    fun `a transport failure keeps the bytes already read`() = runBlocking {
+        // The regression that cost a real transfer: an exception mid-download
+        // propagated out, and the bytes already in hand went with it. On a link
+        // that manages 493 B/s, discarding a mostly-finished dump is the most
+        // expensive failure available.
+        val inner = SimulatedLoggerTransport(flash, chunkSize = 0x800)
+        val size = FlashDownloader.DEFAULT_BLOCK_SIZE
+        var blocksServed = 0
+
+        val transport = object : ai.moonlite.btdroid.core.transport.Transport by inner {
+            override suspend fun read(dest: ByteArray, timeoutMillis: Long): Int {
+                val n = inner.read(dest, timeoutMillis)
+                // Die abruptly once two blocks are through.
+                if (n > 0 && ++blocksServed > 140) throw java.io.IOException("link dropped")
+                return n
+            }
+        }
+        transport.open()
+        val downloader = FlashDownloader(PmtkClient(transport, defaultTimeoutMillis = 2_000))
+
+        val result = downloader.download()
+
+        assertTrue(result.failure != null, "failure should be reported, not swallowed")
+        assertTrue(!result.isComplete, "an interrupted download is not complete")
+        assertTrue(
+            result.image.isNotEmpty(),
+            "bytes read before the failure must survive it",
+        )
+        // And what survived is real data, resumable from a block boundary.
+        assertEquals(0, result.image.size % size)
+        for (i in result.image.indices) {
+            if (flash[i] != result.image[i]) {
+                throw AssertionError("kept bytes are corrupt at 0x%08X".format(i))
+            }
+        }
+    }
+
     @Test
     fun `resume offset must land on a block boundary`() {
         val downloader = FlashDownloader(client())

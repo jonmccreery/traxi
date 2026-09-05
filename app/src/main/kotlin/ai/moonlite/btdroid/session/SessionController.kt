@@ -153,9 +153,45 @@ class SessionController(
                     Bonding.Result.AlreadyBonded -> transcript.note("already bonded")
                 }
 
-                val t = BluetoothSppTransport(device)
-                t.open()
-                openWith(t, simulated = false)
+                try {
+                    val t = BluetoothSppTransport(device)
+                    t.open()
+                    openWith(t, simulated = false)
+                } catch (first: Exception) {
+                    // A connect failure on a device Android believes is bonded
+                    // is the signature of a stale link key: this logger uses
+                    // legacy pairing and forgets its key across a power cycle
+                    // while the phone keeps hers. Nothing prompts for a PIN
+                    // because nothing thinks pairing is needed. Clear the bond
+                    // and pair again, which restores the PIN exchange.
+                    if (!Bonding.looksStale(device)) throw first
+
+                    transcript.note(
+                        "connect failed while bonded; clearing a probably-stale " +
+                            "link key and re-pairing"
+                    )
+                    if (!Bonding.removeBond(device)) {
+                        throw IllegalStateException(
+                            "The pairing with this logger has gone stale, and it could " +
+                                "not be cleared automatically.\n\n" +
+                                "Forget \"${runCatching { device.name }.getOrNull() ?: address}\" " +
+                                "in Android's Bluetooth settings, then connect again and " +
+                                "enter ${Bonding.KNOWN_PIN}."
+                        )
+                    }
+
+                    // Give the stack time to settle into BOND_NONE.
+                    kotlinx.coroutines.delay(1_500)
+                    when (val again = Bonding.ensureBonded(context, device)) {
+                        is Bonding.Result.Failed ->
+                            throw IllegalStateException(again.reason)
+                        else -> transcript.note("re-paired; retrying connect")
+                    }
+
+                    val retry = BluetoothSppTransport(device)
+                    retry.open()
+                    openWith(retry, simulated = false)
+                }
             } catch (e: Exception) {
                 disconnectQuietly()
                 _connection.value = ConnectionState.Failed(explainConnectFailure(e, address))
@@ -309,12 +345,16 @@ class SessionController(
                     shouldContinue = { !cancelRequested },
                 )
 
-                val partial = !result.stoppedOnUnwritten
+                val partial = !result.isComplete
+                // Save unconditionally, including after a failure. The bytes
+                // are the whole point; the error is only how it ended.
                 dumps.save(target, result.image, partial = partial)
-                _message.value = if (partial) {
-                    "Stopped early — ${result.image.size / 1024} KB saved and resumable"
-                } else {
-                    "Downloaded ${result.image.size / 1024} KB to ${target.name}"
+                val kb = result.image.size / 1024
+                _message.value = when {
+                    result.failure != null ->
+                        "Interrupted after $kb KB — saved and resumable (${result.failure})"
+                    partial -> "Stopped early — $kb KB saved and resumable"
+                    else -> "Downloaded $kb KB to ${target.name}"
                 }
                 parse(target)
             } catch (e: Exception) {

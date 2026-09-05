@@ -179,18 +179,36 @@ class PmtkClient(
     suspend fun readLogBlock(
         address: Int,
         length: Int,
-        timeoutMillis: Long = 10_000,
+        idleTimeoutMillis: Long = 10_000,
+        overallTimeoutMillis: Long = 240_000,
     ): LogBlock {
+        // Discard anything left over from a previous request. Without this, a
+        // late chunk from an abandoned read is parsed as part of *this* block,
+        // its address lands outside the window, and the block comes back empty
+        // -- so a retry actively makes things worse instead of better.
+        resetStream()
+
         send(Pmtk.readLog(address, length))
 
         val out = ByteArray(length) { UNWRITTEN }
         val covered = BooleanArray(length)
         var filled = 0
-        val deadline = clock() + timeoutMillis
 
-        while (filled < length && clock() < deadline) {
+        // Idle timeout, not a total one. How long a block takes is a property
+        // of the transport, not of the protocol: USB delivers 64 KB in under a
+        // second while Bluetooth needs tens of seconds for the same bytes,
+        // hex-encoded, interleaved with NMEA. Waiting on *silence* rather than
+        // on a fixed budget works on both without either being tuned for.
+        var lastProgress = clock()
+        val hardDeadline = clock() + overallTimeoutMillis
+
+        while (filled < length && clock() < hardDeadline) {
+            val idleRemaining = idleTimeoutMillis - (clock() - lastProgress)
+            val budget = minOf(idleRemaining, hardDeadline - clock())
+            if (budget <= 0) break
+
             val sentence = try {
-                awaitSentence(deadline - clock()) { it.matches("PMTK182", "8") }
+                awaitSentence(budget) { it.matches("PMTK182", "8") }
             } catch (e: PmtkTimeoutException) {
                 break
             }
@@ -203,17 +221,40 @@ class PmtkClient(
             } ?: continue
 
             val offset = chunkAddress - address
+            var placed = 0
             for (i in bytes.indices) {
                 val target = offset + i
                 if (target in 0 until length && !covered[target]) {
                     out[target] = bytes[i]
                     covered[target] = true
                     filled++
+                    placed++
                 }
             }
+            // Only genuine progress resets the idle clock. A chunk belonging to
+            // some other block must not keep a stalled read alive.
+            if (placed > 0) lastProgress = clock()
         }
 
         return LogBlock(address, out, filled)
+    }
+
+    /**
+     * Drop buffered protocol state and any bytes still in flight.
+     *
+     * Called before each block request so that responses to an abandoned
+     * request cannot be mistaken for responses to this one.
+     */
+    suspend fun resetStream() {
+        queued.clear()
+        assembler.reset()
+        // Drain whatever the device is still sending. Bounded, because the
+        // device streams NMEA continuously and would otherwise never go quiet.
+        val until = clock() + DRAIN_MILLIS
+        while (clock() < until) {
+            if (transport.read(readBuffer, 20) <= 0) break
+        }
+        assembler.reset()
     }
 
     // ---------------- writes: never called while merely connecting ----------------
@@ -266,6 +307,9 @@ class PmtkClient(
          * above the ~15 sentences an 8 KB read can carry, so a batch is never
          * partially discarded.
          */
+        /** Upper bound on draining stale input before a block request. */
+        private const val DRAIN_MILLIS = 300L
+
         private const val MAX_QUEUED = 256
         const val UNWRITTEN: Byte = 0xFF.toByte()
 

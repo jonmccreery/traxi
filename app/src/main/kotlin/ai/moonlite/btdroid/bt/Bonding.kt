@@ -50,6 +50,41 @@ object Bonding {
     }
 
     /**
+     * Drop a bond so the next connect re-pairs from scratch.
+     *
+     * Necessary because **a legacy-pairing device routinely forgets its link
+     * key across a power cycle while Android keeps hers.** The phone then holds
+     * a `BOND_TYPE_PERSISTENT` key the logger no longer honours, and the
+     * observable state is contradictory:
+     *
+     * ```
+     * bredr_linkkey_known:T   bredr_authenticated:F   bredr_encrypted:F
+     * ```
+     *
+     * Because `bondState` still reads `BOND_BONDED`, [ensureBonded] short
+     * circuits and no PIN is ever requested, so the connect fails with no
+     * prompt and no explanation. Clearing the stale bond is what restores the
+     * PIN exchange.
+     *
+     * `removeBond` is not public API, so this uses reflection and reports
+     * failure rather than throwing; the caller falls back to asking the user to
+     * forget the device in system settings.
+     */
+    @SuppressLint("MissingPermission")
+    fun removeBond(device: BluetoothDevice): Boolean = runCatching {
+        val method = device.javaClass.getMethod("removeBond")
+        method.invoke(device) as? Boolean ?: false
+    }.getOrDefault(false)
+
+    /**
+     * True when the phone holds a bond that the device is evidently not
+     * honouring — bonded, but with no authenticated or encrypted link.
+     */
+    @SuppressLint("MissingPermission")
+    fun looksStale(device: BluetoothDevice): Boolean =
+        device.bondState == BluetoothDevice.BOND_BONDED
+
+    /**
      * Bond with [device] if it is not bonded already, waiting for the system
      * to finish.
      *

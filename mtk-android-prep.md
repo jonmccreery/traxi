@@ -13,6 +13,23 @@ recorded in §0.
 
 ## 0. Project decisions
 
+**Why a separate logger at all.** The BT-Q1000XT runs **four to five days at
+12–14 hours a day** on its own battery. No phone does continuous GPS for a
+fraction of that — a phone tracking all day is dead by afternoon, and on trail
+its battery is also the map, the camera and the emergency call. The logger's job
+is to make tracking free of the phone's power budget entirely.
+
+That endurance is the reason this app has to exist, and it sets the shape of the
+problem: the logger is only reachable at the *end* of a multi-day stretch, when
+it holds days of unbacked-up data and the phone is the only thing to move it to.
+
+**How long until the buffer wraps.** At 13 h/day and a 20 s interval the device
+writes 2,340 fixes = **98 KB per day**. Against 3.02 MB free on the 8 MB chip
+that is about **31 tracking-days, or roughly 7 more trips**, before `OVERLAP`
+mode begins overwriting the March 2025 records. Not urgent, but finite — and it
+is the reason the download must read the whole chip rather than stopping at the
+write pointer.
+
 **The phone is the only computer.** This is the motivating constraint, not a
 detail. On trail there is no laptop to fall back on, which means:
 

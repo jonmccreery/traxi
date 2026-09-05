@@ -27,6 +27,20 @@
         android:name="android.hardware.bluetooth"
         android:required="true" />
 
+    <!--
+      Required to call CompanionDeviceManager at all. Without this declaration
+      associate() throws IllegalStateException synchronously rather than
+      reporting through its failure callback, which crashes the app on the
+      first tap of "Pair a logger".
+
+      required="false" because pairing degrades gracefully: if CDM is
+      unavailable the app falls back to the list of already-bonded devices,
+      which is enough to reach a logger that was paired in system settings.
+    -->
+    <uses-feature
+        android:name="android.software.companion_device_setup"
+        android:required="false" />
+
     <application
         android:name=".BtdroidApplication"
         android:allowBackup="false"

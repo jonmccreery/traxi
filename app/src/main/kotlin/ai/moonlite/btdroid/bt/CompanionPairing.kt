@@ -100,32 +100,47 @@ class CompanionPairing(private val context: Context) {
             .setSingleDevice(false)
             .build()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            dm.associate(
-                request,
-                executor,
-                object : CompanionDeviceManager.Callback() {
-                    override fun onAssociationPending(intentSender: IntentSender) =
-                        onReady(intentSender)
+        // associate() can throw synchronously -- notably IllegalStateException
+        // when the companion_device_setup feature is not declared, and
+        // SecurityException if the association quota is exhausted. Those never
+        // reach the failure callback, so catching here is what keeps a pairing
+        // problem from taking the whole app down. The bonded-device list
+        // remains a usable path afterwards.
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                dm.associate(
+                    request,
+                    executor,
+                    object : CompanionDeviceManager.Callback() {
+                        override fun onAssociationPending(intentSender: IntentSender) =
+                            onReady(intentSender)
 
-                    override fun onAssociationCreated(
-                        association: android.companion.AssociationInfo,
-                    ) = Unit
+                        override fun onAssociationCreated(
+                            association: android.companion.AssociationInfo,
+                        ) = Unit
 
-                    override fun onFailure(error: CharSequence?) = onFailure(error)
-                },
-            )
-        } else {
-            @Suppress("DEPRECATION")
-            dm.associate(
-                request,
-                object : CompanionDeviceManager.Callback() {
-                    @Deprecated("Required below API 33")
-                    override fun onDeviceFound(intentSender: IntentSender) = onReady(intentSender)
+                        override fun onFailure(error: CharSequence?) = onFailure(error)
+                    },
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                dm.associate(
+                    request,
+                    object : CompanionDeviceManager.Callback() {
+                        @Deprecated("Required below API 33")
+                        override fun onDeviceFound(intentSender: IntentSender) =
+                            onReady(intentSender)
 
-                    override fun onFailure(error: CharSequence?) = onFailure(error)
-                },
-                null,
+                        override fun onFailure(error: CharSequence?) = onFailure(error)
+                    },
+                    null,
+                )
+            }
+        } catch (e: Exception) {
+            onFailure(
+                "Device chooser unavailable (${e.javaClass.simpleName}). " +
+                    "Pair the logger in Android's Bluetooth settings, then pick it " +
+                    "from Known devices."
             )
         }
     }

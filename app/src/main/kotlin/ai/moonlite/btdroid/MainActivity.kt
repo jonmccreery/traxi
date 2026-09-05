@@ -99,7 +99,6 @@ class MainActivity : ComponentActivity() {
                 chooseDevice.launch(IntentSenderRequest.Builder(sender).build())
             },
             onFailure = { error ->
-                container.session.let { /* surfaced through the session message flow */ }
                 runOnUiThread {
                     android.widget.Toast.makeText(
                         this,

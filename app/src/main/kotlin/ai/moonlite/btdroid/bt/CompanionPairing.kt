@@ -11,7 +11,6 @@ import android.content.Context
 import android.content.IntentSender
 import android.os.Build
 import java.util.concurrent.Executor
-import java.util.regex.Pattern
 
 /**
  * Pairing via Companion Device Manager.
@@ -88,12 +87,17 @@ class CompanionPairing(private val context: Context) {
             return
         }
 
-        val filter = BluetoothDeviceFilter.Builder()
-            // Match everything; loggers do not advertise a consistent name and
-            // an over-tight filter shows the user an empty chooser with no
-            // explanation.
-            .setNamePattern(Pattern.compile(".*"))
-            .build()
+        // A filter with no criteria matches every discovered device, including
+        // ones whose name has not resolved yet.
+        //
+        // This deliberately does NOT set a name pattern. `.*` looks like
+        // "match everything" but is stricter: a device is only tested against
+        // the pattern once it *has* a name, so anything discovered before its
+        // name resolves is filtered out. For a chooser whose whole job is to
+        // show the user what is nearby, silently dropping devices is the worst
+        // possible failure -- it is indistinguishable from the logger being
+        // switched off.
+        val filter = BluetoothDeviceFilter.Builder().build()
 
         val request = AssociationRequest.Builder()
             .addDeviceFilter(filter)

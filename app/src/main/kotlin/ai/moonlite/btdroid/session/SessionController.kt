@@ -303,6 +303,64 @@ class SessionController(
      * completion, cancellation, or error — because a partial dump is worth
      * strictly more than no dump, and is resumable.
      */
+    /**
+     * Extend an existing dump with whatever the logger has recorded since.
+     *
+     * The reason this exists: the Bluetooth link runs at 493 B/s, so re-reading
+     * the whole 5.4 MB chip takes about three hours, while a five-day trip adds
+     * only ~490 KB. Fetching the difference is the difference between a
+     * seventeen-minute wait and an afternoon.
+     *
+     * Writes a **new** dump rather than modifying [source]. The existing file is
+     * the only copy of that data until the new one is safely on disk, and a
+     * download that fails partway must not be able to damage it.
+     */
+    fun startIncrementalDownload(source: File, onFinished: () -> Unit = {}) {
+        val c = client ?: run { _message.value = "Not connected"; return }
+        if (downloadJob?.isActive == true) return
+
+        cancelRequested = false
+        downloadJob = scope.launch {
+            try {
+                val previous = dumps.read(source)
+                _download.value = DownloadState(
+                    running = true,
+                    bytesDownloaded = previous.size,
+                    resumedFrom = previous.size,
+                )
+
+                val target = dumps.newDumpFile()
+                val result = FlashDownloader(c).downloadIncremental(
+                    previous = previous,
+                    onProgress = { p ->
+                        _download.value = _download.value.copy(
+                            bytesDownloaded = p.bytesDownloaded,
+                            sectorsRead = p.sectorsRead,
+                            retries = p.retries,
+                        )
+                    },
+                    shouldContinue = { !cancelRequested },
+                )
+
+                dumps.save(target, result.image, partial = !result.isComplete)
+                val gained = result.image.size - previous.size
+                _message.value = when {
+                    result.failure != null ->
+                        "Interrupted — ${result.image.size / 1024} KB saved and resumable"
+                    gained > 0 -> "Added ${gained / 1024} KB of new tracking to ${target.name}"
+                    else -> "Already up to date — nothing new on the logger"
+                }
+                parse(target)
+            } catch (e: Exception) {
+                transcript.note("incremental download failed: ${e.message}")
+                _message.value = "Update failed: ${e.message}"
+            } finally {
+                _download.value = _download.value.copy(running = false)
+                onFinished()
+            }
+        }
+    }
+
     fun startDownload(resumeFile: File? = null, onFinished: () -> Unit = {}) {
         val c = client ?: run {
             _message.value = "Not connected"

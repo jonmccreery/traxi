@@ -239,6 +239,88 @@ class RoundTripTest {
     }
 
     @Test
+    fun `an unwrapped log is extended, not re-read`() = runBlocking {
+        val size = FlashDownloader.DEFAULT_BLOCK_SIZE
+        // Stand in for a dump taken before the last few days of tracking.
+        val previous = flash.copyOf(40 * size)
+
+        val downloader = FlashDownloader(client())
+        val plan = downloader.planIncremental(previous)
+
+        assertTrue(plan is FlashDownloader.Plan.Extend, "expected an extend plan, got $plan")
+        // Re-reads only the final block, whose sector was mid-write last time.
+        assertEquals(39 * size, (plan as FlashDownloader.Plan.Extend).fromOffset)
+    }
+
+    @Test
+    fun `extending produces the same image as a full download`() = runBlocking {
+        val size = FlashDownloader.DEFAULT_BLOCK_SIZE
+        val previous = flash.copyOf(40 * size)
+
+        val extended = FlashDownloader(client()).downloadIncremental(previous)
+        val full = FlashDownloader(client()).download()
+
+        assertEquals(full.image.size, extended.image.size)
+        assertTrue(full.image.contentEquals(extended.image), "extended image differs")
+        assertEquals(EXPECTED_FIXES, MtkLogParser.parse(extended.image, GpsRollover.AXN_130B).fixes.size)
+    }
+
+    @Test
+    fun `a wrapped log forces a full re-read instead of a corrupt append`() = runBlocking {
+        val size = FlashDownloader.DEFAULT_BLOCK_SIZE
+        // A previous dump whose oldest records no longer match the chip: exactly
+        // what a wrap looks like, since OVERLAP mode overwrites the start first.
+        val stale = flash.copyOf(40 * size)
+        for (i in 0 until 64) {
+            stale[FlashDownloader.PROBE_OFFSET + i] = (stale[FlashDownloader.PROBE_OFFSET + i] + 1).toByte()
+        }
+
+        val downloader = FlashDownloader(client())
+        val plan = downloader.planIncremental(stale)
+
+        assertTrue(
+            plan is FlashDownloader.Plan.FullRequired,
+            "a wrapped log must not be appended to; got $plan",
+        )
+
+        // And the fallback yields a correct image rather than a spliced one.
+        val result = FlashDownloader(client()).downloadIncremental(stale)
+        for (i in 0 until FLASH_BYTES) {
+            if (flash[i] != result.image[i]) {
+                throw AssertionError("fallback image is corrupt at 0x%08X".format(i))
+            }
+        }
+    }
+
+    @Test
+    fun `a dump too small to extend falls back to a full read`() = runBlocking {
+        assertTrue(
+            FlashDownloader(client()).planIncremental(ByteArray(100))
+                is FlashDownloader.Plan.FullRequired,
+        )
+    }
+
+    @Test
+    fun `a misaligned dump is trimmed to whole blocks, not rejected`() = runBlocking {
+        // The reference mtkbabel image is exactly this shape: 82 blocks plus
+        // 2 KB. Refusing it would cost a three-hour re-read to recover 2 KB.
+        val size = FlashDownloader.DEFAULT_BLOCK_SIZE
+        val misaligned = flash.copyOf(40 * size + 2048)
+
+        val plan = FlashDownloader(client()).planIncremental(misaligned)
+        assertTrue(plan is FlashDownloader.Plan.Extend, "got $plan")
+        assertEquals(39 * size, (plan as FlashDownloader.Plan.Extend).fromOffset)
+
+        // And the result is still byte-correct, with the ragged tail re-read.
+        val result = FlashDownloader(client()).downloadIncremental(misaligned)
+        for (i in 0 until FLASH_BYTES) {
+            if (flash[i] != result.image[i]) {
+                throw AssertionError("misaligned extend corrupt at 0x%08X".format(i))
+            }
+        }
+    }
+
+    @Test
     fun `a transport failure keeps the bytes already read`() = runBlocking {
         // The regression that cost a real transfer: an exception mid-download
         // propagated out, and the bytes already in hand went with it. On a link

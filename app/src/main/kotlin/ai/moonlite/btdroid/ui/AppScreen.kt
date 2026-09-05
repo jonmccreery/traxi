@@ -390,6 +390,12 @@ private fun DumpsTab(
                 onClick = { DownloadService.start(context) },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Download flash") }
+            Text(
+                "If you already have a dump, \"Fetch new\" below is far quicker — it " +
+                    "reads only what the logger has recorded since, after checking the " +
+                    "log has not wrapped.",
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 
@@ -430,6 +436,11 @@ private fun DumpRow(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (!dump.isPartial && connection is ConnectionState.Connected) {
+                TextButton({ DownloadService.startIncremental(context, dump.file) }) {
+                    Text("Fetch new")
+                }
+            }
             TextButton({ container.session.parse(dump.file) }) { Text("Parse") }
             TextButton({
                 scope.launch { exportGpx(context, container, dump) }

@@ -63,6 +63,90 @@ class FlashDownloader(
         override fun hashCode(): Int = image.contentHashCode() * 31 + sectorsRead
     }
 
+    /** Whether a previous dump can be extended, or must be re-read in full. */
+    sealed interface Plan {
+        /** Re-read from [fromOffset]; everything before it is already correct. */
+        data class Extend(val fromOffset: Int, val previousBytes: Int) : Plan {
+            val bytesToSkip: Int get() = fromOffset
+        }
+
+        data class FullRequired(val reason: String) : Plan
+    }
+
+    /**
+     * Decide whether [previous] can be extended instead of re-downloaded.
+     *
+     * This is what makes Bluetooth usable on this hardware. The link runs at
+     * 493 B/s, so a full 5.4 MB image takes about three hours — but the log is
+     * append-only until it wraps, and a trip adds roughly 98 KB per day. Fetching
+     * only what is new turns a three-hour transfer into a few minutes.
+     *
+     * **The wrap check is the whole safety argument.** In `OVERLAP` mode a full
+     * log overwrites its oldest sectors first, so if the flash has wrapped, the
+     * bytes a previous dump holds are no longer the bytes on the chip and
+     * appending to it would produce a corrupt image that still parses. The probe
+     * therefore reads real records from the very start of the log — the first
+     * data to be overwritten — and compares them against what the previous dump
+     * says should be there.
+     *
+     * The probe deliberately reads records rather than the sector header: two
+     * headers look nearly identical whether or not a wrap happened, whereas
+     * records carry timestamps and positions that cannot coincide. It reads
+     * [PROBE_LENGTH] bytes, about a second on the slow link, against the two
+     * minutes a full sector would cost.
+     */
+    suspend fun planIncremental(previous: ByteArray): Plan {
+        // Trim to the last whole block rather than refusing. Dumps made by other
+        // tools are not block-aligned -- the reference mtkbabel image is 82
+        // blocks plus 2 KB -- and rejecting those would force a three-hour
+        // re-read to recover two kilobytes.
+        val usable = (previous.size / blockSize) * blockSize
+        if (usable < 2 * blockSize) {
+            return Plan.FullRequired("no previous dump worth extending")
+        }
+
+        val probe = client.readLogBlock(PROBE_OFFSET, PROBE_LENGTH)
+        if (!probe.isComplete) {
+            return Plan.FullRequired("could not read the flash to check for a wrap")
+        }
+
+        for (i in 0 until PROBE_LENGTH) {
+            if (probe.bytes[i] != previous[PROBE_OFFSET + i]) {
+                client.transcript.note(
+                    "wrap probe differs at 0x%08X; the log has wrapped or been erased"
+                        .format(PROBE_OFFSET + i)
+                )
+                return Plan.FullRequired("the log has wrapped since that dump")
+            }
+        }
+
+        // Re-read the final whole block. It held the sector that was mid-write,
+        // whose record count was 0xFFFF and whose tail has since gained records.
+        val from = usable - blockSize
+        client.transcript.note(
+            "wrap probe matches; extending from 0x%08X".format(from)
+        )
+        return Plan.Extend(from, usable)
+    }
+
+    /**
+     * Extend [previous] with whatever the device has added since.
+     *
+     * Falls back to a full download when [planIncremental] says the log wrapped,
+     * because an extended image would otherwise silently mix two eras of data.
+     */
+    suspend fun downloadIncremental(
+        previous: ByteArray,
+        onProgress: (Progress) -> Unit = {},
+        shouldContinue: () -> Boolean = { true },
+    ): Result = when (val plan = planIncremental(previous)) {
+        is Plan.Extend -> download(previous, plan.fromOffset, onProgress, shouldContinue)
+        is Plan.FullRequired -> {
+            client.transcript.note("full download required: ${plan.reason}")
+            download(ByteArray(0), 0, onProgress, shouldContinue)
+        }
+    }
+
     /**
      * Read the flash from [resumeFrom] onward, appending to [existing].
      *
@@ -191,5 +275,15 @@ class FlashDownloader(
          * Cheap insurance against abandoning a 25-minute transfer.
          */
         const val ATTEMPTS_PER_BLOCK = 3
+
+        /**
+         * Where the wrap probe reads: the first records of the log, just past
+         * sector 0's 512-byte header. These are the oldest data on the chip and
+         * therefore the first to be overwritten when the buffer wraps.
+         */
+        const val PROBE_OFFSET = SectorHeader.SIZE
+
+        /** Probe size. Even, as the protocol requires, and ~1 s on the slow link. */
+        const val PROBE_LENGTH = 512
     }
 }

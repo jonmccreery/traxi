@@ -50,6 +50,7 @@ class DownloadService : Service() {
         startForegroundCompat(buildNotification("Starting…", 0, indeterminate = true))
 
         val resumePath = intent?.getStringExtra(EXTRA_RESUME_PATH)
+        val extendPath = intent?.getStringExtra(EXTRA_EXTEND_PATH)
         val session = container().session
 
         scope.launch {
@@ -68,10 +69,14 @@ class DownloadService : Service() {
                 }
             }
 
-            session.startDownload(
-                resumeFile = resumePath?.let(::File),
-                onFinished = { stopSelf() },
-            )
+            if (extendPath != null) {
+                session.startIncrementalDownload(File(extendPath)) { stopSelf() }
+            } else {
+                session.startDownload(
+                    resumeFile = resumePath?.let(::File),
+                    onFinished = { stopSelf() },
+                )
+            }
         }
 
         return START_NOT_STICKY
@@ -131,12 +136,21 @@ class DownloadService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val ACTION_CANCEL = "ai.moonlite.btdroid.CANCEL_DOWNLOAD"
         private const val EXTRA_RESUME_PATH = "resume_path"
+        private const val EXTRA_EXTEND_PATH = "extend_path"
 
         fun start(context: Context, resumeFile: File? = null) {
             val intent = Intent(context, DownloadService::class.java).apply {
                 resumeFile?.let { putExtra(EXTRA_RESUME_PATH, it.path) }
             }
             context.startForegroundService(intent)
+        }
+
+        /** Fetch only what the logger has added since [source] was taken. */
+        fun startIncremental(context: Context, source: File) {
+            context.startForegroundService(
+                Intent(context, DownloadService::class.java)
+                    .putExtra(EXTRA_EXTEND_PATH, source.path)
+            )
         }
     }
 }

@@ -114,6 +114,8 @@ class SessionController(
     private var client: PmtkClient? = null
     private var downloadJob: Job? = null
     private var cancelRequested = false
+    private var connectedAddress: String? = null
+    private var linkWatcher: android.content.BroadcastReceiver? = null
 
     /** Set when the session is a simulation, so the UI can say so plainly. */
     var isSimulated: Boolean = false
@@ -237,6 +239,11 @@ class SessionController(
         val flash = c.queryFlashId()
         val pointer = c.queryWritePointer()
 
+        if (!simulated) {
+            connectedAddress = t.description.substringAfterLast(' ')
+            connectedAddress?.let { watchLink(it) }
+        }
+
         _connection.value = ConnectionState.Connected(
             DeviceInfo(
                 transportDescription = t.description,
@@ -261,7 +268,67 @@ class SessionController(
         }
     }
 
+    /**
+     * Notice when the logger goes away on its own.
+     *
+     * Without this the app reports "Connected" indefinitely after the link
+     * dies -- the state only ever changed when the user tapped Disconnect. A
+     * radio link drops for ordinary reasons: walking out of range, the logger
+     * switching off, its battery going flat. Showing a live connection that
+     * does not exist is worse than showing none, because every subsequent
+     * action fails for reasons that look unrelated to the real cause.
+     *
+     * ACL disconnect is a system broadcast, so it arrives promptly rather than
+     * being discovered on the next failed read.
+     */
+    private fun watchLink(address: String) {
+        stopWatchingLink()
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(ctx: android.content.Context?, intent: android.content.Intent?) {
+                if (intent?.action != android.bluetooth.BluetoothDevice.ACTION_ACL_DISCONNECTED) return
+                val device: android.bluetooth.BluetoothDevice? =
+                    intent.getParcelableExtra(android.bluetooth.BluetoothDevice.EXTRA_DEVICE)
+                if (!address.equals(device?.address, ignoreCase = true)) return
+                onLinkLost("The logger disconnected. It may be out of range, switched off, or flat.")
+            }
+        }
+        context.registerReceiver(
+            receiver,
+            android.content.IntentFilter(
+                android.bluetooth.BluetoothDevice.ACTION_ACL_DISCONNECTED
+            ),
+        )
+        linkWatcher = receiver
+    }
+
+    private fun stopWatchingLink() {
+        linkWatcher?.let { runCatching { context.unregisterReceiver(it) } }
+        linkWatcher = null
+    }
+
+    /** Tear the session down and say so, from wherever the loss was noticed. */
+    private fun onLinkLost(reason: String) {
+        if (_connection.value !is ConnectionState.Connected) return
+        transcript.note("link lost: $reason")
+        cancelRequested = true
+        disconnectQuietly()
+        _connection.value = ConnectionState.Failed(reason)
+        _message.value = reason
+    }
+
+    /**
+     * Called after any operation fails. A transport that is no longer open
+     * means the session is gone, whatever the immediate error said.
+     */
+    private fun noticeIfLinkDied() {
+        if (transport?.isOpen == false) {
+            onLinkLost("The connection to the logger was lost.")
+        }
+    }
+
     private fun disconnectQuietly() {
+        stopWatchingLink()
+        connectedAddress = null
         runCatching { transport?.close() }
         transport = null
         client = null
@@ -359,10 +426,12 @@ class SessionController(
                     gained > 0 -> "Added ${gained / 1024} KB of new tracking to ${target.name}"
                     else -> "Already up to date — nothing new on the logger"
                 }
+                if (result.failure != null) noticeIfLinkDied()
                 parse(target)
             } catch (e: Exception) {
                 transcript.note("incremental download failed: ${e.message}")
                 _message.value = "Update failed: ${e.message}"
+                noticeIfLinkDied()
             } finally {
                 _download.value = _download.value.copy(running = false)
                 onFinished()
@@ -429,10 +498,12 @@ class SessionController(
                     partial -> "Stopped early — $kb KB saved and resumable"
                     else -> "Downloaded $kb KB to ${target.name}"
                 }
+                if (result.failure != null) noticeIfLinkDied()
                 parse(target)
             } catch (e: Exception) {
                 transcript.note("download failed: ${e.message}")
                 _message.value = "Download failed: ${e.message}"
+                noticeIfLinkDied()
             } finally {
                 _download.value = _download.value.copy(running = false)
                 onFinished()

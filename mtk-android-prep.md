@@ -494,16 +494,38 @@ ui/                 Compose: connect, status, download, config, export
 |---|---|---|---|
 | 0 | Answer §2. Port `mtkparse.py`. | No | **done** |
 | 1 | `RecordParser` + `SectorHeader`, golden-file test | No | **done** |
-| 2 | Transport + `PmtkClient`, **read-only** | Yes | **done** (simulated) |
-| 3 | Full-flash download to `.bin`, progress + resume | Yes | **done** (simulated) |
+| 2 | Transport + `PmtkClient`, **read-only** | Yes | **done — verified on hardware** |
+| 3 | Full-flash download to `.bin`, progress + resume | Yes | **done** (simulated; USB-verified on desktop) |
 | 4 | Export pipeline, then UI | No | **done** |
 | 5 | Config writes: interval, format mask, enable/disable | Yes | **done** (simulated) |
 | 6 | ~~Erase~~ | — | **out of scope** |
 
 "Simulated" means implemented and passing against `SimulatedLoggerTransport`,
-which serves the real flash image over the real PMTK protocol. Everything below
-the RFCOMM socket is verified; **the socket itself is the only untested piece**
-and needs the logger powered on.
+which serves the real flash image over the real PMTK protocol.
+
+**The RFCOMM socket is no longer the untested piece.** On 2026-09-05 the app
+connected to the logger over Bluetooth from the phone and read its identity and
+configuration: `BT-Q1000XT`, firmware `AXN_1.30-B_1.3_C01`, format `0x000A003F`,
+20.0 s interval, `EON 8 MB`, 5,246 KB written. Pairing, bonding, the socket,
+PMTK framing, ack matching, the JEDEC decode and the write pointer all worked
+against real hardware.
+
+### Getting connected over Bluetooth
+
+Four things had to be true at once, and each failed in a way that looked like
+the others:
+
+1. The logger must be **powered on**. It does not advertise otherwise, and an
+   absent device looks identical to a broken app.
+2. The app must declare `android.software.companion_device_setup`, or
+   `associate()` throws synchronously and kills the process.
+3. The device must be **bonded** before an RFCOMM socket will open. It uses
+   **legacy PIN pairing** (`LegacyPairing: yes`), not Secure Simple Pairing.
+4. The PIN is **`0000`**. `1111` is rejected with a bare `AuthenticationFailed`,
+   indistinguishable from being out of range.
+
+Its Bluetooth identity: `Qstarz 1000XT`, `00:1C:88:22:15:98`, SPP `0x1101` on
+RFCOMM channel 1.
 
 ### Phase 1 result
 

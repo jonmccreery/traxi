@@ -66,9 +66,22 @@ object Pmtk {
         LOG_STATUS(7),
 
         /**
-         * Flash size. **Unreliable on this firmware** — the reference session
-         * had to force it via an environment override. Never size a download
-         * from this.
+         * Next write address, in bytes.
+         *
+         * Despite mtkbabel presenting field 8 as a record count, the device
+         * returns a byte offset: it answered `0051F3C2` (5,370,818) against a
+         * flash whose written region measures 5.37 MB. The "247,133 records"
+         * in the reference session was not this value.
+         *
+         * Useful as a **progress hint**, never as a bound. In OVERLAP mode
+         * everything before a wrap sits after this pointer, so sizing a
+         * download from it silently discards the oldest data.
+         */
+        WRITE_POINTER(8),
+
+        /**
+         * Flash identity. Returns a JEDEC RDID, not a byte count -- see
+         * [FlashId]. Previously believed broken because nothing decoded it.
          */
         FLASH_SIZE(9),
     }
@@ -94,8 +107,81 @@ object Pmtk {
         }
     }
 
+    /**
+     * Decoded response to the flash-size query, `PMTK182,3,9`.
+     *
+     * This query was previously written off as broken: mtkbabel reported it as
+     * failing, and the reference session had to force a size through an
+     * environment override. It is not broken -- it returns a **JEDEC RDID**
+     * (`0x9F`) flash identifier, which nothing in the toolchain was decoding.
+     *
+     * The observed value `1C70171C` decodes as manufacturer `0x1C` (EON Silicon
+     * Solution), memory type `0x70` (EN25QH series), capacity `0x17`. The
+     * capacity byte is a power of two by JEDEC convention, so `0x17` is
+     * 2^23 = 8 MB.
+     *
+     * That reading is self-checking: the write pointer sits at 5.37 MB, which
+     * 8 MB contains comfortably and 4 MB could not.
+     */
+    data class FlashId(val raw: String, val manufacturer: Int, val memoryType: Int, val capacityCode: Int) {
+
+        /** Capacity in bytes, or null if the code is outside a believable range. */
+        val bytes: Long?
+            get() = if (capacityCode in 16..31) 1L shl capacityCode else null
+
+        val manufacturerName: String
+            get() = when (manufacturer) {
+                0x1C -> "EON"
+                0xC2 -> "Macronix"
+                0xEF -> "Winbond"
+                0x20 -> "Micron/ST"
+                0x01 -> "Spansion"
+                0xBF -> "SST"
+                else -> "0x%02X".format(manufacturer)
+            }
+
+        fun describe(): String {
+            val size = bytes
+            return if (size != null) {
+                "$manufacturerName ${size / 1024 / 1024} MB (JEDEC %02X %02X %02X)"
+                    .format(manufacturer, memoryType, capacityCode)
+            } else {
+                "unrecognised flash id $raw"
+            }
+        }
+
+        companion object {
+            /**
+             * Parse the hex payload of `PMTK182,3,9`.
+             *
+             * The device returns four bytes where JEDEC RDID defines three; the
+             * trailing byte repeats the manufacturer. Only the first three are
+             * interpreted.
+             */
+            fun parse(hex: String): FlashId? {
+                val s = hex.trim()
+                if (s.length < 6) return null
+                val m = s.substring(0, 2).toIntOrNull(16) ?: return null
+                val t = s.substring(2, 4).toIntOrNull(16) ?: return null
+                val c = s.substring(4, 6).toIntOrNull(16) ?: return null
+                return FlashId(s, m, t, c)
+            }
+        }
+    }
+
     /** Parsed `PMTK705` firmware response. */
-    data class Firmware(val release: String, val modelId: String, val raw: String) {
+    data class Firmware(
+        val release: String,
+        val modelId: String,
+        /**
+         * Human-readable model, e.g. `BT-Q1000XT`. Present in field 3 of the
+         * response and previously discarded -- it identifies the hardware far
+         * more usefully than the numeric model id, which is `0008` on this
+         * device and tells nobody anything.
+         */
+        val modelName: String,
+        val raw: String,
+    ) {
         /**
          * True for firmware predating the 2019-04-06 GPS week rollover, which
          * reports timestamps 1024 weeks early. `AXN_1.30-B` is such a build.
@@ -109,6 +195,7 @@ object Pmtk {
                 return Firmware(
                     release = sentence[1].orEmpty(),
                     modelId = sentence[2].orEmpty(),
+                    modelName = sentence[3].orEmpty(),
                     raw = sentence.raw,
                 )
             }

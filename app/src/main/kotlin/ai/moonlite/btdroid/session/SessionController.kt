@@ -27,11 +27,29 @@ data class DeviceInfo(
     val transportDescription: String,
     val firmware: String,
     val modelId: String,
+    /** e.g. "BT-Q1000XT". Empty on firmware that omits it. */
+    val modelName: String,
     val logFormat: LogFormat,
     val timeIntervalSeconds: Double,
     val logStatus: String,
     val needsWeekRollover: Boolean,
-)
+    /** Decoded flash identity, or null if the device answered unrecognisably. */
+    val flash: Pmtk.FlashId?,
+    /** Next write address in bytes. A progress hint, never a download bound. */
+    val writePointer: Long?,
+) {
+    /** Best available name for the hardware. */
+    val displayModel: String
+        get() = modelName.ifBlank { "Model $modelId" }
+
+    /** Fraction of flash written, if both figures are known. */
+    val flashUsedFraction: Double?
+        get() {
+            val total = flash?.bytes ?: return null
+            val used = writePointer ?: return null
+            return if (total > 0) (used.toDouble() / total).coerceIn(0.0, 1.0) else null
+        }
+}
 
 data class DownloadState(
     val running: Boolean = false,
@@ -177,19 +195,24 @@ class SessionController(
         val firmware = c.queryFirmware()
         val format = c.queryLogFormat()
         val interval = c.queryTimeIntervalSeconds()
-        // Status is informational; a firmware that does not answer must not
-        // block a session that is otherwise perfectly usable.
+        // The rest are informational. A firmware that does not answer one of
+        // them must not block a session that is otherwise perfectly usable.
         val status = runCatching { c.queryLogStatus() }.getOrDefault("unavailable")
+        val flash = c.queryFlashId()
+        val pointer = c.queryWritePointer()
 
         _connection.value = ConnectionState.Connected(
             DeviceInfo(
                 transportDescription = t.description,
                 firmware = firmware.release,
                 modelId = firmware.modelId,
+                modelName = firmware.modelName,
                 logFormat = format,
                 timeIntervalSeconds = interval,
                 logStatus = status,
                 needsWeekRollover = firmware.needsWeekRollover,
+                flash = flash,
+                writePointer = pointer,
             )
         )
     }

@@ -28,7 +28,7 @@ detail. On trail there is no laptop to fall back on, which means:
 | Decision | Value | Rationale |
 |---|---|---|
 | Transport, v1 | **Bluetooth SPP** | Chosen despite being the harder path; USB is a later addition, not a prerequisite |
-| Transport, v2 | USB serial | Device has a USB port; `usb-serial-for-android` behind the same `Transport` interface |
+| Transport, v2 | USB serial | **Should be promoted — see §0.1** |
 | v1 scope | Dump + parse + view + export + **config writes** | Includes doc phase 5 |
 | Erase | **Out of scope** | Deferred indefinitely; see §8 |
 | minSdk | **31** (Android 12) | Target phone is API 36; no legacy permission branch needed |
@@ -37,6 +37,27 @@ detail. On trail there is no laptop to fall back on, which means:
 Config writes are in v1 for a specific reason beyond convenience: the current log
 format omits `NSAT`/`HDOP`/`VDOP`, and setting the format register is the only
 way to obtain them. See §1.3.
+
+### 0.1 USB now looks like the better primary transport
+
+The Bluetooth-first decision was made before anyone had talked to the device.
+Having now done so over USB, the evidence favours revisiting it:
+
+| | Bluetooth SPP | USB CDC-ACM |
+|---|---|---|
+| Full dump | 20–25 min (estimated) | **83.5 s, measured, 0 retries** |
+| Pairing | Bond required; first attempt timed out | None — one-time per-device intent |
+| Permissions | `BLUETOOTH_CONNECT` + `BLUETOOTH_SCAN` at runtime | Intent filter, no runtime dance |
+| Driver | `BluetoothSocket` | `CdcAcmSerialDriver`, **no bridge-chip quirks** |
+| Proven against hardware | Not yet | **Yes, end to end** |
+
+This does not retire Bluetooth — untethered download is genuinely useful, and
+the RFCOMM path is already written. But a 15× faster transport that needs no
+pairing is the better default for a phone at a trailhead, and it is the one that
+has actually moved bytes off this device.
+
+**Recommendation:** keep Bluetooth, add USB via OTG, and default to whichever is
+connected.
 
 ---
 
@@ -204,30 +225,74 @@ years in the past needs to be able to find and fix that on a phone.
 
 ## 2. Device identification — resolved
 
+Confirmed directly from the hardware over USB on 2026-09-05.
+
 | Question | Answer | Source |
 |---|---|---|
-| Firmware | `AXN_1.30-B_1.3_C01` | `$PMTK605` via `dump_v2.log` |
+| **Model** | **Qstarz BT-Q1000XT** | `$PMTK705` field 3; USB id `0e8d:3329` |
+| Firmware | `AXN_1.30-B_1.3_C01` | `$PMTK605` |
 | Model ID | `0008` | same |
-| Holux variant? | **No** | lat/lon parse cleanly as f64 doubles; the `holux245_init` f32 path is not needed |
-| Raw dump exists? | **Yes** | `data/cdt_v2.bin`, 126,613 fixes, 0 checksum failures |
-| `mtkparse.py` input | Raw flash binary | Ports near-directly to Kotlin |
-| Transport | Bluetooth SPP first, USB second | §0 |
+| Holux variant? | **No** | the `holux245_init` f32 path is not needed |
+| Flash | **EON, 8 MB** (JEDEC `1C 70 17`) | `$PMTK182,3,9`, decoded below |
+| Baud | 115200 | confirmed |
+| USB bridge chip | **None — native CDC-ACM** | `/dev/ttyACM0`, `usb-MTK_GPS_Receiver-if01` |
+| Raw dumps | `cdt_v2.bin`, `usb_2026-09-05.bin` | 126,613 fixes, 0 checksum failures |
 
-**Every device-reported quantity is untrustworthy.** This is the single most
-important operational finding, and it should shape how the app talks to the
-logger:
+### 2.1 The device is more truthful than the tooling was
 
-| Query | Device says | Reality |
+Revision 2 of this document claimed **"every device-reported quantity is
+untrustworthy."** That was too strong, and talking to the hardware directly
+disproved half of it. Two of the four supposed lies were tooling artifacts, not
+device faults:
+
+| Query | Previously believed | Actually |
 |---|---|---|
-| Number of records | 247,133 | 126,613 |
-| Flash size | *query failed* | had to be forced to 16 MB via `MTK_FLASH_BYTES` |
-| Memory health mask | all `FF` | not meaningfully reported |
-| `$PMTK704` | `packet_wait()` failed | unsupported |
+| `$PMTK182,2,9` flash size | *query fails* | **Works.** Returns a **JEDEC RDID**, not a byte count. `1C70171C` = manufacturer `0x1C` (EON), type `0x70`, capacity `0x17` → 2²³ = **8 MB**. Nothing in the toolchain decoded it, so it read as garbage |
+| `$PMTK182,2,8` record count | 247,133 vs 126,613 actual | **Not a record count.** Returns a **byte address**: `0051F3C2` = 5,370,818, the next write pointer. mtkbabel's label was wrong, not the device |
+| Memory health mask | all `FF` | still not meaningfully implemented |
+| `$PMTK704` | `packet_wait()` failed | still unsupported — do not send |
 
-Consequences for the app: never use the reported record count as a progress
-denominator or a parser assertion, and never trust a reported flash size. **Size
-the download empirically** by reading until sectors come back as `0xFF` fill, and
-detect wrap from sector-header timestamps rather than from a write pointer.
+The flash decode is self-checking: 8 MB comfortably contains the 5.37 MB
+written region, and 4 MB could not. The write-pointer reading is confirmed by
+arithmetic in §2.2.
+
+**What this does not change.** A download still must not be *sized* from the
+write pointer, and still must not *stop* there. In `OVERLAP` mode a wrapped log
+keeps its oldest records past the pointer, so stopping there silently discards
+them. The pointer is a **progress hint**; the empirical rule — stop after two
+consecutive unwritten blocks — remains the correct termination, and is correct
+in both buffer states.
+
+### 2.2 Two independent captures reconcile exactly
+
+`usb_2026-09-05.bin` was produced by this project's own block-read
+implementation over USB: 5,505,024 bytes in **83.5 s with zero retries**, about
+64 KB/s. Against mtkbabel's `cdt_v2.bin` from the previous day:
+
+- **Byte-identical** across all 5,370,658 bytes up to the earlier write pointer.
+- Both decode to **126,613 fixes, 0 checksum failures, 82 sectors**.
+- The sole difference is **10 dynamic markers = 160 bytes**, exactly the
+  write-pointer delta (`0x0051F322` → `0x0051F3C2`): five power-on cycles, each
+  emitting a no-op distance and speed criterion write. No new fixes, because
+  the device had no GPS lock indoors.
+- Everything past the new pointer is `0xFF`.
+
+Two implementations, two transports, one chip, every byte accounted for. Pinned
+by `UsbCaptureTest`.
+
+### 2.3 The rollover, observed live
+
+The device streams NMEA while in navigation mode, and it dates itself:
+
+```
+$GPRMC,165833.000,V,,,,,0.00,279.01,200107,,,N*4E
+                                     ^^^^^^ 20 Jan 2007
+```
+
+Captured on 2026-09-05. 2026-09-05 minus 1024 weeks is 2007-01-20 — exactly.
+The time of day is correct and only the date is wrong, which is the rollover
+signature: time-of-week is fine, the week number is not. This confirms
+[GpsRollover.AXN_130B] from a completely independent source to the flash data.
 
 ---
 

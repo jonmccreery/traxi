@@ -122,14 +122,44 @@ class PmtkCommandTest {
     }
 
     @Test
-    fun `firmware response identifies the rollover-affected build`() {
+    fun `firmware response identifies the rollover-affected build and the model`() {
+        // Verbatim from the real device over USB.
         val fw = Pmtk.Firmware.from(
-            Nmea.parse(Nmea.frame("PMTK705,AXN_1.30-B_1.3_C01,0008,,"))!!
+            Nmea.parse(Nmea.frame("PMTK705,AXN_1.30-B_1.3_C01,0008,BT-Q1000XT,1.0"))!!
         )
         assertNotNull(fw)
         assertEquals("AXN_1.30-B_1.3_C01", fw.release)
         assertEquals("0008", fw.modelId)
+        // Field 3 was previously discarded. "0008" identifies nothing;
+        // "BT-Q1000XT" identifies the hardware.
+        assertEquals("BT-Q1000XT", fw.modelName)
         assertTrue(fw.needsWeekRollover)
+    }
+
+    @Test
+    fun `flash id decodes as JEDEC rather than a byte count`() {
+        // The real device answers 1C70171C. Read as an integer this is
+        // 477 MB and obvious nonsense, which is why the query was written off
+        // as broken. It is a JEDEC RDID.
+        val id = Pmtk.FlashId.parse("1C70171C")
+        assertNotNull(id)
+        assertEquals(0x1C, id.manufacturer)
+        assertEquals(0x70, id.memoryType)
+        assertEquals(0x17, id.capacityCode)
+        assertEquals("EON", id.manufacturerName)
+        assertEquals(8L * 1024 * 1024, id.bytes)
+
+        // Self-check: the written region measures 5.37 MB, which 8 MB holds
+        // and 4 MB could not.
+        assertTrue(id.bytes!! > 5_376_000L)
+    }
+
+    @Test
+    fun `an unrecognisable flash id yields no size rather than a guess`() {
+        // A fabricated size is worse than none: a download sized from it
+        // truncates silently.
+        assertEquals(null, Pmtk.FlashId.parse("00000000")?.bytes)
+        assertEquals(null, Pmtk.FlashId.parse("ZZ")?.bytes)
     }
 
     @Test
@@ -169,18 +199,15 @@ class PmtkClientTest {
     }
 
     @Test
-    fun `a failing flash-size query times out rather than returning a wrong number`() =
-        runBlocking {
-            // The real device's flash-size query fails. It must surface as an
-            // error, never as a plausible-looking size that would truncate a
-            // download.
-            val transport = simulator().also { it.open() }
-            val client = PmtkClient(transport, defaultTimeoutMillis = 60, defaultRetries = 2)
-            assertFailsWith<PmtkTimeoutException> {
-                client.queryConfig(Pmtk.ConfigField.FLASH_SIZE)
-            }
-            Unit
-        }
+    fun `flash id and write pointer come back decoded`() = runBlocking {
+        val transport = simulator().also { it.open() }
+        val client = PmtkClient(transport)
+
+        assertEquals(8L * 1024 * 1024, client.queryFlashId()?.bytes)
+
+        // Field 8 is a byte address, not the record count mtkbabel labelled it.
+        assertEquals(0x0051F3C2L, client.queryWritePointer())
+    }
 
     @Test
     fun `unsupported PMTK704 times out rather than hanging forever`() = runBlocking {

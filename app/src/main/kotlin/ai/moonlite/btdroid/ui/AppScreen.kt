@@ -307,13 +307,28 @@ private fun DeviceButton(name: String?, address: String, onClick: () -> Unit) {
 @Composable
 private fun DeviceInfoCard(info: DeviceInfo, simulated: Boolean) {
     SectionCard(if (simulated) "Simulated logger" else "Logger") {
+        Text(info.displayModel, style = MaterialTheme.typography.titleLarge)
         Row2("Transport", info.transportDescription)
         Row2("Firmware", info.firmware)
-        Row2("Model ID", info.modelId)
         Row2("Log format", "0x%08X".format(info.logFormat.bits))
         Row2("Fields", info.logFormat.describe(), mono = true)
         Row2("Interval", "${info.timeIntervalSeconds} s")
         Row2("Status", info.logStatus)
+
+        info.flash?.let { Row2("Flash", it.describe()) }
+        info.writePointer?.let { Row2("Written", "${it / 1024} KB") }
+        info.flashUsedFraction?.let { fraction ->
+            LinearProgressIndicator(
+                progress = { fraction.toFloat() },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                "${(fraction * 100).toInt()}% of flash used. This is a hint only — " +
+                    "in overlap mode a full log wraps and overwrites the oldest data, " +
+                    "so a download always reads the whole chip.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
 
         if (info.needsWeekRollover) {
             HorizontalDivider()

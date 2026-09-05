@@ -359,21 +359,34 @@ date.
 | Log interval | 20.0 s, time-based | Sector headers, all 82 |
 | Fill mode | `OVERLAP` (circular) | Log status |
 
-### 9.1 Everything the device says about itself is wrong
+### 9.1 The device is more truthful than the tooling was
 
-This is the single most important operational fact about the hardware.
+An earlier draft of this document claimed "everything the device says about
+itself is wrong." Talking to the hardware directly disproved half of that. Two
+of the four apparent lies were **decoding failures in the tooling**, not faults
+in the device:
 
-| Query | Device reports | Reality |
+| Query | Believed | Actually |
 |---|---|---|
-| Number of records | 247,133 | **126,613** |
-| Flash size | *query fails* | had to be forced via `MTK_FLASH_BYTES` |
-| Memory health mask | all `FF` | not meaningfully implemented |
-| `$PMTK704` | `packet_wait()` timeout | unsupported by this firmware |
+| `$PMTK182,2,9` flash size | query fails | **Works.** Returns a **JEDEC RDID**, not a byte count. `1C70171C` = manufacturer `0x1C` (EON), type `0x70`, capacity `0x17` → 2²³ = **8 MB**. Nothing decoded it, so it read as garbage |
+| `$PMTK182,2,8` record count | 247,133 vs 126,613 actual | **Not a record count.** A **byte address**: `0051F3C2` = 5,370,818, the next write pointer. The label was wrong, not the device |
+| Memory health mask | all `FF` | still not meaningfully implemented |
+| `$PMTK704` | `packet_wait()` timeout | still unsupported — do not send |
 
-Only the **bytes on the flash** are trustworthy. Any client must size the
-download empirically — read until sectors come back as `0xFF` fill — rather than
-believing a reported size or record count, and must detect buffer wrap from
-sector-header timestamps rather than from a write pointer.
+The flash decode is self-checking: 8 MB holds the 5.37 MB written region, and
+4 MB could not.
+
+**What survives the correction.** A client still must not *size* a download from
+the write pointer, and must not *stop* there. In `OVERLAP` mode a wrapped log
+keeps its oldest records past the pointer, so stopping there silently discards
+them. The pointer is a progress hint; reading until sectors return `0xFF` fill
+remains the correct termination.
+
+The broader lesson is the one from §6.4 arriving from the other direction:
+**a value that looks like nonsense is often a value nobody decoded.** The GPX
+exporter manufactured phantom sentinels by rounding; the flash-size query looked
+broken because it was read as an integer instead of an identifier. Both times
+the data was fine and the reader was wrong.
 
 ## 10. Flash geography
 

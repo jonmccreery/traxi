@@ -145,6 +145,26 @@ class PmtkClient(
     suspend fun queryLogStatus(): String = queryConfig(Pmtk.ConfigField.LOG_STATUS)
 
     /**
+     * Flash identity, decoded from the JEDEC RDID the device returns.
+     *
+     * @return the decoded id, or null if the device answers with something
+     *   unrecognisable. Null rather than a guess: an invented flash size is
+     *   worse than none, because a download sized from it truncates silently.
+     */
+    suspend fun queryFlashId(): Pmtk.FlashId? =
+        runCatching { Pmtk.FlashId.parse(queryConfig(Pmtk.ConfigField.FLASH_SIZE)) }.getOrNull()
+
+    /**
+     * Next write address in bytes.
+     *
+     * A progress hint only. In OVERLAP mode data before a wrap lives past this
+     * pointer, so a download must never stop here.
+     */
+    suspend fun queryWritePointer(): Long? = runCatching {
+        queryConfig(Pmtk.ConfigField.WRITE_POINTER).trim().toLong(16)
+    }.getOrNull()
+
+    /**
      * Read [length] bytes of raw log at [address].
      *
      * The device answers with one or more `PMTK182,8,<addr>,<hex>` sentences

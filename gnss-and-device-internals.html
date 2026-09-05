@@ -363,9 +363,11 @@
     <h1>How This Thing Knows Where You Are</h1>
     <p class="standfirst">What the MTK GPS logger actually measures, how well it measures
       it, and how it writes the result to flash.</p>
-    <p class="provenance">Every figure attributed to "this device" was measured from
-      cdt_v2.bin — 126,613 fixes, 18 months, 5.4 MB of raw flash — not taken from a
-      datasheet. Where measurement contradicts the conventional figure, both are given.</p>
+    <p class="provenance">Every figure attributed to "this device" was measured from its
+      own flash — 126,613 fixes, 18 months, 5.4 MB — not taken from a datasheet. Two
+      independent captures agree byte for byte: one by mtkbabel, one by this project's
+      own reader over USB. Where measurement contradicts the conventional figure, both
+      are given.</p>
   </header>
 
   <div class="readout">
@@ -373,6 +375,8 @@
     <div><span class="n">0</span><span class="l">checksum fails</span></div>
     <div><span class="n">98.14%</span><span class="l">SBAS corrected</span></div>
     <div><span class="n">1.94 m</span><span class="l">σ vertical</span></div>
+    <div><span class="n">8 MB</span><span class="l">EON flash</span></div>
+    <div><span class="n">83.5 s</span><span class="l">USB full dump</span></div>
   </div>
 
   <!-- ============ PART I ============ -->
@@ -760,8 +764,13 @@
     <div class="tw"><table>
       <thead><tr><th>Property</th><th>Value</th><th>How known</th></tr></thead>
       <tbody>
+        <tr class="hi"><td><strong>Model</strong></td><td class="n">Qstarz BT-Q1000XT</td>
+          <td>$PMTK705 field 3; USB id 0e8d:3329</td></tr>
         <tr><td>Firmware</td><td class="n">AXN_1.30-B_1.3_C01</td><td>$PMTK605 response</td></tr>
         <tr><td>Model ID</td><td class="n">0008</td><td>same</td></tr>
+        <tr><td>Flash</td><td class="n">EON, 8 MB</td><td>JEDEC 1C 70 17, see § 9.1</td></tr>
+        <tr><td>USB bridge chip</td><td>none — native CDC-ACM</td>
+          <td>enumerates as usb-MTK_GPS_Receiver</td></tr>
         <tr><td>Chipset family</td><td>MediaTek MT3329 / MT3339 class</td><td>AXN firmware naming</td></tr>
         <tr><td>Coordinate width</td><td>f64 doubles</td><td>Parses cleanly — <strong>not</strong> the Holux f32 variant</td></tr>
         <tr><td>Record size</td><td class="n">42 bytes</td><td>Confirmed byte-exact</td></tr>
@@ -770,29 +779,55 @@
       </tbody>
     </table></div>
 
-    <h4>9.1 — Everything the device says about itself is wrong</h4>
-    <p>This is the single most important operational fact about the hardware.</p>
+    <h4>9.1 — The device is more truthful than the tooling was</h4>
+    <p>An earlier draft of this document claimed "everything the device says about itself
+      is wrong". Talking to the hardware directly disproved half of that. Two of the four
+      apparent lies were <strong>decoding failures in the tooling</strong>, not faults in
+      the device.</p>
 
     <div class="tw"><table>
-      <thead><tr><th>Query</th><th>Device reports</th><th>Reality</th></tr></thead>
+      <thead><tr><th>Query</th><th>Believed</th><th>Actually</th></tr></thead>
       <tbody>
-        <tr class="hi"><td>Number of records</td><td class="n">247,133</td><td class="n"><strong>126,613</strong></td></tr>
-        <tr><td>Flash size</td><td>query fails</td><td>forced via MTK_FLASH_BYTES</td></tr>
-        <tr><td>Memory health mask</td><td class="n">all FF</td><td>not meaningfully implemented</td></tr>
-        <tr><td>$PMTK704</td><td>packet_wait() timeout</td><td>unsupported by this firmware</td></tr>
+        <tr class="hi"><td class="n">$PMTK182,2,9<br>flash size</td><td>query fails</td>
+          <td><strong>Works.</strong> Returns a <strong>JEDEC RDID</strong>, not a byte
+            count. <code>1C70171C</code> = manufacturer <code>0x1C</code> (EON), type
+            <code>0x70</code>, capacity <code>0x17</code> → 2<sup>23</sup> =
+            <strong>8 MB</strong>. Nothing decoded it, so it read as garbage</td></tr>
+        <tr class="hi"><td class="n">$PMTK182,2,8<br>record count</td>
+          <td>247,133 vs 126,613 actual</td>
+          <td><strong>Not a record count.</strong> A <strong>byte address</strong>:
+            <code>0051F3C2</code> = 5,370,818, the next write pointer. The label was
+            wrong, not the device</td></tr>
+        <tr><td>Memory health mask</td><td class="n">all FF</td>
+          <td>still not meaningfully implemented</td></tr>
+        <tr><td class="n">$PMTK704</td><td>packet_wait() timeout</td>
+          <td>still unsupported — do not send</td></tr>
       </tbody>
     </table></div>
 
+    <p>The flash decode is self-checking: 8 MB holds the 5.37 MB written region, and 4 MB
+      could not.</p>
+
     <div class="call trap">
-      <span class="k">Consequence</span>
-      <p>Only the <strong>bytes on the flash</strong> are trustworthy. Size the download
-        empirically — read until sectors come back as <code>0xFF</code> fill — rather than
-        believing a reported size or record count. Detect buffer wrap from sector-header
-        timestamps, never from a write pointer.</p>
+      <span class="k">What survives the correction</span>
+      <p>A client still must not <em>size</em> a download from the write pointer, and must
+        not <em>stop</em> there. In <code>OVERLAP</code> mode a wrapped log keeps its
+        oldest records past the pointer, so stopping there silently discards them. The
+        pointer is a progress hint; reading until sectors return <code>0xFF</code> fill
+        remains the correct termination.</p>
+    </div>
+
+    <div class="call correct">
+      <span class="k">The pattern, again</span>
+      <p>This is the lesson from § 6.4 arriving from the other direction:
+        <strong>a value that looks like nonsense is often a value nobody decoded.</strong>
+        The GPX exporter manufactured phantom sentinels by rounding; the flash-size query
+        looked broken because it was read as an integer instead of an identifier. Both
+        times the data was fine and the reader was wrong.</p>
     </div>
   </section>
 
-  <section>
+<section>
     <h3><span class="num">§ 10</span>Flash geography</h3>
     <p>The log is a flat array of <strong>64 KiB (0x10000) sectors</strong>. Each is
       self-describing — a sector carries its own format register — so the log stays
@@ -1035,8 +1070,9 @@
     <span class="tag eyebrow" style="color:var(--accent)">§ 13 · Summary</span>
     <h2 style="font-family:var(--display);font-size:clamp(22px,5vw,28px);letter-spacing:-.02em;margin:6px 0 16px;font-weight:700;">What changed once the flash was read directly</h2>
 
-    <p>Four conclusions changed when the raw flash was parsed instead of the GPX export.
-      All four errors share a single cause: <strong>the export was treated as the data.</strong></p>
+    <p>Five conclusions changed once the raw flash was parsed instead of the GPX export,
+      and once the device was asked directly instead of through a tool. They share a
+      single cause: <strong>a derived reading was treated as the data.</strong></p>
 
     <div class="tw"><table>
       <thead><tr><th>Original claim</th><th>Revised</th></tr></thead>
@@ -1055,6 +1091,10 @@
         <tr><td>Segment boundaries may be mid-log format changes</td>
             <td>Zero format-change markers exist. 200 log enable/disable pairs — they are
               power cycles</td></tr>
+        <tr class="hi"><td>Every device-reported quantity is untrustworthy</td>
+            <td>Too strong. The flash-size query returns a JEDEC id and the "record
+              count" is a byte address — both were decoding failures in the tooling,
+              not faults in the device (§ 9.1)</td></tr>
       </tbody>
     </table></div>
 

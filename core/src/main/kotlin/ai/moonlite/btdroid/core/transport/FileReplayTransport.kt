@@ -59,8 +59,11 @@ class SimulatedLoggerTransport(
     private val logFormatHex: String = "000A003F",
     /** Bytes per `PMTK182,8` response chunk. The real device is not uniform. */
     private val chunkSize: Int = 0x400,
-    /** Report this many records, as the real device wrongly does. */
-    private val reportedRecordCount: Int = 247_133,
+    /** Next write address in bytes, as the real BT-Q1000XT reports it. */
+    private val writePointer: Int = 0x0051F3C2,
+    /** JEDEC RDID the real device returns: EON, EN25QH series, 8 MB. */
+    private val flashIdHex: String = "1C70171C",
+    private val modelName: String = "BT-Q1000XT",
     override val description: String = "simulated logger",
 ) : Transport {
 
@@ -142,7 +145,7 @@ class SimulatedLoggerTransport(
 
         when {
             f[0] == "PMTK605" ->
-                reply("PMTK705,$firmwareRelease,$modelId,,")
+                reply("PMTK705,$firmwareRelease,$modelId,$modelName,1.0")
 
             // Unsupported on this firmware: answer nothing, as the device does.
             f[0] == "PMTK704" -> Unit
@@ -154,10 +157,12 @@ class SimulatedLoggerTransport(
                     "4" -> reply("PMTK182,3,4,0")
                     "5" -> reply("PMTK182,3,5,0")
                     "6" -> reply("PMTK182,3,6,1")
-                    "7" -> reply("PMTK182,3,7,000100000000")
-                    "8" -> reply("PMTK182,3,8,$reportedRecordCount")
-                    // Flash size query fails on the real device. Stay silent.
-                    "9" -> Unit
+                    "7" -> reply("PMTK182,3,7,256")
+                    // A byte address, not a record count -- confirmed against
+                    // the real device.
+                    "8" -> reply("PMTK182,3,8,%08X".format(writePointer))
+                    // A JEDEC RDID, not a byte count. Long assumed broken.
+                    "9" -> reply("PMTK182,3,9,$flashIdHex")
                     else -> Unit
                 }
             }

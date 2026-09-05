@@ -23,9 +23,8 @@ dependencyResolutionManagement {
 rootProject.name = "btdroid"
 
 // Pure-JVM parser/protocol core. No Android dependencies, so the golden-file
-// test runs on the JVM without a device or emulator.
+// and round-trip tests run on the desktop without a device or emulator.
 include(":core")
 
-// Android app shell: transports, foreground service, Compose UI.
-// Enabled once phase 1 (parser + golden test) is green.
-// include(":app")
+// Android app shell: Bluetooth transport, foreground service, Compose UI.
+include(":app")

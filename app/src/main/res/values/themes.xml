@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The XML theme only paints the window before Compose takes over; all real
+      theming lives in ui/theme/Theme.kt. DayNight so the pre-draw background
+      does not flash white on a dark phone at night, which is when this app is
+      most likely to be opened.
+    -->
+    <style name="Theme.Btdroid" parent="android:Theme.DeviceDefault.DayNight">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+    </style>
+</resources>

@@ -429,11 +429,16 @@ ui/                 Compose: connect, status, download, config, export
 |---|---|---|---|
 | 0 | Answer §2. Port `mtkparse.py`. | No | **done** |
 | 1 | `RecordParser` + `SectorHeader`, golden-file test | No | **done** |
-| 2 | Transport + `PmtkClient`, **read-only** | Yes | next |
-| 3 | Full-flash download to `.bin`, progress + resume | Yes | |
-| 4 | Export pipeline, then UI | No | |
-| 5 | Config writes: interval, format mask, enable/disable | Yes | |
+| 2 | Transport + `PmtkClient`, **read-only** | Yes | **done** (simulated) |
+| 3 | Full-flash download to `.bin`, progress + resume | Yes | **done** (simulated) |
+| 4 | Export pipeline, then UI | No | **done** |
+| 5 | Config writes: interval, format mask, enable/disable | Yes | **done** (simulated) |
 | 6 | ~~Erase~~ | — | **out of scope** |
+
+"Simulated" means implemented and passing against `SimulatedLoggerTransport`,
+which serves the real flash image over the real PMTK protocol. Everything below
+the RFCOMM socket is verified; **the socket itself is the only untested piece**
+and needs the logger powered on.
 
 ### Phase 1 result
 
@@ -455,7 +460,25 @@ Build and run:
 
 ```
 ANDROID_HOME=$HOME/android-sdk ~/tools/gradle-8.11.1/bin/gradle :core:test
+ANDROID_HOME=$HOME/android-sdk ~/tools/gradle-8.11.1/bin/gradle :app:assembleDebug
 ```
+
+### Phases 2-5 result
+
+52 tests pass in `:core`, including a full round trip: a simulated logger serves
+`cdt_v2.bin` over PMTK, `FlashDownloader` pulls it back, and the parser
+reproduces 126,613 fixes. Resume from a partial transfer produces a
+byte-identical image.
+
+Verified on the target phone (SM-G990U1, API 36): the app installs, launches,
+and parses the real 5.4 MB image on-device to **126,613 fixes / 0 checksum
+failures / 82 sectors / 79 segments / 1,419 waypoints**.
+
+Two safety rails are enforced by test rather than by convention:
+
+- a read-only session provably sends no mutating command;
+- no erase payload exists anywhere in the command surface, asserted by
+  reflection so re-adding one breaks the build.
 
 ---
 

@@ -1,0 +1,359 @@
+package ai.moonlite.btdroid.session
+
+import ai.moonlite.btdroid.bt.BluetoothSppTransport
+import ai.moonlite.btdroid.bt.CompanionPairing
+import ai.moonlite.btdroid.core.format.GpsRollover
+import ai.moonlite.btdroid.core.format.LogFormat
+import ai.moonlite.btdroid.core.format.MtkLogParser
+import ai.moonlite.btdroid.core.format.Quality
+import ai.moonlite.btdroid.core.protocol.FlashDownloader
+import ai.moonlite.btdroid.core.protocol.Pmtk
+import ai.moonlite.btdroid.core.protocol.PmtkClient
+import ai.moonlite.btdroid.core.protocol.RingTranscript
+import ai.moonlite.btdroid.core.transport.SimulatedLoggerTransport
+import ai.moonlite.btdroid.core.transport.Transport
+import ai.moonlite.btdroid.data.DumpRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import java.io.File
+
+/** What the app knows about the attached logger, all of it read-only. */
+data class DeviceInfo(
+    val transportDescription: String,
+    val firmware: String,
+    val modelId: String,
+    val logFormat: LogFormat,
+    val timeIntervalSeconds: Double,
+    val logStatus: String,
+    val needsWeekRollover: Boolean,
+)
+
+data class DownloadState(
+    val running: Boolean = false,
+    val bytesDownloaded: Int = 0,
+    val sectorsRead: Int = 0,
+    val retries: Int = 0,
+    val resumedFrom: Int = 0,
+)
+
+/** Result of parsing a dump file, for display. */
+data class ParseSummary(
+    val fileName: String,
+    val fixes: Int,
+    val checksumFailures: Int,
+    val sectors: Int,
+    val segments: Int,
+    val firstFix: String,
+    val lastFix: String,
+    val waypoints: Int,
+    val rejected: Map<Quality.Rejection, Int>,
+)
+
+sealed interface ConnectionState {
+    data object Disconnected : ConnectionState
+    data class Connecting(val target: String) : ConnectionState
+    data class Connected(val info: DeviceInfo) : ConnectionState
+    data class Failed(val message: String) : ConnectionState
+}
+
+/**
+ * Owns the live device session: connect, interrogate, download, parse.
+ *
+ * A single instance lives in the Application so that a download survives
+ * Activity recreation — a rotation or a trip through the recents list must not
+ * cost 25 minutes of transfer.
+ *
+ * **Connecting never writes.** [connect] issues queries only, and there is no
+ * code path from connection to configuration change. That is a safety rail
+ * from the prep doc, and the round-trip test in :core asserts it holds.
+ */
+class SessionController(
+    private val pairing: CompanionPairing,
+    private val dumps: DumpRepository,
+    private val scope: CoroutineScope,
+) {
+    val transcript = RingTranscript(capacity = 4000)
+
+    private val _connection = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
+    val connection: StateFlow<ConnectionState> = _connection.asStateFlow()
+
+    private val _download = MutableStateFlow(DownloadState())
+    val download: StateFlow<DownloadState> = _download.asStateFlow()
+
+    private val _summary = MutableStateFlow<ParseSummary?>(null)
+    val summary: StateFlow<ParseSummary?> = _summary.asStateFlow()
+
+    private val _message = MutableStateFlow<String?>(null)
+    val message: StateFlow<String?> = _message.asStateFlow()
+
+    private var transport: Transport? = null
+    private var client: PmtkClient? = null
+    private var downloadJob: Job? = null
+    private var cancelRequested = false
+
+    /** Set when the session is a simulation, so the UI can say so plainly. */
+    var isSimulated: Boolean = false
+        private set
+
+    fun clearMessage() { _message.value = null }
+
+    // ---------------- connect ----------------
+
+    /**
+     * Connect over Bluetooth and read the device's identity and configuration.
+     *
+     * Queries only. Any failure leaves the transport closed rather than
+     * half-open, so a retry starts from a known state.
+     */
+    fun connect(address: String) {
+        if (_connection.value is ConnectionState.Connecting) return
+        scope.launch {
+            _connection.value = ConnectionState.Connecting(address)
+            disconnectQuietly()
+            try {
+                val device = pairing.deviceFor(address)
+                    ?: throw IllegalStateException("No bonded device at $address")
+                val t = BluetoothSppTransport(device)
+                t.open()
+                openWith(t, simulated = false)
+            } catch (e: Exception) {
+                disconnectQuietly()
+                _connection.value = ConnectionState.Failed(e.message ?: e.toString())
+            }
+        }
+    }
+
+    /**
+     * Connect to a simulated logger backed by [image].
+     *
+     * Not a developer nicety. The phone is the only computer available in the
+     * field, so the app has to be operable and diagnosable with the logger
+     * absent — re-parsing a partial dump, checking an export, showing someone
+     * what the flow looks like.
+     */
+    fun connectSimulated(image: ByteArray) {
+        scope.launch {
+            _connection.value = ConnectionState.Connecting("simulator")
+            disconnectQuietly()
+            try {
+                val t = SimulatedLoggerTransport(image, chunkSize = 0x800)
+                t.open()
+                openWith(t, simulated = true)
+            } catch (e: Exception) {
+                disconnectQuietly()
+                _connection.value = ConnectionState.Failed(e.message ?: e.toString())
+            }
+        }
+    }
+
+    private suspend fun openWith(t: Transport, simulated: Boolean) {
+        transport = t
+        isSimulated = simulated
+        val c = PmtkClient(t, transcript)
+        client = c
+
+        val firmware = c.queryFirmware()
+        val format = c.queryLogFormat()
+        val interval = c.queryTimeIntervalSeconds()
+        // Status is informational; a firmware that does not answer must not
+        // block a session that is otherwise perfectly usable.
+        val status = runCatching { c.queryLogStatus() }.getOrDefault("unavailable")
+
+        _connection.value = ConnectionState.Connected(
+            DeviceInfo(
+                transportDescription = t.description,
+                firmware = firmware.release,
+                modelId = firmware.modelId,
+                logFormat = format,
+                timeIntervalSeconds = interval,
+                logStatus = status,
+                needsWeekRollover = firmware.needsWeekRollover,
+            )
+        )
+    }
+
+    fun disconnect() {
+        scope.launch {
+            cancelDownload()
+            disconnectQuietly()
+            _connection.value = ConnectionState.Disconnected
+        }
+    }
+
+    private fun disconnectQuietly() {
+        runCatching { transport?.close() }
+        transport = null
+        client = null
+    }
+
+    // ---------------- download ----------------
+
+    /**
+     * Download the whole flash to a file, resuming [resumeFile] if given.
+     *
+     * Bytes are written to disk when the transfer ends for any reason —
+     * completion, cancellation, or error — because a partial dump is worth
+     * strictly more than no dump, and is resumable.
+     */
+    fun startDownload(resumeFile: File? = null, onFinished: () -> Unit = {}) {
+        val c = client ?: run {
+            _message.value = "Not connected"
+            return
+        }
+        if (downloadJob?.isActive == true) return
+
+        cancelRequested = false
+        downloadJob = scope.launch {
+            var target = resumeFile
+            var existing = ByteArray(0)
+            var resumeFrom = 0
+
+            try {
+                if (target != null) {
+                    existing = dumps.read(target)
+                    resumeFrom = dumps.resumeOffset(target)
+                    existing = existing.copyOf(resumeFrom)
+                } else {
+                    target = dumps.newDumpFile()
+                }
+
+                _download.value = DownloadState(
+                    running = true,
+                    bytesDownloaded = resumeFrom,
+                    resumedFrom = resumeFrom,
+                )
+
+                val downloader = FlashDownloader(c)
+                val result = downloader.download(
+                    existing = existing,
+                    resumeFrom = resumeFrom,
+                    onProgress = { p ->
+                        _download.value = _download.value.copy(
+                            bytesDownloaded = p.bytesDownloaded,
+                            sectorsRead = p.sectorsRead,
+                            retries = p.retries,
+                        )
+                    },
+                    shouldContinue = { !cancelRequested },
+                )
+
+                val partial = !result.stoppedOnUnwritten
+                dumps.save(target, result.image, partial = partial)
+                _message.value = if (partial) {
+                    "Stopped early — ${result.image.size / 1024} KB saved and resumable"
+                } else {
+                    "Downloaded ${result.image.size / 1024} KB to ${target.name}"
+                }
+                parse(target)
+            } catch (e: Exception) {
+                transcript.note("download failed: ${e.message}")
+                _message.value = "Download failed: ${e.message}"
+            } finally {
+                _download.value = _download.value.copy(running = false)
+                onFinished()
+            }
+        }
+    }
+
+    fun cancelDownload() {
+        cancelRequested = true
+    }
+
+    // ---------------- parse ----------------
+
+    /** Parse a dump already on disk. Works with no device attached. */
+    fun parse(file: File) {
+        scope.launch {
+            try {
+                val bytes = dumps.read(file)
+                val result = MtkLogParser.parse(bytes, GpsRollover.AXN_130B)
+                val filtered = Quality.filter(result.fixes)
+                val segments = Quality.segment(filtered.kept)
+
+                _summary.value = ParseSummary(
+                    fileName = file.name,
+                    fixes = result.fixes.size,
+                    checksumFailures = result.stats.checksumFailures,
+                    sectors = result.stats.sectorsWithData,
+                    segments = segments.size,
+                    firstFix = result.fixes.firstOrNull()?.instant?.toString() ?: "—",
+                    lastFix = result.fixes.lastOrNull()?.instant?.toString() ?: "—",
+                    waypoints = result.fixes.count { it.isWaypoint },
+                    rejected = filtered.rejected,
+                )
+            } catch (e: Exception) {
+                _message.value = "Parse failed: ${e.message}"
+            }
+        }
+    }
+
+    // ---------------- config writes ----------------
+
+    /**
+     * Write the log interval.
+     *
+     * Logging is disabled first and restored afterwards, and the whole sequence
+     * is spelled out here rather than hidden inside the client, so that a
+     * reviewer can see exactly what the device is asked to do.
+     */
+    fun writeTimeInterval(seconds: Double, onDone: () -> Unit = {}) {
+        val c = client ?: run { _message.value = "Not connected"; return }
+        scope.launch {
+            try {
+                val tenths = (seconds * 10).toInt()
+                require(tenths in 1..packedMaxTenths) { "interval out of range" }
+                c.writeLoggingEnabled(false)
+                c.writeConfig(Pmtk.ConfigField.TIME_INTERVAL, tenths.toString())
+                c.writeLoggingEnabled(true)
+                _message.value = "Log interval set to ${seconds}s"
+                refreshConfig()
+            } catch (e: Exception) {
+                _message.value = "Interval write failed: ${e.message}"
+            } finally {
+                onDone()
+            }
+        }
+    }
+
+    /**
+     * Write the log format register.
+     *
+     * The only way to obtain NSAT/HDOP/VDOP, which are absent from every
+     * existing dump. Costs flash-hours: the record grows 42 to 48 bytes.
+     */
+    fun writeLogFormat(format: LogFormat, onDone: () -> Unit = {}) {
+        val c = client ?: run { _message.value = "Not connected"; return }
+        scope.launch {
+            try {
+                c.writeLoggingEnabled(false)
+                c.writeConfig(
+                    Pmtk.ConfigField.LOG_FORMAT,
+                    "%08X".format(format.bits),
+                )
+                c.writeLoggingEnabled(true)
+                _message.value = "Log format set to ${format.describe()}"
+                refreshConfig()
+            } catch (e: Exception) {
+                _message.value = "Format write failed: ${e.message}"
+            } finally {
+                onDone()
+            }
+        }
+    }
+
+    private suspend fun refreshConfig() {
+        val c = client ?: return
+        val current = _connection.value as? ConnectionState.Connected ?: return
+        val format = runCatching { c.queryLogFormat() }.getOrNull() ?: return
+        val interval = runCatching { c.queryTimeIntervalSeconds() }.getOrNull() ?: return
+        _connection.value = ConnectionState.Connected(
+            current.info.copy(logFormat = format, timeIntervalSeconds = interval)
+        )
+    }
+
+    private val packedMaxTenths = 65_535
+}

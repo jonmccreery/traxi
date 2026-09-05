@@ -342,6 +342,15 @@ class SessionController(
                     shouldContinue = { !cancelRequested },
                 )
 
+                // Never keep an empty image. It is not resumable, it parses to
+                // a meaningless "0 fixes" summary presented as a result, and it
+                // clutters the list that the real dumps live in.
+                if (result.image.isEmpty()) {
+                    _message.value =
+                        "Nothing was read — ${result.failure ?: "the logger did not respond"}"
+                    return@launch
+                }
+
                 dumps.save(target, result.image, partial = !result.isComplete)
                 val gained = result.image.size - previous.size
                 _message.value = when {
@@ -403,9 +412,15 @@ class SessionController(
                     shouldContinue = { !cancelRequested },
                 )
 
+                if (result.image.isEmpty()) {
+                    _message.value =
+                        "Nothing was read — ${result.failure ?: "the logger did not respond"}"
+                    return@launch
+                }
+
                 val partial = !result.isComplete
-                // Save unconditionally, including after a failure. The bytes
-                // are the whole point; the error is only how it ended.
+                // Save whenever there are bytes, including after a failure. The
+                // bytes are the whole point; the error is only how it ended.
                 dumps.save(target, result.image, partial = partial)
                 val kb = result.image.size / 1024
                 _message.value = when {

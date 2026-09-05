@@ -274,6 +274,8 @@ class RoundTripTest {
         for (i in 0 until 64) {
             stale[FlashDownloader.PROBE_OFFSET + i] = (stale[FlashDownloader.PROBE_OFFSET + i] + 1).toByte()
         }
+        // Sanity: the corruption must sit inside the region the probe compares.
+        assertTrue(FlashDownloader.PROBE_OFFSET < FlashDownloader.DEFAULT_BLOCK_SIZE)
 
         val downloader = FlashDownloader(client())
         val plan = downloader.planIncremental(stale)

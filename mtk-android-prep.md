@@ -512,7 +512,7 @@ ui/                 Compose: connect, status, download, config, export
 | 0 | Answer §2. Port `mtkparse.py`. | No | **done** |
 | 1 | `RecordParser` + `SectorHeader`, golden-file test | No | **done** |
 | 2 | Transport + `PmtkClient`, **read-only** | Yes | **done — verified on hardware** |
-| 3 | Full-flash download to `.bin`, progress + resume | Yes | **done** (simulated; USB-verified on desktop) |
+| 3 | Full-flash download to `.bin`, progress + resume | Yes | **done — verified on hardware** |
 | 4 | Export pipeline, then UI | No | **done** |
 | 5 | Config writes: interval, format mask, enable/disable | Yes | **done** (simulated) |
 | 6 | ~~Erase~~ | — | **out of scope** |
@@ -526,6 +526,35 @@ configuration: `BT-Q1000XT`, firmware `AXN_1.30-B_1.3_C01`, format `0x000A003F`,
 20.0 s interval, `EON 8 MB`, 5,246 KB written. Pairing, bonding, the socket,
 PMTK framing, ack matching, the JEDEC decode and the write pointer all worked
 against real hardware.
+
+### Incremental fetch, verified on hardware
+
+The Bluetooth link runs at **493 B/s**, so re-reading the whole 5.4 MB chip
+takes about three hours. `FlashDownloader.downloadIncremental` reads only what
+has been added, after proving the log has not wrapped.
+
+Verified 2026-09-05, phone to logger over RFCOMM:
+
+```
+4 blocks read instead of 82        10m32s
+result 5,505,024 bytes, no partial marker
+identical to the USB dump through 0x0051F3C2 -- the write pointer
+  the device reported during that USB session
+new data: 28 markers + 31 records = 1,750 bytes, exactly the
+  write-pointer delta to 0x0051FA98, which is exactly what the
+  device reported at connect time
+everything past it erased; 0 checksum failures
+126,644 fixes (126,613 + 31)
+```
+
+Three independent figures agree — the device's reported pointer, the byte delta,
+and the parsed record count — which is what makes this a verification rather
+than a plausible-looking result.
+
+**The probe must read a whole block.** A 512-byte read was tried first; the
+device ignored it, answered with NMEA, and dropped the RFCOMM link. Every read
+this hardware has ever served is a full block. The simulator accepts any length,
+which is precisely why that assumption survived to the device — see §11.
 
 ### Getting connected over Bluetooth
 
@@ -624,7 +653,9 @@ Two safety rails are enforced by test rather than by convention:
 
 | File | Keep? | Notes |
 |---|---|---|
-| `cdt_v2.bin` | **yes — golden** | 5,376,000 B, 126,613 fixes, 0 checksum failures |
+| `cdt_v2.bin` | **yes — golden** | 5,376,000 B, 126,613 fixes, 0 checksum failures. Test fixture |
+| `bt_incremental_2026-09-05.bin` | **yes — newest** | 5,505,024 B, 126,644 fixes. Produced by this app over Bluetooth; supersedes both dumps below |
+| `usb_2026-09-05.bin` | yes | 5,505,024 B, produced by this project's reader over USB |
 | `cdt_v2_corrected.gpx` | yes | 126,613 trkpt, full-fidelity export |
 | `dump_v2.log` | yes | Only record of the device's own self-report |
 | `mtkparse.py` | yes | Reference parser; port source |

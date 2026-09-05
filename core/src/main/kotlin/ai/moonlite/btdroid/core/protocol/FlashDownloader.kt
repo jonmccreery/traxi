@@ -89,11 +89,15 @@ class FlashDownloader(
      * data to be overwritten — and compares them against what the previous dump
      * says should be there.
      *
-     * The probe deliberately reads records rather than the sector header: two
-     * headers look nearly identical whether or not a wrap happened, whereas
-     * records carry timestamps and positions that cannot coincide. It reads
-     * [PROBE_LENGTH] bytes, about a second on the slow link, against the two
-     * minutes a full sector would cost.
+     * The probe reads a **whole block**, not a cheap slice. A 512-byte request
+     * was tried and the device ignored it outright, answering with NMEA and
+     * then dropping the RFCOMM link -- every read this hardware has ever served
+     * was a full block, and it answers in 0x800 chunks. The simulator accepts
+     * any length, which is exactly why that mistake survived to the device.
+     *
+     * So the probe costs one block, about two minutes on the slow link. Against
+     * three hours for a full re-read that is still overwhelmingly worth it, and
+     * it uses a request shape the device is known to honour.
      */
     suspend fun planIncremental(previous: ByteArray): Plan {
         // Trim to the last whole block rather than refusing. Dumps made by other
@@ -105,16 +109,20 @@ class FlashDownloader(
             return Plan.FullRequired("no previous dump worth extending")
         }
 
-        val probe = client.readLogBlock(PROBE_OFFSET, PROBE_LENGTH)
+        val probe = client.readLogBlock(0, blockSize)
         if (!probe.isComplete) {
             return Plan.FullRequired("could not read the flash to check for a wrap")
         }
 
-        for (i in 0 until PROBE_LENGTH) {
-            if (probe.bytes[i] != previous[PROBE_OFFSET + i]) {
+        // Compare only the records, skipping the 512-byte sector header. The
+        // header is stable for a finalized sector, but the records are what a
+        // wrap actually destroys and they carry timestamps and positions that
+        // cannot coincide by accident.
+        for (i in SectorHeader.SIZE until blockSize) {
+            if (probe.bytes[i] != previous[i]) {
                 client.transcript.note(
                     "wrap probe differs at 0x%08X; the log has wrapped or been erased"
-                        .format(PROBE_OFFSET + i)
+                        .format(i)
                 )
                 return Plan.FullRequired("the log has wrapped since that dump")
             }
@@ -277,13 +285,13 @@ class FlashDownloader(
         const val ATTEMPTS_PER_BLOCK = 3
 
         /**
-         * Where the wrap probe reads: the first records of the log, just past
-         * sector 0's 512-byte header. These are the oldest data on the chip and
-         * therefore the first to be overwritten when the buffer wraps.
+         * The wrap probe reads block 0 and compares everything past the sector
+         * header. Those are the oldest records on the chip, and therefore the
+         * first thing a wrap destroys.
+         *
+         * It reads a whole block because that is the only request shape this
+         * device reliably serves; see [planIncremental].
          */
         const val PROBE_OFFSET = SectorHeader.SIZE
-
-        /** Probe size. Even, as the protocol requires, and ~1 s on the slow link. */
-        const val PROBE_LENGTH = 512
     }
 }

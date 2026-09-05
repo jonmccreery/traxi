@@ -216,22 +216,47 @@ private fun DeviceTab(
                 )
                 Button(onPairDevice, Modifier.fillMaxWidth()) { Text("Pair a logger") }
 
-                val candidates = (known + bonded.map { it.address }).distinct()
-                if (candidates.isNotEmpty()) {
+                // Devices this app has been associated with, plus any bonded
+                // device whose name looks like a logger. Everything else is a
+                // speaker or a car, and burying the one useful entry among
+                // eight of those is how you connect to the wrong thing.
+                val likelyAddresses = remember(known, bonded) {
+                    (known + container.pairing.likelyLoggers().map { it.address }).distinct()
+                }
+                val others = remember(likelyAddresses, bonded) {
+                    bonded.map { it.address }.filterNot { it in likelyAddresses }
+                }
+                var showAll by rememberSaveable { mutableStateOf(false) }
+
+                fun nameFor(address: String): String? = bonded
+                    .firstOrNull { it.address.equals(address, ignoreCase = true) }
+                    ?.let { runCatching { it.name }.getOrNull() }
+
+                if (likelyAddresses.isNotEmpty()) {
                     HorizontalDivider()
-                    Text("Known devices", style = MaterialTheme.typography.labelSmall)
-                    candidates.forEach { address ->
-                        val name = bonded.firstOrNull { it.address == address }
-                            ?.let { runCatching { it.name }.getOrNull() }
-                        OutlinedButton(
-                            onClick = { session.connect(address) },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(
-                                if (name != null) "$name  ·  $address" else address,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                    Text("Likely loggers", style = MaterialTheme.typography.labelSmall)
+                    likelyAddresses.forEach { address ->
+                        DeviceButton(nameFor(address), address) { session.connect(address) }
+                    }
+                }
+
+                if (others.isNotEmpty()) {
+                    HorizontalDivider()
+                    TextButton({ showAll = !showAll }) {
+                        Text(
+                            if (showAll) "Hide other paired devices"
+                            else "Show all paired devices (${others.size})"
+                        )
+                    }
+                    if (showAll) {
+                        Text(
+                            "Most of these are speakers or headphones. They accept a " +
+                                "connection and then fail the same way a dead logger " +
+                                "does, because they do not speak Serial Port Profile.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        others.forEach { address ->
+                            DeviceButton(nameFor(address), address) { session.connect(address) }
                         }
                     }
                 }
@@ -265,6 +290,17 @@ private fun DeviceTab(
                 ) { Text("Simulate from a saved dump") }
             }
         }
+    }
+}
+
+@Composable
+private fun DeviceButton(name: String?, address: String, onClick: () -> Unit) {
+    OutlinedButton(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+        Text(
+            if (name != null) "$name  ·  $address" else address,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

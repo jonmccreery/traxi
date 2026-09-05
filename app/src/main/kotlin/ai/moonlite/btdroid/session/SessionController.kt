@@ -1,6 +1,7 @@
 package ai.moonlite.btdroid.session
 
 import ai.moonlite.btdroid.bt.BluetoothSppTransport
+import ai.moonlite.btdroid.bt.Bonding
 import ai.moonlite.btdroid.bt.CompanionPairing
 import ai.moonlite.btdroid.core.format.GpsRollover
 import ai.moonlite.btdroid.core.format.LogFormat
@@ -72,6 +73,7 @@ sealed interface ConnectionState {
  * from the prep doc, and the round-trip test in :core asserts it holds.
  */
 class SessionController(
+    private val context: android.content.Context,
     private val pairing: CompanionPairing,
     private val dumps: DumpRepository,
     private val scope: CoroutineScope,
@@ -116,13 +118,29 @@ class SessionController(
             disconnectQuietly()
             try {
                 val device = pairing.deviceFor(address)
-                    ?: throw IllegalStateException("No bonded device at $address")
+                    ?: throw IllegalStateException("No Bluetooth device at $address")
+
+                // Bond before opening a socket. Choosing a device in the
+                // companion chooser associates it but does not pair it, and an
+                // RFCOMM connect to an unpaired device fails with an opaque
+                // socket error rather than saying "not paired".
+                transcript.note("ensuring $address is bonded")
+                when (val bond = Bonding.ensureBonded(context, device)) {
+                    is Bonding.Result.Failed -> {
+                        transcript.note("bonding failed: ${bond.reason}")
+                        _connection.value = ConnectionState.Failed(bond.reason)
+                        return@launch
+                    }
+                    Bonding.Result.Bonded -> transcript.note("bonded")
+                    Bonding.Result.AlreadyBonded -> transcript.note("already bonded")
+                }
+
                 val t = BluetoothSppTransport(device)
                 t.open()
                 openWith(t, simulated = false)
             } catch (e: Exception) {
                 disconnectQuietly()
-                _connection.value = ConnectionState.Failed(e.message ?: e.toString())
+                _connection.value = ConnectionState.Failed(explainConnectFailure(e, address))
             }
         }
     }
@@ -188,6 +206,33 @@ class SessionController(
         runCatching { transport?.close() }
         transport = null
         client = null
+    }
+
+    /**
+     * Turn a socket-level failure into something that points at the real cause.
+     *
+     * `read failed, socket might closed or timeout, read ret: -1` is what
+     * Android reports for several genuinely different problems, and on its own
+     * it sends people looking at the wrong one. The distinction that matters
+     * here is between a device that cannot be reached and a device that is
+     * reachable but does not speak Serial Port Profile — picking a set of
+     * headphones out of the chooser produces exactly the same error text as a
+     * logger that is switched off.
+     */
+    private fun explainConnectFailure(e: Exception, address: String): String {
+        val detail = e.message ?: e.toString()
+        val looksLikeNoSpp = detail.contains("read failed", ignoreCase = true) ||
+            detail.contains("socket might closed", ignoreCase = true)
+
+        return if (looksLikeNoSpp) {
+            "Could not open a serial connection to $address.\n\n" +
+                "Either the logger is switched off or out of range, or this device " +
+                "is not the logger — most Bluetooth accessories do not offer the " +
+                "Serial Port Profile, and they fail in exactly this way.\n\n" +
+                "Check the logger is powered on, then pick it by name in the chooser."
+        } else {
+            detail
+        }
     }
 
     // ---------------- download ----------------

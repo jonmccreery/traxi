@@ -53,5 +53,5 @@ class AppContainer(application: Application) {
 
     val dumpRepository = DumpRepository(application)
     val pairing = CompanionPairing(application)
-    val session = SessionController(pairing, dumpRepository, applicationScope)
+    val session = SessionController(application, pairing, dumpRepository, applicationScope)
 }

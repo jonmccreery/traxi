@@ -214,6 +214,13 @@ private fun DeviceTab(
                         "is remembered, so later trips are one tap.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
+                Text(
+                    "The logger must be powered on to appear — it does not advertise " +
+                        "otherwise. If asked for a PIN, it is " +
+                        "${ai.moonlite.btdroid.bt.Bonding.KNOWN_PIN}.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Button(onPairDevice, Modifier.fillMaxWidth()) { Text("Pair a logger") }
 
                 // Devices this app has been associated with, plus any bonded

@@ -23,9 +23,25 @@ import kotlin.coroutines.resume
  * Connecting to an unbonded device therefore does not report "not paired". It
  * fails deep inside the socket with `read failed, socket might closed or
  * timeout, read ret: -1`, which reads like a dead device and sends you looking
- * in entirely the wrong place.
+ * in entirely the wrong place. Confirmed against the hardware: an RFCOMM
+ * connect from a desktop without a bond returns `Permission denied`, and the
+ * identical connect after bonding succeeds in 2.0 s.
+ *
+ * **This logger uses legacy PIN pairing** (Bluetooth 2.0, `LegacyPairing: yes`)
+ * rather than Secure Simple Pairing, so Android shows a PIN entry dialog rather
+ * than a yes/no confirmation. See [KNOWN_PIN].
  */
 object Bonding {
+
+    /**
+     * PIN for the Qstarz BT-Q1000XT, verified against the device.
+     *
+     * Recorded because a wrong guess is expensive: the device answers a bad PIN
+     * with a bare `AuthenticationFailed`, indistinguishable from being out of
+     * range or switched off. `1111` is a common guess for this class of
+     * hardware and is **wrong** for this one.
+     */
+    const val KNOWN_PIN = "0000"
 
     sealed interface Result {
         data object AlreadyBonded : Result
@@ -72,7 +88,10 @@ object Bonding {
                                     runCatching { context.unregisterReceiver(this) }
                                     if (continuation.isActive) {
                                         continuation.resume(
-                                            Result.Failed("Pairing was refused or failed")
+                                            Result.Failed(
+                                                "Pairing failed. If a PIN was requested, " +
+                                                    "this logger's is $KNOWN_PIN."
+                                            )
                                         )
                                     }
                                 }
@@ -105,8 +124,8 @@ object Bonding {
             }
         } catch (e: TimeoutCancellationException) {
             Result.Failed(
-                "Pairing timed out. Some loggers need a button held to become " +
-                    "discoverable, and some ask for a PIN of 0000."
+                "Pairing timed out. Check the logger is powered on — it only " +
+                    "advertises with power — and enter $KNOWN_PIN if asked for a PIN."
             )
         }
     }

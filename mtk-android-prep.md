@@ -47,13 +47,59 @@ detail. On trail there is no laptop to fall back on, which means:
 | Transport, v1 | **Bluetooth SPP** | Chosen despite being the harder path; USB is a later addition, not a prerequisite |
 | Transport, v2 | USB serial | **Should be promoted — see §0.1** |
 | v1 scope | Dump + parse + view + export + **config writes** | Includes doc phase 5 |
-| Erase | **Out of scope** | Deferred indefinitely; see §8 |
+| Erase | **Required — see §0.2** | The bedrock feature; dump-erase-repeat is the only way this device covers a thru-hike |
 | minSdk | **31** (Android 12) | Target phone is API 36; no legacy permission branch needed |
 | Language | Kotlin + Compose | |
 
 Config writes are in v1 for a specific reason beyond convenience: the current log
 format omits `NSAT`/`HDOP`/`VDOP`, and setting the format register is the only
 way to obtain them. See §1.3.
+
+### 0.2 Erase is the point of the app, not an optional extra
+
+An earlier revision put erase **out of scope**, reasoning that the flash is the
+only copy of the data and the device is unreliable about its own state. That
+reasoning was sound and the conclusion was wrong, because it was reached without
+the use case.
+
+**The device cannot cover a thru-hike without erase.** At 13 h/day:
+
+| Interval | Per day | Days to fill 8 MB from empty |
+|---|---|---|
+| 20 s | 98 KB | 85 |
+| 10 s | 197 KB | 42 |
+| 5 s | 393 KB | 21 |
+
+A thru-hike runs four to six months. Even at 20 s — coarser than the user
+wants — the chip fills a third of the way in, and from today's 5.25 MB used
+there are about **31 days left at 20 s, or 8 at 5 s**. The workflow the hardware
+actually supports is **dump, verify, erase, repeat**, and the reason a phone app
+is needed at all is that this loop has to run from a trailhead with no computer.
+
+So erase is not a dangerous extra to be gated into uselessness. It is the
+feature, and the engineering job is to make it *safe*, not to avoid it.
+
+**Design for the erase gate.** Every one of these is about ensuring the data is
+provably somewhere else first:
+
+1. **A verified dump in the current session.** Not "a download happened" — the
+   image must be on disk, parse cleanly, and report zero checksum failures.
+   Erase stays disabled until the app has *read back and understood* what it is
+   about to destroy.
+2. **Coverage check.** The dump must extend past the device's reported write
+   pointer, so we know it captured everything rather than stopping short.
+3. **Typed confirmation naming the loss** — the fix count, not a generic
+   "ERASE". A user who cannot produce the number has not seen the summary.
+4. **Never reachable from a download-complete callback.** Always a separate,
+   deliberate action, however convenient chaining would be.
+5. **Disable logging first, restore after**, and allow a much longer ack timeout:
+   erase takes seconds to tens of seconds.
+6. **Verify afterwards** by reading sector 0 back and confirming `0xFF` fill. An
+   erase that silently failed leaves the user believing they have free space.
+7. **Never delete the pre-erase dump.** It is the only copy until exported.
+
+The safety argument that produced "out of scope" survives intact — it just
+belongs in the gate rather than in a refusal.
 
 ### 0.1 USB now looks like the better primary transport
 
@@ -515,7 +561,7 @@ ui/                 Compose: connect, status, download, config, export
 | 3 | Full-flash download to `.bin`, progress + resume | Yes | **done — verified on hardware** |
 | 4 | Export pipeline, then UI | No | **done** |
 | 5 | Config writes: interval, format mask, enable/disable | Yes | **done** (simulated) |
-| 6 | ~~Erase~~ | — | **out of scope** |
+| 6 | Erase, behind the §0.2 gate | Yes | **required — not yet built** |
 
 "Simulated" means implemented and passing against `SimulatedLoggerTransport`,
 which serves the real flash image over the real PMTK protocol.
@@ -617,12 +663,11 @@ Two safety rails are enforced by test rather than by convention:
 
 ## 8. Safety rails
 
-- **Erase is not being implemented.** The flash is the only copy of 18 months of
-  data, the erase is irreversible, and the device is demonstrably unreliable about
-  its own state (§2). There is no version of this that is worth the risk on a
-  phone at a trailhead. If it is ever added, it needs a typed confirmation, a
-  verified full dump within the same session, and must never be reachable from a
-  download-complete callback.
+- **Erase is required, and gated.** See §0.2 for why it is the point of the app
+  and for the full gate design. The short version: the app must have read back
+  and verified a dump before erase is even offered, the confirmation must name
+  the fix count being destroyed, it is never reachable from a download-complete
+  callback, and the erase is verified afterwards by reading the flash back.
 - **Never write config as a side effect of connecting.** Reading is safe; writing
   is a deliberate, explicit user action. This applies to the format-register
   change in §1.3 as much as to anything else.

@@ -442,9 +442,17 @@ private fun DumpRow(
                 }
             }
             TextButton({ container.session.parse(dump.file) }) { Text("Parse") }
-            TextButton({
-                scope.launch { exportGpx(context, container, dump) }
-            }) { Text("Export GPX") }
+            var exporting by remember { mutableStateOf(false) }
+            TextButton(
+                enabled = !exporting,
+                onClick = {
+                    exporting = true
+                    scope.launch {
+                        runCatching { exportGpx(context, container, dump) }
+                        exporting = false
+                    }
+                },
+            ) { Text(if (exporting) "Exporting…" else "Export GPX") }
             if (dump.isPartial && connection is ConnectionState.Connected) {
                 TextButton({ DownloadService.start(context, dump.file) }) { Text("Resume") }
             }
@@ -483,11 +491,20 @@ private fun ParseSummaryCard(summary: ParseSummary) {
     }
 }
 
+/**
+ * Export a dump as GPX and hand it to the share sheet.
+ *
+ * **Every expensive step runs off the main thread.** Parsing 5.5 MB, filtering
+ * 126,000 fixes through spike detection, and building a ~12 MB string are each
+ * seconds of work; doing them in the composition's scope -- which dispatches to
+ * the main thread -- produced a reliable ANR. Only the startActivity call
+ * belongs on the UI thread.
+ */
 private suspend fun exportGpx(
     context: android.content.Context,
     container: AppContainer,
     dump: DumpRepository.Dump,
-) {
+) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
     val bytes = container.dumpRepository.read(dump.file)
     val parsed = ai.moonlite.btdroid.core.format.MtkLogParser.parse(
         bytes,
@@ -512,7 +529,9 @@ private suspend fun exportGpx(
         putExtra(android.content.Intent.EXTRA_STREAM, uri)
         addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
-    context.startActivity(android.content.Intent.createChooser(share, "Share GPX"))
+    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+        context.startActivity(android.content.Intent.createChooser(share, "Share GPX"))
+    }
 }
 
 // ---------------- config ----------------

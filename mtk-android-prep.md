@@ -69,7 +69,7 @@ way to obtain them. See §1.3.
 > than using the one cached at connect, which closes both that and the
 > stopped-short case clause 2 was written for.
 >
-> Not yet exercised against real hardware — see the handoff's outstanding list.
+> Not yet exercised against real hardware — see ENGINEERING-RECORD.md §11.
 
 An earlier revision put erase **out of scope**, reasoning that the flash is the
 only copy of the data and the device is unreliable about its own state. That

@@ -103,10 +103,10 @@ class FlashEraser(
     /**
      * Read the first block back and confirm it is erased.
      *
-     * A whole block, not a spot check: §6 of the USB handoff records that this
-     * device ignores a 512-byte read request *and drops the link*, so a small
-     * probe is not merely less thorough, it is actively harmful. Only full-block
-     * reads have ever been reliable here.
+     * A whole block, not a spot check: §6 of ENGINEERING-RECORD.md records
+     * that this device ignores a 512-byte read request *and drops the link*, so
+     * a small probe is not merely less thorough, it is actively harmful. Only
+     * full-block reads have ever been reliable here.
      *
      * A short read counts as failure rather than success. Absent bytes are
      * filled with 0xFF, which is precisely the value being tested for, so

@@ -2,6 +2,7 @@ package ai.moonlite.btdroid.ui
 
 import ai.moonlite.btdroid.AppContainer
 import ai.moonlite.btdroid.core.format.LogFormat
+import ai.moonlite.btdroid.core.format.RecordingAudit
 import ai.moonlite.btdroid.core.protocol.FlashEraser
 import ai.moonlite.btdroid.core.protocol.Pmtk
 import ai.moonlite.btdroid.data.DumpRepository
@@ -546,6 +547,50 @@ private fun DumpRow(
     }
 }
 
+/**
+ * What the dump says about whether the logger was actually recording.
+ *
+ * Loud when it needs to be and quiet when it does not. A dump that simply ends
+ * with the device powered down is the common case and must not look like an
+ * alarm, or the alarm stops meaning anything.
+ */
+@Composable
+private fun RecordingAuditRows(report: RecordingAudit.Report) {
+    if (report.hasFault) {
+        HorizontalDivider()
+        Text(
+            "RECORDING WAS LOST",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.error,
+        )
+        Row2("Stops never resumed", report.unansweredStops.toString())
+        report.lastStopAt?.let { Row2("Stopped at", it.toString()) }
+        report.explanation()?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall)
+        }
+        Text(
+            "Those fixes were never written and cannot be recovered by downloading " +
+                "again. Check the logger is recording before setting off.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        return
+    }
+
+    if (!report.endsRecording) {
+        HorizontalDivider()
+        Row2("Ends", "logger stopped")
+        report.lastStopAt?.let { Row2("Stopped at", it.toString()) }
+        report.explanation()?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall)
+        }
+        return
+    }
+
+    report.longestGap?.takeIf { it.toMinutes() >= 1 }?.let {
+        Row2("Longest gap", "${it.toHours()}h ${it.toMinutesPart()}m")
+    }
+}
+
 @Composable
 private fun ParseSummaryCard(summary: ParseSummary) {
     SectionCard("Parsed · ${summary.fileName}") {
@@ -556,6 +601,11 @@ private fun ParseSummaryCard(summary: ParseSummary) {
         Row2("Waypoints", summary.waypoints.toString())
         Row2("First fix", summary.firstFix)
         Row2("Last fix", summary.lastFix)
+
+        // Recording gaps come before everything else that is merely
+        // informational. A checksum failure can be fixed by downloading again;
+        // fixes that were never recorded do not exist anywhere.
+        RecordingAuditRows(summary.recording)
 
         if (summary.rejected.isNotEmpty()) {
             HorizontalDivider()

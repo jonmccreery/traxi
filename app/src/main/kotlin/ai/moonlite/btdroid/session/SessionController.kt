@@ -7,6 +7,7 @@ import ai.moonlite.btdroid.core.format.GpsRollover
 import ai.moonlite.btdroid.core.format.LogFormat
 import ai.moonlite.btdroid.core.format.MtkLogParser
 import ai.moonlite.btdroid.core.format.Quality
+import ai.moonlite.btdroid.core.format.RecordingAudit
 import ai.moonlite.btdroid.core.protocol.EraseGate
 import ai.moonlite.btdroid.core.protocol.FlashDownloader
 import ai.moonlite.btdroid.core.protocol.FlashEraser
@@ -73,6 +74,15 @@ data class ParseSummary(
     val lastFix: String,
     val waypoints: Int,
     val rejected: Map<Quality.Rejection, Int>,
+    /**
+     * Whether this dump shows the logger silently stopping.
+     *
+     * Carried on the summary rather than computed in the UI because it is the
+     * single most consequential thing a parse can discover: fixes that were
+     * never recorded cannot be recovered by re-downloading, and nothing else in
+     * the app can tell the user they lost a stretch of trip.
+     */
+    val recording: RecordingAudit.Report,
 )
 
 /**
@@ -669,6 +679,7 @@ class SessionController(
                     lastFix = result.fixes.lastOrNull()?.instant?.toString() ?: "—",
                     waypoints = result.fixes.count { it.isWaypoint },
                     rejected = filtered.rejected,
+                    recording = RecordingAudit.of(result.stats, result.fixes),
                 )
 
                 // Clause 1 completes here, and only for the file this session

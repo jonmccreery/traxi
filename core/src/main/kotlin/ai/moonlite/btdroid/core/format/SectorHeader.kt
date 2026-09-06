@@ -120,6 +120,15 @@ data class DynamicMarker(val type: Int, val arg: Int, val offset: Int) {
         const val CHANGE_OVERWRITE = 0x06
         const val LOG_STATUS = 0x07
 
+        /**
+         * Bit in a [LOG_STATUS] marker's arg meaning "recording".
+         *
+         * The same bit the `PMTK182,2,7` query reports, and established the
+         * same way: the reference dump pairs args `0x0100` and `0x0102` in
+         * near-equal numbers, and `0x02` is the only bit that differs.
+         */
+        const val LOGGING_ENABLED = 0x0002
+
         /** Parse a marker at [offset], or return null if the signature is absent. */
         fun parse(buf: ByteArray, offset: Int): DynamicMarker? {
             if (offset + SIZE > buf.size) return null

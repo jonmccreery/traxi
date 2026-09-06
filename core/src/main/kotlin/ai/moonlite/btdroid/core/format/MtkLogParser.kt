@@ -18,6 +18,31 @@ import ai.moonlite.btdroid.core.format.SectorHeader.Companion.SECTOR_SIZE
  */
 object MtkLogParser {
 
+    /**
+     * A moment the device started or stopped recording, recovered from the log.
+     *
+     * The device writes a type-`0x07` marker whenever logging is switched, and
+     * those markers sit inline between timestamped fixes -- so a dump is a
+     * self-contained audit trail of its own recording gaps, datable to within
+     * one logging interval without any external record.
+     *
+     * That matters more than it sounds. A logger that has silently stopped
+     * recording is indistinguishable from one that is working, and the app's
+     * transcript is in memory only and dies with the process. This survives in
+     * the flash.
+     */
+    data class StatusChange(
+        val offset: Int,
+        val enabled: Boolean,
+        /**
+         * Timestamp of the last fix decoded before the marker, or null if the
+         * marker opens a sector. The marker itself carries no time, so this is
+         * a lower bound: the change happened at or after this instant, and
+         * before the next fix.
+         */
+        val after: java.time.Instant?,
+    )
+
     data class Stats(
         var sectorsWithData: Int = 0,
         var records: Int = 0,
@@ -27,6 +52,8 @@ object MtkLogParser {
         val badSectorHeaders: MutableList<Int> = mutableListOf(),
         val formatChanges: MutableList<Pair<Int, LogFormat>> = mutableListOf(),
         val headers: MutableList<SectorHeader> = mutableListOf(),
+        /** Every logging start/stop in this image, in order. */
+        val statusChanges: MutableList<StatusChange> = mutableListOf(),
     ) {
         /**
          * Sum of the finalized sector counts. Falls short of [records] by the
@@ -98,6 +125,13 @@ object MtkLogParser {
                     if (marker.type == DynamicMarker.CHANGE_FORMAT) {
                         format = LogFormat(marker.arg)
                         stats.formatChanges += offset to LogFormat(marker.arg)
+                    }
+                    if (marker.type == DynamicMarker.LOG_STATUS) {
+                        stats.statusChanges += StatusChange(
+                            offset = offset,
+                            enabled = (marker.arg and DynamicMarker.LOGGING_ENABLED) != 0,
+                            after = fixes.lastOrNull()?.instant,
+                        )
                     }
                     offset += DynamicMarker.SIZE
                     continue

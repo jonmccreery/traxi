@@ -927,6 +927,33 @@ firmware keeps its pre-format state: `START_LOG` goes on acking and the engine
 goes on dropping it within the second. It has to boot with a clean log area
 underneath it.
 
+> **Corrected 2026-09-06, from the account of the person who did the
+> recovery.** The sequence above compresses hours into four tidy lines and
+> loses the two facts a future reader will need most.
+>
+> **The fingerprint is an enable that takes and then reverts, not one that is
+> refused.** The device streamed NMEA normally the whole time and acked
+> `START_LOG`; the auto_log bit (`0x0002`) then cleared itself again — ENABLE →
+> DISABLE, every attempt, for hours, and an ordinary power cycle did not clear
+> it. The flash journal corroborates this verbatim: the post-recovery image
+> holds run after run of paired `LOGSTAT 258 / 256` markers with nothing
+> between them (offsets `0x0300`–`0x04B0`), the device's own record of each
+> round of that fight. The last marker on the chip is the one enable that
+> finally held.
+>
+> **The format that mattered was at the SPI level, not `$PMTK182,6,1`.** It
+> took reading the flash datasheet and formatting with an `spi_`-prefixed
+> command. *(The exact command string is not captured here — it should be
+> pulled from shell history and pasted in; this is the single most valuable
+> missing line in this section.)*
+>
+> **After the format the device still looks dead until it is power-cycled.**
+> Enables went on reverting after the SPI format, the recovery was reasonably
+> judged a failure, and there was a full mourning period before a
+> just-in-case retry — after a power cycle — worked. Between the format and
+> the next boot, a recovered device is indistinguishable from an unrecovered
+> one. Do not declare death between steps 1 and 2.
+
 **A format resets configuration.** Observed, not documented:
 
 | Field | After a format |
@@ -992,6 +1019,34 @@ and **zero bytes written**. There is no local indicator of whether the device is
 recording. The app is the only honest signal, which is what §12's indicator is
 for.
 
+### Recovery confirmed 2026-09-06 ~23:00Z — the device is logging again
+
+Verified from the laptop with read-only queries and one full-block read,
+then decoded with the app's own parser (`MtkLogParser` + `Quality.filter`
+against the dumped block, all green):
+
+- `LOG STATUS = 258 (0x102)`, SPI RDY, failed-sector register empty, method
+  back to OVP. Write pointer advancing in real time.
+- **Fix records resumed at `2026-09-06T22:47:44Z`** (raw timestamps read
+  2007-01-21; the +1024-week rollover lands them correctly). 65 fixes in the
+  first block, 0 checksum failures, all 65 kept by the quality filter,
+  positions coherent at ~41.884N 87.804W on a 10 s cadence.
+- The post-format flash opens with **49 marker records** — the journal of the
+  whole recovery session. Two of them are unanswered stops, so
+  `RecordingAudit` **will report `unansweredStops = 2` on every future dump of
+  this flash**. That is the recovery session's scar, not new loss. It ages out
+  only when the flash is next erased.
+- The journal also bears on the unexplained `BY_SEC 100 vs 50` below: it holds
+  one `PERIOD 50` marker followed later by two `PERIOD 100` markers with
+  stop/start churn between — so 100 *was* written to the device twice after
+  the 50; the mystery is by whom, not whether.
+
+Config then restored per step 4, over `/dev/ttyACM0`, with the stop → write →
+unconditional restart discipline of `withLoggingPaused` and each step
+acknowledged: `FMT_REG` back to `0x000A1C3F`, interval back to 5.0 s. Verified
+after: status 258, and the pointer moved **+144 bytes in 15 s = exactly 3 × 48-
+byte records at 5 s** — the arithmetic confirms the 11-field format took.
+
 ### What is still not explained
 
 The device logged for 18 months, then stopped at `2026-09-06T16:16:10Z`,
@@ -1006,5 +1061,20 @@ had been set to `50`, with no write in between.
 ### Sources
 
 - MTK GPS Logger Library User Manual 1.2 — `https://www.rigacci.org/wiki/lib/exe/fetch.php/doc/appunti/hardware/gps/mtk_logger_library_user_manual_1.2_tsi.pdf`
+
+  **A local copy is committed at `docs/mtk-gps-logger-library-user-manual-1.2.pdf`
+  — treat the URL as fragile.** It is a leaked vendor document (MT3301, GPS
+  Team, Andy Lee, released 2006-11-29, marked "MTK CONFIDENTIAL / NO
+  DISCLOSURE") hosted on a personal wiki, linked from
+  `https://www.rigacci.org/wiki/doku.php/doc/appunti/hardware/gps_logger_i_blue_747`.
+  Where things are in it: the full command table (FORMAT LOG = `PMTK182,6`
+  with 1: ALL / 2: PARTIAL, plus INIT_LOG 9, ENABLE_LOG 10, DISABLE_LOG 11,
+  WRITE_LOG 12) is on page 7 of 22; FORMAT LOG behaviour — "FORMAT ALL can
+  reset the internal buffer to become all 0xFF" and the NEED_FORMAT_BIT
+  explanation — is in Application Notes §(5), around page 9.
+
+  Extraction trap: `pdftotext -layout` is what makes this file readable.
+  A Python stream extraction produced garbage on it, which was briefly
+  mistaken for the document not containing the command table at all.
 - BT747 status bitmask — `https://sourceforge.net/p/bt747/discussion/696105/thread/19a6ddd7/`
 - GPSBabel `mtk_logger.cc` — `https://github.com/GPSBabel/gpsbabel/blob/master/mtk_logger.cc`

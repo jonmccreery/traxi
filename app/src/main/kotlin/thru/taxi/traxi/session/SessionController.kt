@@ -14,15 +14,19 @@ import thru.taxi.traxi.core.protocol.FlashEraser
 import thru.taxi.traxi.core.protocol.Pmtk
 import thru.taxi.traxi.core.protocol.PmtkClient
 import thru.taxi.traxi.core.protocol.RingTranscript
+import thru.taxi.traxi.core.protocol.Telemetry
+import thru.taxi.traxi.core.protocol.TelemetryAssembler
 import thru.taxi.traxi.core.transport.SimulatedLoggerTransport
 import thru.taxi.traxi.core.transport.Transport
 import thru.taxi.traxi.usb.UsbSerialTransport
 import thru.taxi.traxi.data.DumpRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -150,6 +154,17 @@ class SessionController(
     val eraseEvidence: StateFlow<EraseGate.Evidence?> = _eraseEvidence.asStateFlow()
 
     /**
+     * What the receiver is doing right now, decoded from the navigation
+     * sentences the logger emits alongside its PMTK replies.
+     *
+     * Null until something has been decoded. Note that this describes the GPS
+     * receiver, not the recorder: see [Telemetry] for why a perfect fix says
+     * nothing about whether anything is being written to flash.
+     */
+    private val _telemetry = MutableStateFlow<Telemetry?>(null)
+    val telemetry: StateFlow<Telemetry?> = _telemetry.asStateFlow()
+
+    /**
      * The download half of the evidence, waiting for its parse.
      *
      * Held separately so that parsing some *other* dump from the list -- an old
@@ -181,6 +196,11 @@ class SessionController(
      * array and feed the same assembler, so both sides see a corrupted stream:
      * the transfer loses bytes and the config write loses its acknowledgement.
      *
+     * The telemetry loop makes this lock load-bearing rather than merely
+     * correct. It is the first thing in this app that reads while the user is
+     * doing nothing, so the old assumption -- that nothing runs between user
+     * actions -- is no longer true even in the ordinary case.
+     *
      * Only top-level, user-initiated operations take this lock. Helpers they
      * call -- `refreshConfig`, `withLoggingPaused` -- must not, because the
      * mutex is not reentrant and the caller already holds it.
@@ -190,6 +210,7 @@ class SessionController(
     private var transport: Transport? = null
     private var client: PmtkClient? = null
     private var downloadJob: Job? = null
+    private var telemetryJob: Job? = null
     private var cancelRequested = false
     private var connectedAddress: String? = null
     private var linkWatcher: android.content.BroadcastReceiver? = null
@@ -336,7 +357,8 @@ class SessionController(
     /**
      * Run a device operation with exclusive use of the transport.
      *
-     * Use `return@launchExclusive` inside the body.
+     * Every user-initiated operation goes through here so that none of them can
+     * overlap the telemetry loop. Use `return@launchExclusive` inside the body.
      */
     private fun launchExclusive(block: suspend () -> Unit): Job =
         scope.launch { readLock.withLock { block() } }
@@ -377,6 +399,55 @@ class SessionController(
                 writePointer = pointer,
             )
         )
+
+        startTelemetry(c, firmware.needsWeekRollover)
+    }
+
+    /**
+     * Begin decoding the navigation stream.
+     *
+     * Two sources feed the same assembler, because neither alone is enough.
+     * The observer picks up sentences parsed during any other operation, which
+     * covers a three-hour download for free and adds no reads. The loop covers
+     * the rest of the time: nothing else touches the transport between user
+     * actions, so without it the stream would sit in the transport's bounded
+     * queue until it overflowed and was dropped.
+     */
+    private fun startTelemetry(c: PmtkClient, needsRollover: Boolean) {
+        val assembler = TelemetryAssembler(
+            if (needsRollover) GpsRollover.AXN_130B else GpsRollover.NONE
+        )
+        c.onSentence = { sentence ->
+            if (assembler.accept(sentence)) _telemetry.value = assembler.current
+        }
+
+        telemetryJob?.cancel()
+        telemetryJob = scope.launch {
+            while (isActive) {
+                // A read while another operation holds the lock would take
+                // bytes belonging to that operation.
+                val read = try {
+                    readLock.withLock { c.pump(TELEMETRY_READ_MILLIS) }
+                } catch (e: Exception) {
+                    // The transport going away is the ordinary way this ends.
+                    // It is not worth a message: whatever closed the link has
+                    // already reported it.
+                    -1
+                }
+                if (read < 0) break
+                // Release the lock briefly between reads so an operation
+                // waiting for it starts promptly rather than queueing behind
+                // another full read window.
+                delay(TELEMETRY_IDLE_MILLIS)
+            }
+        }
+    }
+
+    private fun stopTelemetry() {
+        telemetryJob?.cancel()
+        telemetryJob = null
+        client?.onSentence = null
+        _telemetry.value = null
     }
 
     fun disconnect() {
@@ -484,6 +555,7 @@ class SessionController(
 
     private fun disconnectQuietly() {
         stopWatchingLink()
+        stopTelemetry()
         connectedAddress = null
         runCatching { transport?.close() }
         transport = null
@@ -969,4 +1041,16 @@ class SessionController(
     }
 
     private val packedMaxTenths = 65_535
+
+    /**
+     * How long one telemetry read may hold [readLock].
+     *
+     * This is the worst-case wait an operation can face before it starts, so it
+     * is short. The navigation stream is roughly 1 Hz, so a quarter second
+     * misses nothing that will not still be there next time round.
+     */
+    private val TELEMETRY_READ_MILLIS = 250L
+
+    /** Lock-free gap between reads, so a waiting operation gets in promptly. */
+    private val TELEMETRY_IDLE_MILLIS = 50L
 }

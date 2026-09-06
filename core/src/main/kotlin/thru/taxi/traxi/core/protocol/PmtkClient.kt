@@ -31,7 +31,73 @@ class PmtkClient(
     var bulkChunks = 0
         private set
 
+    /**
+     * Called for every non-chunk sentence received, whatever we were waiting
+     * for at the time.
+     *
+     * The logger emits navigation sentences continuously alongside its PMTK
+     * replies, and until this existed they were parsed, checksum-validated,
+     * written to the transcript and then dropped. Hanging the observer here
+     * rather than on a second reader is deliberate: a second reader would
+     * compete with this one for bytes, and losing bytes out of a block read is
+     * the one failure this project exists to prevent.
+     *
+     * It runs on the read path, including during a download, so it is called
+     * inside `runCatching`: an observer that throws must not be able to break
+     * a transfer.
+     */
+    var onSentence: ((NmeaSentence) -> Unit)? = null
+
     // ---------------- primitives ----------------
+
+    /**
+     * Parse whatever is in [readBuffer], queue it, and notify [onSentence].
+     */
+    private fun ingest(n: Int) {
+        for (line in assembler.feed(readBuffer, n)) {
+            val sentence = Nmea.parse(line)
+            if (sentence == null) {
+                transcript.note("dropped malformed or bad-checksum line: $line")
+                continue
+            }
+            // Elide bulk log payloads. A full download is ~2,700 of these,
+            // each a couple of kilobytes of hex, which would flush every
+            // useful note out of the transcript's ring buffer -- exactly
+            // the lines needed when diagnosing a transfer problem. The
+            // per-block summary carries the information that matters.
+            if (sentence.matches("PMTK182", "8")) {
+                bulkChunks++
+            } else {
+                transcript.rx(sentence.raw)
+                onSentence?.let { observer -> runCatching { observer(sentence) } }
+            }
+            if (queued.size >= MAX_QUEUED) queued.removeFirst()
+            queued.addLast(sentence)
+        }
+    }
+
+    /**
+     * Read whatever the device has sent and feed it to [onSentence], without
+     * waiting for anything in particular.
+     *
+     * This is how live telemetry keeps arriving when the app is otherwise idle:
+     * nothing else calls into the transport between user actions, so the
+     * navigation stream would just accumulate in the transport's bounded queue
+     * and eventually be dropped.
+     *
+     * Read-only, and it sends nothing -- the naming rule in this class's
+     * documentation holds. **Callers must not run this concurrently with any
+     * other operation on the same client**, because both would be taking bytes
+     * from the same stream. `SessionController` serialises it against
+     * everything else with a mutex.
+     *
+     * @return the number of bytes read, 0 on a quiet interval, -1 if closed.
+     */
+    suspend fun pump(timeoutMillis: Long = 250): Int {
+        val n = transport.read(readBuffer, timeoutMillis)
+        if (n > 0) ingest(n)
+        return n
+    }
 
     suspend fun send(payload: String) {
         val framed = Nmea.frame(payload)
@@ -69,25 +135,7 @@ class PmtkClient(
             // inside this loop would abandon every sentence parsed after the
             // matching one, and a single RFCOMM read routinely carries several
             // -- which silently drops most chunks of a block read.
-            for (line in assembler.feed(readBuffer, n)) {
-                val sentence = Nmea.parse(line)
-                if (sentence == null) {
-                    transcript.note("dropped malformed or bad-checksum line: $line")
-                    continue
-                }
-                // Elide bulk log payloads. A full download is ~2,700 of these,
-                // each a couple of kilobytes of hex, which would flush every
-                // useful note out of the transcript's ring buffer -- exactly
-                // the lines needed when diagnosing a transfer problem. The
-                // per-block summary carries the information that matters.
-                if (sentence.matches("PMTK182", "8")) {
-                    bulkChunks++
-                } else {
-                    transcript.rx(sentence.raw)
-                }
-                if (queued.size >= MAX_QUEUED) queued.removeFirst()
-                queued.addLast(sentence)
-            }
+            ingest(n)
 
             queued.firstOrNull(predicate)?.let { queued.remove(it); return it }
         }

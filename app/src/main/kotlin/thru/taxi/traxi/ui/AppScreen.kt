@@ -3,14 +3,18 @@ package thru.taxi.traxi.ui
 import thru.taxi.traxi.AppContainer
 import thru.taxi.traxi.core.format.LogFormat
 import thru.taxi.traxi.core.format.RecordingAudit
+import thru.taxi.traxi.core.protocol.FixType
 import thru.taxi.traxi.core.protocol.FlashEraser
 import thru.taxi.traxi.core.protocol.Pmtk
+import thru.taxi.traxi.core.protocol.SatelliteView
+import thru.taxi.traxi.core.protocol.Telemetry
 import thru.taxi.traxi.data.DumpRepository
 import thru.taxi.traxi.service.DownloadService
 import thru.taxi.traxi.session.ConnectionState
 import thru.taxi.traxi.session.DeviceInfo
 import thru.taxi.traxi.session.ParseSummary
 import thru.taxi.traxi.ui.theme.MonoStyle
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -29,7 +33,7 @@ import java.util.Date
 import java.util.Locale
 
 private enum class Tab(val label: String) {
-    DEVICE("Device"), DUMPS("Dumps"), CONFIG("Config"), LOG("Log")
+    DEVICE("Device"), LIVE("Live"), DUMPS("Dumps"), CONFIG("Config"), LOG("Log")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -45,6 +49,7 @@ fun AppScreen(
     val download by session.download.collectAsState()
     val summary by session.summary.collectAsState()
     val message by session.message.collectAsState()
+    val telemetry by session.telemetry.collectAsState()
 
     var tab by rememberSaveable { mutableStateOf(Tab.DEVICE) }
     val snackbar = remember { SnackbarHostState() }
@@ -91,6 +96,7 @@ fun AppScreen(
 
             when (tab) {
                 Tab.DEVICE -> DeviceTab(container, connection, onPairDevice)
+                Tab.LIVE -> LiveTab(connection, telemetry)
                 Tab.DUMPS -> DumpsTab(container, connection, download, summary)
                 Tab.CONFIG -> ConfigTab(container, connection)
                 Tab.LOG -> LogTab(container)
@@ -424,6 +430,212 @@ private fun DeviceInfoCard(info: DeviceInfo, simulated: Boolean) {
 }
 
 // ---------------- dumps ----------------
+
+// ---------------- live ----------------
+
+/**
+ * What the receiver is doing right now.
+ *
+ * All of this was already on the wire — the logger emits navigation sentences
+ * continuously alongside its PMTK replies, and until now they were parsed,
+ * checksummed and thrown away. Nothing here costs an extra request.
+ */
+@Composable
+private fun LiveTab(connection: ConnectionState, telemetry: Telemetry?) {
+    if (connection !is ConnectionState.Connected) {
+        SectionCard("Not connected") {
+            Text(
+                "Live telemetry comes from the logger itself, so it needs an open " +
+                    "connection. Connect on the Device tab.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+        return
+    }
+
+    if (telemetry == null || !telemetry.hasAnything) {
+        SectionCard("Listening") {
+            Text(
+                "Waiting for the first navigation sentence. The logger sends these " +
+                    "about once a second whenever it is powered on.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+        }
+        return
+    }
+
+    FixCard(telemetry)
+    if (telemetry.hasPosition) PositionCard(telemetry)
+    if (telemetry.satellites.isNotEmpty()) SkyCard(telemetry)
+}
+
+@Composable
+private fun FixCard(t: Telemetry) {
+    SectionCard("Fix") {
+        val fix = t.fixType
+        val headline = when {
+            t.valid == false -> "No fix"
+            fix == FixType.THREE_D -> "3D fix"
+            fix == FixType.TWO_D -> "2D fix"
+            fix == FixType.NONE -> "No fix"
+            else -> "Unknown"
+        }
+        // A 2D fix is worth calling out rather than colouring green: it means
+        // altitude is not being solved for, which on a mountain is the number
+        // you probably came for.
+        val good = fix == FixType.THREE_D && t.valid != false
+        Text(
+            headline,
+            style = MaterialTheme.typography.headlineSmall,
+            color = if (good) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.error,
+        )
+
+        t.satellitesUsed?.let {
+            Row2("Satellites", "$it in the solution, ${t.satellites.size} in view")
+        }
+        if (t.satellites.isNotEmpty()) {
+            Row2("Tracked", "${t.trackedCount} of ${t.satellites.size}")
+        }
+        t.hdop?.let { Row2("HDOP", "%.2f  (%s)".format(it, dopQuality(it))) }
+        if (t.pdop != null || t.vdop != null) {
+            Row2("PDOP / VDOP", "%s / %s".format(fmt(t.pdop, 2), fmt(t.vdop, 2)))
+        }
+        t.fixQuality?.let {
+            Row2(
+                "Quality", when (it) {
+                    0 -> "0 — no fix"
+                    1 -> "1 — GPS"
+                    2 -> "2 — differential"
+                    else -> it.toString()
+                }
+            )
+        }
+
+        // The one thing this screen must not be allowed to imply. A perfect fix
+        // and a logger that stopped recording look identical from here; that is
+        // exactly the section 12 failure, and it cost 1h40m of trail once.
+        Text(
+            "This is the receiver, not the recorder. A good fix does not mean the " +
+                "logger is writing it down — the Device tab shows recording state.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun PositionCard(t: Telemetry) {
+    SectionCard("Position") {
+        val lat = t.latitude!!
+        val lon = t.longitude!!
+        Row2("Latitude", "%.5f°  %s".format(kotlin.math.abs(lat), if (lat >= 0) "N" else "S"))
+        Row2("Longitude", "%.5f°  %s".format(kotlin.math.abs(lon), if (lon >= 0) "E" else "W"))
+        t.altitudeMeters?.let {
+            Row2("Altitude", "%.1f m  ·  %.0f ft".format(it, it * 3.28084))
+        }
+        t.speedKnots?.let {
+            Row2("Speed", "%.1f km/h  ·  %.1f kn".format(it * 1.852, it))
+        }
+        t.courseDeg?.let { Row2("Course", "%.0f°".format(it)) }
+        t.utcMillis?.let { Row2("UTC", utcStamp(it)) }
+        Text(
+            "Decimal degrees, WGS 84 — the same datum the logged fixes use.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * Signal strength per satellite.
+ *
+ * Filled bars are satellites in the position solution; outlined ones are in
+ * view but not contributing. A satellite in view with no SNR at all is drawn
+ * empty rather than as zero, because "not tracked" and "tracked badly" are
+ * different problems and only one of them improves by waiting.
+ */
+@Composable
+private fun SkyCard(t: Telemetry) {
+    SectionCard("Sky") {
+        t.satellites.forEach { sat -> SatelliteBar(sat, sat.prn in t.usedPrns) }
+        Text(
+            "PRN, elevation and signal-to-noise in dB. Bars in colour are the ones " +
+                "the fix is actually using.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun SatelliteBar(sat: SatelliteView, inSolution: Boolean) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            "%2d".format(sat.prn),
+            style = MonoStyle,
+            modifier = Modifier.width(28.dp),
+        )
+        Text(
+            sat.elevationDeg?.let { "%2d°".format(it) } ?: "  —",
+            style = MonoStyle,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(40.dp),
+        )
+        Box(
+            Modifier
+                .weight(1f)
+                .height(10.dp)
+                .background(
+                    MaterialTheme.colorScheme.surfaceVariant,
+                    MaterialTheme.shapes.extraSmall,
+                )
+        ) {
+            val snr = sat.snrDb ?: 0
+            // 50 dB is a strong signal on this receiver; anything above it just
+            // fills the bar rather than overflowing it.
+            val fraction = (snr / 50f).coerceIn(0f, 1f)
+            if (fraction > 0f) {
+                Box(
+                    Modifier
+                        .fillMaxWidth(fraction)
+                        .height(10.dp)
+                        .background(
+                            if (inSolution) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.outline,
+                            MaterialTheme.shapes.extraSmall,
+                        )
+                )
+            }
+        }
+        Text(
+            sat.snrDb?.let { "%2d".format(it) } ?: " —",
+            style = MonoStyle,
+            color = if (sat.tracked) MaterialTheme.colorScheme.onSurface
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 8.dp).width(24.dp),
+        )
+    }
+}
+
+/** The conventional reading of horizontal dilution of precision. */
+private fun dopQuality(hdop: Double): String = when {
+    hdop < 1 -> "ideal"
+    hdop < 2 -> "excellent"
+    hdop < 5 -> "good"
+    hdop < 10 -> "moderate"
+    hdop < 20 -> "fair"
+    else -> "poor"
+}
+
+private fun fmt(v: Double?, places: Int): String =
+    v?.let { "%.${places}f".format(it) } ?: "—"
+
+private fun utcStamp(millis: Long): String =
+    SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+        .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+        .format(Date(millis))
 
 @Composable
 private fun DumpsTab(

@@ -215,7 +215,7 @@ class FlashDownloader(
 
         try {
         while (address < maxBytes && shouldContinue()) {
-            var block = client.readLogBlock(address, blockSize)
+            var block = client.readLogBlock(address, blockSize, BLOCK_IDLE_TIMEOUT)
 
             // A short block means dropped chunks, never end of flash: an erased
             // sector still answers, with 0xFF bytes. Retry the whole block.
@@ -227,7 +227,7 @@ class FlashDownloader(
                     "block 0x%08X short (%d/%d), attempt %d of %d"
                         .format(address, block.filled, blockSize, attempt, ATTEMPTS_PER_BLOCK)
                 )
-                block = client.readLogBlock(address, blockSize)
+                block = client.readLogBlock(address, blockSize, BLOCK_IDLE_TIMEOUT)
             }
 
             if (block.filled == 0) {
@@ -327,6 +327,21 @@ class FlashDownloader(
          * Cheap insurance against abandoning a 25-minute transfer.
          */
         const val ATTEMPTS_PER_BLOCK = 3
+
+        /**
+         * Silence that ends a block read, before retrying.
+         *
+         * A working block arrives as ~32 chunks in about a second, so
+         * consecutive chunks are roughly 33 ms apart. The 10 s default was
+         * therefore 300x longer than any legitimate gap, and it was paid in
+         * full every time a block came up short: 11 retries in one run cost
+         * 110 s of a 240 s download, while the reads themselves totalled 101 s.
+         *
+         * 2.5 s is still 75x the normal inter-chunk gap, so it cannot end a
+         * healthy read, and it makes a failed block cost seconds instead of
+         * ten.
+         */
+        const val BLOCK_IDLE_TIMEOUT = 2_500L
 
         /**
          * The wrap probe reads block 0 and compares everything past the sector

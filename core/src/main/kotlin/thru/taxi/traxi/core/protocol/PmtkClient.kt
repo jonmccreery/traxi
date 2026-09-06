@@ -4,6 +4,8 @@ import thru.taxi.traxi.core.format.LogFormat
 import thru.taxi.traxi.core.transport.PmtkProtocolException
 import thru.taxi.traxi.core.transport.PmtkTimeoutException
 import thru.taxi.traxi.core.transport.Transport
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
 /**
  * Typed PMTK request/response over a [Transport], with ack matching, timeouts
@@ -400,12 +402,27 @@ class PmtkClient(
             body()
         } finally {
             onRestoring()
-            try {
-                writeLoggingEnabled(true)
-            } catch (e: Exception) {
-                val message = e.message ?: e.toString()
-                transcript.note("FAILED to re-enable logging: $message")
-                onRestoreFailed(message)
+            // NonCancellable is load-bearing, and its absence was a real bug.
+            //
+            // A `finally` does run when the coroutine is cancelled -- but every
+            // *suspending* call inside it aborts at its first suspension point.
+            // Both real transports wrap their I/O in withContext(Dispatchers.IO),
+            // which checks for cancellation, so `writeLoggingEnabled(true)`
+            // threw CancellationException before putting a single byte on the
+            // wire and the logger stayed switched off. The `finally` alone
+            // closed the exception path and left the cancellation path open.
+            //
+            // Reproduced: with a transport that suspends the way the real ones
+            // do, cancelling mid-body sent PMTK182,5 and never PMTK182,4.
+            // See LoggingPausedTest.
+            withContext(NonCancellable) {
+                try {
+                    writeLoggingEnabled(true)
+                } catch (e: Exception) {
+                    val message = e.message ?: e.toString()
+                    transcript.note("FAILED to re-enable logging: $message")
+                    onRestoreFailed(message)
+                }
             }
         }
     }

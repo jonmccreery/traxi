@@ -1,7 +1,13 @@
 package thru.taxi.traxi.core.protocol
 
 import thru.taxi.traxi.core.transport.SimulatedLoggerTransport
+import thru.taxi.traxi.core.transport.Transport
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -98,5 +104,66 @@ class LoggingPausedTest {
             restoringSeenAt in 0..enableAt,
             "onRestoring fired at $restoringSeenAt, enable was at $enableAt",
         )
+    }
+
+    // ---------------- cancellation ----------------
+
+    /**
+     * A transport that suspends for real on every call.
+     *
+     * [SimulatedLoggerTransport] does not: its `write` returns without ever
+     * reaching a suspension point, so a cancelled coroutine sails straight
+     * through it. Both real transports wrap their I/O in
+     * `withContext(Dispatchers.IO)`, which checks for cancellation -- so the
+     * simulator cannot reproduce the bug the test below exists for. It passed
+     * against the simulator while the device stayed switched off.
+     */
+    private class SuspendingTransport(val inner: SimulatedLoggerTransport) : Transport {
+        override val description get() = inner.description
+        override val isOpen get() = inner.isOpen
+        override suspend fun open() = withContext(Dispatchers.IO) { inner.open() }
+        override suspend fun write(bytes: ByteArray) =
+            withContext(Dispatchers.IO) { inner.write(bytes) }
+        override suspend fun read(dest: ByteArray, timeoutMillis: Long): Int =
+            withContext(Dispatchers.IO) { inner.read(dest, timeoutMillis) }
+        override fun close() = inner.close()
+    }
+
+    @Test
+    fun `logging is restored when the coroutine is cancelled mid-body`() = runBlocking {
+        // The regression. A `finally` runs on cancellation, but a suspending
+        // call inside it aborts at its first suspension point -- so without
+        // NonCancellable the enable is never sent and the logger is left off
+        // permanently. This test fails on the pre-fix code.
+        val sim = SimulatedLoggerTransport(ByteArray(0x1000), chunkSize = 0x400)
+        val transport = SuspendingTransport(sim)
+        transport.open()
+        val c = PmtkClient(transport, defaultTimeoutMillis = 1_000)
+
+        val job = launch(Dispatchers.Default) {
+            c.withLoggingPaused { delay(10_000) }
+        }
+        delay(300)
+        job.cancelAndJoin()
+
+        assertTrue(
+            sim.received.contains(Pmtk.WRITE_ENABLE_LOGGING),
+            "logging was left disabled after cancellation: ${sim.received}",
+        )
+    }
+
+    @Test
+    fun `a cancelled body still propagates cancellation`() = runBlocking {
+        // NonCancellable must cover only the restore. The cancellation itself
+        // has to keep travelling, or structured concurrency breaks.
+        val sim = SimulatedLoggerTransport(ByteArray(0x1000), chunkSize = 0x400)
+        val transport = SuspendingTransport(sim)
+        transport.open()
+        val c = PmtkClient(transport, defaultTimeoutMillis = 1_000)
+
+        val job = launch(Dispatchers.Default) { c.withLoggingPaused { delay(10_000) } }
+        delay(300)
+        job.cancelAndJoin()
+        assertTrue(job.isCancelled, "the job should still end cancelled")
     }
 }

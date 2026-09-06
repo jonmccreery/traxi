@@ -45,7 +45,9 @@ destroyed.
 > Byte-identical to `data/usb_final.bin` across the entire 5,479,850-byte common
 > prefix. Capture and transcript at `data/usb_clean_2026-09-06.{bin,log}`.
 >
-> **If you read one thing here, read §12** — the silent capture failure, which
+> **If the logger has stopped recording, go straight to §13** — it has the
+> recovery sequence, and the power cycle in step 2 is the part that is easy to
+> miss. **If you read one thing here, read §12** — the silent capture failure, which
 > is the only bug in this project that can cost data that never existed. After
 > that, §4.1 — why the same defect survived a
 > full hand-rolled implementation, a reader-thread rewrite and a library swap,
@@ -901,3 +903,108 @@ phone held nothing that was not reproducible.
 independent in AGP — compile-time identity and install identity. A future
 rebrand that only wants to look different can move `namespace` and leave
 `applicationId` alone, and cost nothing.
+
+---
+
+## 13. The logger stopped logging — device facts learned the hard way
+
+2026-09-06, after v1. The device refused to record for several hours while
+looking healthy. Most of a session went into it. What follows is the part worth
+keeping.
+
+### The recovery sequence
+
+```
+1. $PMTK182,6,1        FORMAT LOG ALL      (~22 s; SPI goes unresponsive, then RDY)
+2. POWER-CYCLE THE DEVICE                  <-- load-bearing
+3. $PMTK182,4          START_LOG           re-arm; a restart comes up disarmed
+4. restore config                          the format resets it (see below)
+```
+
+**Step 2 is the one that matters and the one we lost hours not knowing.** A
+format alone clears `need_format` and gives a clean flash, but the running
+firmware keeps its pre-format state: `START_LOG` goes on acking and the engine
+goes on dropping it within the second. It has to boot with a clean log area
+underneath it.
+
+**A format resets configuration.** Observed, not documented:
+
+| Field | After a format |
+|---|---|
+| `RCD METHOD` | **2 = STP** (was OVP) — restore with `$PMTK182,1,6,1` |
+| `BY_SEC` | 10 = 1.0 s |
+| `FMT_REG` | `0x0002002F` — not the manual's stated `0x0000000D` |
+
+### The LOG STATUS bitmask, decoded
+
+`PMTK182,2,7` returns a decimal bitmask. Bit meanings are from the BT747
+project; the 0-based indexing is confirmed against this device's own behaviour,
+and independently by GPSBabel, which tests `log_status & 2` for "enabled".
+
+| Bit | Value | Meaning |
+|---|---|---|
+| 1 | `0x0002` | auto_log by criteria ON/OFF |
+| 2 | `0x0004` | stop_when_full (STOP vs OVERWRITE) |
+| 8 | `0x0100` | device is in enable status |
+| 9 | `0x0200` | device is in disable status |
+| 10 | `0x0400` | **need_format** |
+| 11 | `0x0800` | memory_full |
+
+Observed on this device: `0x0102` recording, `0x0100` powered but not
+recording, `0x0104` after a format (STOP mode), `0x0504` with `need_format`
+asserted.
+
+### Query fields Traxi does not implement
+
+`Pmtk.ConfigField` knows 2–9. The device also answers:
+
+| Field | Query | Returns |
+|---|---|---|
+| 1 | `$PMTK182,2,1` | **SPI STATUS** — 1 RDY, 2 BSY, 3 FULL |
+| 10 | `$PMTK182,2,10` | RCD RCNT (record count; ~2x inflated on this firmware) |
+| 11 | `$PMTK182,2,11` | **RCD FSECTOR** — failed-sector register, 16 slots, `FFFF` = empty |
+| 12 | `$PMTK182,2,12` | logger library version (`139` = 1.39) |
+
+Traxi could not have reported `need_format` or a failing flash, because it never
+asks. Fields 1 and 11 are the two worth adding.
+
+### Commands 9–12 are engineering tooling. Do not use them.
+
+The manual lists `INIT_LOG` (9), `ENABLE_LOG` (10), `DISABLE_LOG` (11) and
+`WRITE_LOG <addr> <data>` (12) with **no description of what any of them do**.
+
+`$PMTK182,10` was sent on the reasoning that 4/5 drive the auto-log function
+while 10/11 drive the logger itself, and that its worst case was "rejected or a
+no-op". Both were guesses. It returned no acknowledgement at all, asserted
+`need_format`, and moved `RCD ADDR` to `0x00000002`. A power cycle and a format
+cleared it and nothing was lost, but the prediction was wrong in a way that
+could have been much worse on hardware that cannot be replaced.
+
+`WRITE_LOG` writes arbitrary bytes to an arbitrary flash address. That is the
+company these commands keep. The manual also warns of the adjacent PARTIAL
+format that it is "designed for the engineering test only", and elsewhere: *"DO
+NOT issue commands except the QUERY_LOG_STATUS, STATUS ($PMTK182,2,1)"*.
+
+### The LED means fix, not recording
+
+Verified over hours: steady blink, 3D DGPS fix on 7–8 satellites, HDOP 1.14,
+and **zero bytes written**. There is no local indicator of whether the device is
+recording. The app is the only honest signal, which is what §12's indicator is
+for.
+
+### What is still not explained
+
+The device logged for 18 months, then stopped at `2026-09-06T16:16:10Z`,
+fifteen minutes after a 5.6 MB USB download, around an unplug of a session the
+app never closed cleanly. `need_format` turning out to be genuinely asserted
+fits the manual's account of losing power mid-sector-init while logging. That is
+consistent, not proven.
+
+Also unexplained: after recovery the device reported `BY_SEC` as `100` when it
+had been set to `50`, with no write in between.
+
+### Sources
+
+- MTK GPS Logger Library User Manual 1.2 — `https://www.rigacci.org/wiki/lib/exe/fetch.php/doc/appunti/hardware/gps/mtk_logger_library_user_manual_1.2_tsi.pdf`
+- BT747 status bitmask — `https://sourceforge.net/p/bt747/discussion/696105/thread/19a6ddd7/`
+- GPSBabel `mtk_logger.cc` — `https://github.com/GPSBabel/gpsbabel/blob/master/mtk_logger.cc`

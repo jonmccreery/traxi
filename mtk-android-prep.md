@@ -1,6 +1,6 @@
 # Prep: Android app for the MTK GPS logger
 
-Working document for the btdroid project. Goal is to replace the vendor Android
+Working document for the Traxi project. Goal is to replace the vendor Android
 app that stopped working roughly a decade ago, for a MediaTek-chipset GPS data
 logger.
 

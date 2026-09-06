@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "ai.moonlite.btdroid"
+    namespace = "thru.taxi.traxi"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "ai.moonlite.btdroid"
+        applicationId = "thru.taxi.traxi"
 
         // API 31 is the floor because the target phone runs API 36. Below 31
         // the Bluetooth permission model is entirely different and would

@@ -6,7 +6,7 @@
       does not flash white on a dark phone at night, which is when this app is
       most likely to be opened.
     -->
-    <style name="Theme.Btdroid" parent="android:Theme.DeviceDefault.DayNight">
+    <style name="Theme.Traxi" parent="android:Theme.DeviceDefault.DayNight">
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowActionBar">false</item>
     </style>

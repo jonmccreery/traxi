@@ -1,4 +1,4 @@
-# btdroid: engineering record through v1
+# Traxi: engineering record through v1
 
 Started as a handoff for one unsolved USB corruption problem and grew into the
 project's record, because the two hardest bugs here were both found the same
@@ -12,6 +12,15 @@ edited away; several of them are the most useful paragraphs in the document.
 **v1 closed 2026-09-06.** USB transport fixed, erase built and gated, and a
 silent capture failure found and closed — see §12, which is the one section to
 read if you read nothing else.
+
+**Renamed 2026-09-06, immediately after v1 closed.** The project was `btdroid`
+in `ai.moonlite.btdroid` for its whole development; it is now **Traxi** in
+`thru.taxi.traxi`. Everything before this point in the git history says
+`btdroid`, and commit hashes quoted in this document are from that era — they
+are still valid, the name around them changed. The namespace also moved off
+`ai.moonlite`, which was never right: this is a personal project, not company
+work. See §14 for what the rename touched and the one thing it deliberately
+destroyed.
 
 > ## RESOLVED 2026-09-06 11:00 — commit `eadbb81`
 >
@@ -476,7 +485,7 @@ ADB=/opt/android-sdk/platform-tools/adb
 ```
 
 ```bash
-cd /home/taxi/btdroid
+cd /home/taxi/traxi
 $GRADLE :core:test              # 69 tests, no device needed
 $GRADLE :app:assembleDebug
 ```
@@ -485,7 +494,7 @@ $GRADLE :app:assembleDebug
 
 ```
 Samsung SM-G990U1, Android 16 / API 36
-package: ai.moonlite.btdroid.debug
+package: thru.taxi.traxi.debug
 ```
 
 Wireless ADB is essential — the USB port is needed for the logger:
@@ -542,8 +551,8 @@ The Share button writes the file *before* opening the chooser, so:
 $ADB shell input tap 951 2118          # Log tab
 $ADB shell input tap 163 644           # Share (writes cache/exports/)
 $ADB shell input keyevent KEYCODE_BACK # dismiss chooser, sends nothing
-$ADB exec-out run-as ai.moonlite.btdroid.debug \
-    cat cache/exports/btdroid-transcript.txt > transcript.txt
+$ADB exec-out run-as thru.taxi.traxi.debug \
+    cat cache/exports/traxi-transcript.txt > transcript.txt
 ```
 
 ### Analysing a transcript
@@ -568,7 +577,7 @@ grep -oE 'block 0x[0-9A-F]{8} [0-9]+/65536 bytes, [0-9]+ chunks, [0-9]+ ms' "$T"
 Poll every 15 s; retries are the failure signal and appear in the UI:
 
 ```bash
-$ADB shell dumpsys activity services ai.moonlite.btdroid.debug | grep -c DownloadService
+$ADB shell dumpsys activity services thru.taxi.traxi.debug | grep -c DownloadService
 # and state() | awk '/^Downloading$/{f=1;next} /^Stop/{f=0} f'
 ```
 
@@ -829,3 +838,66 @@ restarts.
 Relevant to §11 outstanding item 2: a full Bluetooth read is ~3 hours at
 493 B/s against a nearly-full chip. Three hours is long enough that a link drop
 is a question of when, and a restart-from-zero costs the whole run.
+
+---
+
+## 14. The rename to Traxi
+
+Done 2026-09-06, in the window between v1 closing and field testing starting.
+The timing was the point: `applicationId` cannot be changed without discarding
+the app's on-phone state, and that was cheap on this day and expensive on every
+day after it.
+
+`btdroid` was a placeholder — a name chosen in no time at all so there would be
+a directory to work in. Traxi is the author's trail name (*taxi*, carried 14
+years) with the track in it. The namespace `ai.moonlite` was also wrong and is
+gone: this is personal work, not company work.
+
+### What changed
+
+| From | To |
+|---|---|
+| `ai.moonlite.btdroid` | `thru.taxi.traxi` (Kotlin package, `namespace`, **and `applicationId`**) |
+| `rootProject.name = "btdroid"` | `"traxi"` |
+| `app_name` = `btdroid` | `Traxi` |
+| `BtdroidApplication` | `TraxiApplication` |
+| `BtdroidTheme` / `Theme.Btdroid` | `TraxiTheme` / `Theme.Traxi` |
+| `-Dbtdroid.dataDir` | `-Dtraxi.dataDir` (undocumented test override, set nowhere) |
+| GPX `creator="btdroid"` | `creator="Traxi"` |
+| `btdroid-transcript.txt` | `traxi-transcript.txt` |
+
+Verified by `:core:test` (all green) and `:app:assembleDebug`. The four
+deprecation warnings in the app build predate the rename.
+
+### What the rename destroyed, deliberately
+
+**`applicationId` is install identity, not a label.** Changing it means Android
+installs a different app rather than renaming one. Everything keyed to the
+package was abandoned in the old sandbox:
+
+- `filesDir/dumps` — every dump previously downloaded to the phone
+- DataStore preferences, including saved logger config
+- the per-package USB device permission grant
+- the Companion Device Manager association
+
+The Bluetooth bond survived: it lives in the phone's Bluetooth stack, keyed to
+the logger's MAC, not to the app.
+
+This was safe **only because of when it was done**. Every capture that matters
+was already on the laptop in `data/` — including `cdt_v2.bin`, which the
+`.gitignore` marks as the only copy of its trip — and the logger's flash was
+still deliberately full, so the device itself remained the source of truth. The
+phone held nothing that was not reproducible.
+
+> **If `applicationId` is ever changed again, it is not a rename — it is a data
+> migration.** Export every dump off the phone first and confirm the exports,
+> exactly as §11's erase run requires. On trail, where the phone's dumps are the
+> verified copies that license erasing the device, this operation would be a way
+> to lose a week of trail to a cosmetic change.
+
+### What was kept
+
+`namespace` and `applicationId` were changed together here, but they are
+independent in AGP — compile-time identity and install identity. A future
+rebrand that only wants to look different can move `namespace` and leave
+`applicationId` alone, and cost nothing.

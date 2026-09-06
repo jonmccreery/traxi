@@ -22,7 +22,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "btdroid"
+rootProject.name = "traxi"
 
 // Pure-JVM parser/protocol core. No Android dependencies, so the golden-file
 // and round-trip tests run on the desktop without a device or emulator.

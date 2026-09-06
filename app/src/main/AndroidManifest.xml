@@ -51,18 +51,18 @@
         android:required="false" />
 
     <application
-        android:name=".BtdroidApplication"
+        android:name=".TraxiApplication"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Btdroid">
+        android:theme="@style/Theme.Traxi">
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
-            android:theme="@style/Theme.Btdroid">
+            android:theme="@style/Theme.Traxi">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

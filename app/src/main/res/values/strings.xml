@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">btdroid</string>
+    <string name="app_name">Traxi</string>
 
     <string name="download_channel_name">Flash download</string>
     <string name="download_channel_description">Progress while reading the logger\'s memory</string>

@@ -1,6 +1,6 @@
 # How This Thing Knows Where You Are
 
-A technical companion to the btdroid project: what the MTK logger actually
+A technical companion to the Traxi project: what the MTK logger actually
 measures, how well, and how it writes it down.
 
 Every number attributed to "this device" was measured from `data/cdt_v2.bin` —

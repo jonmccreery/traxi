@@ -26,6 +26,10 @@ not inferred, unless explicitly marked as a hypothesis.
 > Byte-identical to `data/usb_final.bin` across the entire 5,479,850-byte common
 > prefix. Capture and transcript at `data/usb_clean_2026-09-06.{bin,log}`.
 >
+> **If you read one thing here, read §4.1** — why the same defect survived a
+> full hand-rolled implementation, a reader-thread rewrite and a library swap,
+> and what that should have told us three attempts earlier.
+>
 > Sections 1–5 and 10 below are kept as the record of how it was found. **§6
 > (device facts), §7 (environment), §8 (code map) and §9 (traps) are still
 > current and still worth reading.** Corrections from the resolving session are
@@ -106,10 +110,9 @@ endpoint max packet size). One byte off from a clean 20-packet loss.
 > but to change the one argument that decides which read path it uses. H4 and
 > H5 were never needed.
 >
-> **The lesson worth carrying:** the answer was in 30 lines of the dependency's
-> bytecode, reachable in minutes with `javap` on the cached AAR, after a whole
-> session of parameter changes on the near side of the interface. When a
-> library's behaviour is the suspect, read the library.
+> **The lesson worth carrying is in §4.1.** In short: the answer was thirty
+> lines of the dependency's bytecode, after a whole session of parameter changes
+> on the near side of the interface.
 
 ### H1 — the library reuses its read buffer (start here, one line to test)
 
@@ -179,7 +182,7 @@ Requesting 8 KB per `PMTK182,7` instead of 64 KB was tried and made things
 
 | Attempt | Result |
 |---|---|
-| Floor the bulk read timeout at 250 ms | No change. Wrong mechanism: losses were whole chunks, not truncated transfers |
+| Floor the bulk read timeout at 250 ms | No change. Wrong mechanism: losses were whole chunks, not truncated transfers. **But see §4.1 — `git log -S` finds no such change ever committed, so it is unclear what this was measured against** |
 | Hand-rolled reader thread keeping a read posted | Whole-chunk loss went 5 gaps → 0; retries and malformed lines remained |
 | Raise transfer timeout to 10 s | **Worse.** A larger buffer waiting longer accumulates more data before the timeout discards it |
 | Split requests into 8 KB for flow control | **Worse.** Reverted |
@@ -196,6 +199,118 @@ turned *off* rather than tuned.
 **Lesson from the session:** every change made without a measured mechanism
 either did nothing or made it worse. The two that helped came from
 instrumentation. Measure first.
+
+---
+
+## 4.1 Why the hand-rolled transport had the same disease
+
+Written after the fix, from the reverted code in `a5e9662`, `348972a` and
+`20a4b93`. This is the more useful cautionary tale, because the bug survived a
+complete rewrite of the transport and a change of library — which is precisely
+the signature of a defect in the *primitive* rather than in the code around it.
+
+### It was never escapable
+
+`UsbDeviceConnection.bulkTransfer` **is** the discard-on-timeout API, and it is
+the only read primitive the hand-rolled transport ever used. Android's non-lossy
+path — `UsbRequest.queue()` + `connection.requestWait()` — appears nowhere in
+those three commits. There was no argument you could pass to get correctness.
+
+### The first version had a feedback loop
+
+`a5e9662` called it straight from `read()`:
+
+```kotlin
+val n = conn.bulkTransfer(ep, dest, 0, dest.size, timeoutMillis.toInt().coerceAtLeast(1))
+```
+
+and `PmtkClient.awaitSentence` hands `read()` a **shrinking** budget:
+
+```kotlin
+val remaining = deadline - clock()
+val n = transport.read(readBuffer, remaining)
+```
+
+So as a block neared its deadline the URB timeout decayed — 500 ms, 200, 50, 5,
+floored at **1 ms** — and every expiry binned whatever that URB had collected.
+
+That is a positive feedback loop. Lose bytes → the block takes longer → the
+deadline is nearer → timeouts get shorter → more URBs are discarded per second →
+lose more bytes. It accounts for two things measured at the time but never
+connected: block times were bimodal (~1 s or blown out to 10 s, with nothing in
+between), and failures clustered at roughly 1 in 8 rather than spreading evenly.
+A block that began losing data was likely to keep losing it.
+
+### The reader thread fixed a real bug, just not this one
+
+`20a4b93` was correctly diagnosed and genuinely worked: decoupling reads from
+parsing closed the unposted-endpoint gap, and whole-chunk loss went 5 → 0. It
+kept the lossy primitive, though, and enlarged the wound:
+
+```kotlin
+private const val READ_TIMEOUT = 500
+private const val READ_BUFFER_BYTES = 16 * 1024
+val n = conn.bulkTransfer(ep, buffer, 0, buffer.size, READ_TIMEOUT)
+```
+
+A fixed 500 ms stopped the decay, but a 16 KB buffer meant each expiry could
+discard up to 16 KB — the largest loss quantum of any version. The
+instrumentation counted them and nobody read them as losses:
+
+```
+reads=46250  timeouts=90 (0.2%)  slow>250ms=266  avg=267 bytes/read
+```
+
+**Those 90 timeouts were 90 discard events.** They were in the transcript the
+whole time, labelled as timeouts.
+
+### The library swap moved the quantum, not the bug
+
+`9fac12b` set `readTimeout = 200`, so `SerialInputOutputManager` called the same
+`bulkTransfer`. What improved was incidental: SIOM sizes its buffer at one max
+packet, so the loss quantum collapsed from 16 KB to 64 bytes and unrecovered
+gaps went 5 → 1. Same weapon, smaller wounds.
+
+That is the through-line for the entire table in §4. Timeout floor, buffer size,
+request splitting, longer timeout — every one of them moved the *quantum* of the
+discard. None of them removed the discard.
+
+### What the library was actually worth
+
+Not the drivers, and not the fix. `READ_TIMEOUT = 0` would have worked in the
+hand-rolled version too, since `bulkTransfer` documents 0 as infinite. But an
+infinite `bulkTransfer` parks a thread in a native ioctl that `Thread.interrupt`
+cannot abort, and `close()` did exactly that:
+
+```kotlin
+running = false
+reader?.interrupt()
+```
+
+On disconnect, that hangs. `UsbRequest` is cancellable — `port.close()` calls
+`mUsbRequest.cancel()`, which is what makes `readTimeout = 0` safe to ship.
+**The library did not supply the fix; it supplied a read path the fix could be
+applied to.**
+
+### The lesson to carry
+
+Measure first is right but insufficient — this session measured constantly. The
+sharper rule:
+
+> **When one symptom survives several well-reasoned fixes, stop tuning
+> parameters and go read the primitive.**
+
+Four attempts moved numbers around on the near side of `bulkTransfer`. The
+answer was thirty lines of bytecode on the far side, reachable in minutes:
+
+```bash
+unzip -o ~/.gradle/caches/modules-2/files-2.1/com.github.mik3y/\
+usb-serial-for-android/3.8.1/*/usb-serial-for-android-3.8.1.aar classes.jar
+unzip -o classes.jar && javap -p -c com/hoho/android/usbserial/driver/CommonUsbSerialPort.class
+```
+
+No device, no run, no guessing. When a dependency's behaviour is the suspect,
+decompile the dependency.
 
 ---
 

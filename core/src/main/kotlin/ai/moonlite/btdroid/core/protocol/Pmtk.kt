@@ -38,9 +38,24 @@ object Pmtk {
     const val WRITE_ENABLE_LOGGING = "PMTK182,4"
     const val WRITE_DISABLE_LOGGING = "PMTK182,5"
 
-    // Deliberately absent: `PMTK182,6,1` (erase flash). The flash is the only
-    // copy of the data and the device is unreliable about its own state, so
-    // this project does not implement erase at all. See prep doc section 8.
+    /**
+     * Erase the entire log flash. **Irreversible, and the flash is the only
+     * copy of the data.**
+     *
+     * An earlier revision left this command deliberately unimplemented. That
+     * was wrong, and prep doc §0.2 records why: the device holds 21 days of
+     * logging at the interval this user wants, against a thru-hike of four to
+     * six months. *Dump, verify, erase, repeat* is the only workflow the
+     * hardware supports, and it has to run from a trailhead with no computer.
+     * Refusing to erase does not make the data safe, it makes the device
+     * useless once full.
+     *
+     * The safety argument survives intact; it belongs in the gate rather than
+     * in a refusal. Never call this without going through [EraseGate], and
+     * prefer [FlashEraser], which owns the disable/erase/verify/restore
+     * sequence.
+     */
+    const val WRITE_ERASE_FLASH = "PMTK182,6,1"
 
     /**
      * Configuration fields addressable by `PMTK182,1,<id>` (write) and

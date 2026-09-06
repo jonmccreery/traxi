@@ -321,6 +321,39 @@ class PmtkClient(
         transcript.note("logging ${if (enabled) "enabled" else "disabled"}")
     }
 
+    /**
+     * Erase the whole log flash.
+     *
+     * **Irreversible.** Do not call this directly -- [FlashEraser] owns the
+     * surrounding sequence (disable logging, erase, verify, restore) and
+     * [EraseGate] owns the decision. This method is only the wire exchange.
+     *
+     * Two departures from every other write here, both deliberate:
+     *
+     *  - the ack timeout defaults to 90 s. Erase takes seconds to tens of
+     *    seconds on this chip because it is a whole-device flash erase, and the
+     *    ordinary 3 s budget would report failure on a command that is working.
+     *  - **no retries.** Everywhere else a timeout most likely means the request
+     *    was lost, so re-sending is right. Here a timeout most likely means the
+     *    erase is still running, and re-sending would interrupt a flash erase
+     *    partway. A single attempt that reports honestly is safer than a retry
+     *    that might succeed.
+     */
+    suspend fun writeEraseFlash(timeoutMillis: Long = ERASE_TIMEOUT_MILLIS) {
+        transcript.note("ERASING FLASH -- irreversible")
+        val sentence = exchange(
+            Pmtk.WRITE_ERASE_FLASH,
+            timeoutMillis = timeoutMillis,
+            retries = 1,
+        ) { Pmtk.Ack.from(it)?.command == "182" }
+        val ack = Pmtk.Ack.from(sentence)
+            ?: throw PmtkProtocolException("no ack for erase")
+        if (!ack.isSuccess) {
+            throw PmtkProtocolException("erase rejected, flag ${ack.flag}")
+        }
+        transcript.note("erase acknowledged")
+    }
+
     data class LogBlock(
         val address: Int,
         val bytes: ByteArray,
@@ -357,6 +390,13 @@ class PmtkClient(
          */
         /** Upper bound on draining stale input before a block request. */
         private const val DRAIN_MILLIS = 300L
+
+        /**
+         * Ack budget for a whole-flash erase. Generous on purpose: the cost of
+         * waiting too long is a slow UI, the cost of waiting too little is
+         * reporting failure for an erase that in fact completed.
+         */
+        const val ERASE_TIMEOUT_MILLIS = 90_000L
 
         private const val MAX_QUEUED = 256
 

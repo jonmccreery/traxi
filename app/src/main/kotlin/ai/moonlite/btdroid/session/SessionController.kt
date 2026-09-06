@@ -7,7 +7,9 @@ import ai.moonlite.btdroid.core.format.GpsRollover
 import ai.moonlite.btdroid.core.format.LogFormat
 import ai.moonlite.btdroid.core.format.MtkLogParser
 import ai.moonlite.btdroid.core.format.Quality
+import ai.moonlite.btdroid.core.protocol.EraseGate
 import ai.moonlite.btdroid.core.protocol.FlashDownloader
+import ai.moonlite.btdroid.core.protocol.FlashEraser
 import ai.moonlite.btdroid.core.protocol.Pmtk
 import ai.moonlite.btdroid.core.protocol.PmtkClient
 import ai.moonlite.btdroid.core.protocol.RingTranscript
@@ -73,6 +75,15 @@ data class ParseSummary(
     val rejected: Map<Quality.Rejection, Int>,
 )
 
+/**
+ * Progress of an erase, for a UI that must not look frozen while a whole-chip
+ * flash erase runs for tens of seconds.
+ */
+data class EraseState(
+    val running: Boolean = false,
+    val phase: FlashEraser.Phase? = null,
+)
+
 sealed interface ConnectionState {
     data object Disconnected : ConnectionState
     data class Connecting(val target: String) : ConnectionState
@@ -110,6 +121,37 @@ class SessionController(
 
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
+
+    private val _erase = MutableStateFlow(EraseState())
+    val erase: StateFlow<EraseState> = _erase.asStateFlow()
+
+    /**
+     * The dump this session may erase against, or null if there is not one.
+     *
+     * Populated only when a download completes **and** the resulting file is
+     * then parsed cleanly, which is prep doc §0.2 clause 1: not "a download
+     * happened", but an image on disk that has been read back and understood.
+     * Cleared on disconnect and whenever a new download starts, so it can never
+     * outlive the state it describes.
+     */
+    private val _eraseEvidence = MutableStateFlow<EraseGate.Evidence?>(null)
+    val eraseEvidence: StateFlow<EraseGate.Evidence?> = _eraseEvidence.asStateFlow()
+
+    /**
+     * The download half of the evidence, waiting for its parse.
+     *
+     * Held separately so that parsing some *other* dump from the list -- an old
+     * one, or one from a previous session -- cannot be mistaken for verifying
+     * the one just downloaded.
+     */
+    private data class PendingEvidence(
+        val file: File,
+        val coveredBytes: Int,
+        val downloadComplete: Boolean,
+        val damagedBytes: Int,
+    )
+
+    private var pendingEvidence: PendingEvidence? = null
 
     private var transport: Transport? = null
     private var client: PmtkClient? = null
@@ -300,6 +342,10 @@ class SessionController(
             cancelDownload()
             disconnectQuietly()
             _connection.value = ConnectionState.Disconnected
+            // "In the current session" means against *this* connection. A
+            // logger that has been unplugged may come back with more data on
+            // it, or be a different logger entirely.
+            invalidateEraseEvidence()
         }
     }
 
@@ -422,6 +468,7 @@ class SessionController(
         if (downloadJob?.isActive == true) return
 
         cancelRequested = false
+        invalidateEraseEvidence()
         downloadJob = scope.launch {
             try {
                 val previous = dumps.read(source)
@@ -454,6 +501,12 @@ class SessionController(
                 }
 
                 dumps.save(target, result.image, partial = !result.isComplete)
+                pendingEvidence = PendingEvidence(
+                    file = target,
+                    coveredBytes = result.image.size,
+                    downloadComplete = result.isComplete,
+                    damagedBytes = result.damagedBytes,
+                )
                 val gained = result.image.size - previous.size
                 _message.value = when {
                     result.failure != null ->
@@ -482,6 +535,9 @@ class SessionController(
         if (downloadJob?.isActive == true) return
 
         cancelRequested = false
+        // Any previous verdict describes a dump that is no longer the newest
+        // thing we know about the device. Drop it before the first byte lands.
+        invalidateEraseEvidence()
         downloadJob = scope.launch {
             var target = resumeFile
             var existing = ByteArray(0)
@@ -526,6 +582,12 @@ class SessionController(
                 // Save whenever there are bytes, including after a failure. The
                 // bytes are the whole point; the error is only how it ended.
                 dumps.save(target, result.image, partial = partial)
+                pendingEvidence = PendingEvidence(
+                    file = target,
+                    coveredBytes = result.image.size,
+                    downloadComplete = result.isComplete,
+                    damagedBytes = result.damagedBytes,
+                )
                 val kb = result.image.size / 1024
                 _message.value = when {
                     result.isDamaged ->
@@ -575,8 +637,139 @@ class SessionController(
                     waypoints = result.fixes.count { it.isWaypoint },
                     rejected = filtered.rejected,
                 )
+
+                // Clause 1 completes here, and only for the file this session
+                // actually downloaded. Parsing an older dump from the list must
+                // never license erasing what is on the device now.
+                val pending = pendingEvidence
+                if (pending != null && pending.file == file) {
+                    _eraseEvidence.value = EraseGate.Evidence(
+                        fileName = file.name,
+                        coveredBytes = pending.coveredBytes,
+                        downloadComplete = pending.downloadComplete,
+                        damagedBytes = pending.damagedBytes,
+                        fixes = result.fixes.size,
+                        checksumFailures = result.stats.checksumFailures,
+                    )
+                }
             } catch (e: Exception) {
                 _message.value = "Parse failed: ${e.message}"
+                // A dump that would not parse is not verified, whatever the
+                // downloader thought of it.
+                if (pendingEvidence?.file == file) invalidateEraseEvidence()
+            }
+        }
+    }
+
+    // ---------------- erase ----------------
+
+    private fun invalidateEraseEvidence() {
+        pendingEvidence = null
+        _eraseEvidence.value = null
+    }
+
+    /**
+     * Reasons the device may not be erased right now, re-checked against a
+     * **freshly read** write pointer.
+     *
+     * Suspends because of that read. The UI calls this to render the gate, and
+     * again implicitly inside [eraseFlash] -- the displayed list is a courtesy,
+     * the one inside the action is the decision.
+     */
+    suspend fun eraseBlockers(): List<EraseGate.Blocker> {
+        val c = client
+            ?: return listOf(
+                EraseGate.Blocker(
+                    "Not connected to a logger.",
+                    "Connect over USB or Bluetooth first.",
+                )
+            )
+        // Must return *before* touching the device. This is called from a
+        // LaunchedEffect that re-fires when the evidence changes, and starting
+        // a download clears the evidence -- so without this guard, rendering
+        // the gate would inject a PMTK182,2,8 query into the middle of an
+        // active block read and corrupt the transfer.
+        if (downloadJob?.isActive == true || _erase.value.running) {
+            return listOf(
+                EraseGate.Blocker(
+                    "The logger is busy.",
+                    "Wait for the current transfer to finish.",
+                )
+            )
+        }
+        val pointer = runCatching { c.queryWritePointer() }.getOrNull()
+        return EraseGate.blockers(_eraseEvidence.value, pointer)
+    }
+
+    /**
+     * Erase the logger, if and only if the gate permits it.
+     *
+     * **This is deliberately not called from anywhere but a user's explicit
+     * tap** — prep doc §0.2 clause 4. Chaining it onto a download-complete
+     * callback would be convenient and is exactly the shape of automation that
+     * turns one mistaken tap into lost data.
+     *
+     * The gate is re-evaluated here against a write pointer read at this
+     * moment, not against whatever the UI last rendered. Between the screen
+     * being drawn and the button being pressed the logger keeps recording, and
+     * the check that matters is the one closest to the irreversible act.
+     *
+     * The pre-erase dump is never touched, per clause 7. It is the only copy of
+     * that data until the user exports it.
+     */
+    fun eraseFlash(typedConfirmation: String, onDone: () -> Unit = {}) {
+        val c = client ?: run { _message.value = "Not connected"; return }
+        if (_erase.value.running || downloadJob?.isActive == true) return
+
+        scope.launch {
+            _erase.value = EraseState(running = true)
+            try {
+                val evidence = _eraseEvidence.value
+                val pointer = runCatching { c.queryWritePointer() }.getOrNull()
+
+                if (!EraseGate.permits(evidence, pointer, typedConfirmation)) {
+                    val blockers = EraseGate.blockers(evidence, pointer)
+                    _message.value = when {
+                        blockers.isNotEmpty() ->
+                            "Erase refused — ${blockers.first().reason} ${blockers.first().remedy}"
+                        else ->
+                            "Erase refused — the confirmation did not match. " +
+                                "Type the fix count from the parse summary."
+                    }
+                    transcript.note("erase refused: ${blockers.size} blocker(s)")
+                    return@launch
+                }
+
+                val result = FlashEraser(c).erase { phase ->
+                    _erase.value = _erase.value.copy(phase = phase)
+                }
+
+                _message.value = when {
+                    result.isClean && result.loggingRestored ->
+                        "Flash erased and verified empty. " +
+                            "${evidence?.fileName} is still on this phone — export it before it matters."
+                    result.isClean ->
+                        "Flash erased and verified, but logging could NOT be re-enabled. " +
+                            "Turn the logger off and on before relying on it."
+                    result.erased && !result.verified ->
+                        "The logger acknowledged the erase but sector 0 still holds data. " +
+                            "Treat the flash as NOT erased — ${result.failure}"
+                    else ->
+                        "Erase failed — ${result.failure ?: "the logger did not respond"}"
+                }
+
+                // Whatever happened, what we know about the device is now stale.
+                invalidateEraseEvidence()
+                runCatching { refreshConfig() }
+                if (!result.isClean) noticeIfLinkDied()
+            } catch (e: Exception) {
+                transcript.note("erase failed: ${e.message}")
+                _message.value = "Erase failed: ${e.message}"
+                invalidateEraseEvidence()
+                noticeIfLinkDied()
+            } finally {
+                _erase.value = EraseState(running = false)
+                onDone()
             }
         }
     }

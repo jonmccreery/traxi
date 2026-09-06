@@ -64,8 +64,42 @@ class SimulatedLoggerTransport(
     /** JEDEC RDID the real device returns: EON, EN25QH series, 8 MB. */
     private val flashIdHex: String = "1C70171C",
     private val modelName: String = "BT-Q1000XT",
+    /**
+     * Acknowledge `PMTK182,6,1` but do not actually erase.
+     *
+     * Reproduces the failure prep doc §0.2 clause 6 exists to catch: a device
+     * that reports success and leaves the flash untouched, so the user believes
+     * they have free space until the chip fills early in the field. Without a
+     * way to simulate it, the verification step is untested code guarding
+     * against a condition nobody has ever seen fail.
+     */
+    private val eraseSilentlyFails: Boolean = false,
     override val description: String = "simulated logger",
 ) : Transport {
+
+    /**
+     * Set once the flash has been erased.
+     *
+     * A flag rather than filling [flash] with 0xFF: the array belongs to the
+     * caller, and a simulator that quietly destroys the test fixture it was
+     * handed is its own kind of data-loss bug.
+     */
+    private var erased = false
+
+    /** Moves to zero on erase, as the real device's does. */
+    private var currentWritePointer = writePointer
+
+    private val _received = mutableListOf<String>()
+
+    /**
+     * Every complete sentence the client sent, payload only, in order.
+     *
+     * Exposed so a test can assert on the *order* of a command sequence rather
+     * than only on its outcome. For erase that distinction is the whole point:
+     * an erase issued before logging was disabled would still return a clean
+     * result while doing the one thing the sequence exists to prevent.
+     */
+    val received: List<String> get() = _received
 
     /**
      * Pending response bytes. A plain buffer with a read cursor rather than a
@@ -142,6 +176,7 @@ class SimulatedLoggerTransport(
     private fun handle(line: String) {
         val sentence = ai.moonlite.btdroid.core.protocol.Nmea.parse(line) ?: return
         val f = sentence.fields
+        _received += sentence.fields.joinToString(",")
 
         when {
             f[0] == "PMTK605" ->
@@ -160,7 +195,7 @@ class SimulatedLoggerTransport(
                     "7" -> reply("PMTK182,3,7,256")
                     // A byte address, not a record count -- confirmed against
                     // the real device.
-                    "8" -> reply("PMTK182,3,8,%08X".format(writePointer))
+                    "8" -> reply("PMTK182,3,8,%08X".format(currentWritePointer))
                     // A JEDEC RDID, not a byte count. Long assumed broken.
                     "9" -> reply("PMTK182,3,9,$flashIdHex")
                     else -> Unit
@@ -182,6 +217,14 @@ class SimulatedLoggerTransport(
 
             f[0] == "PMTK182" && f.getOrNull(1) == "5" ->
                 reply("PMTK001,182,5,3")
+
+            f[0] == "PMTK182" && f.getOrNull(1) == "6" -> {
+                if (!eraseSilentlyFails) {
+                    erased = true
+                    currentWritePointer = 0
+                }
+                reply("PMTK001,182,6,3")
+            }
         }
     }
 
@@ -193,7 +236,11 @@ class SimulatedLoggerTransport(
             val sb = StringBuilder(n * 2)
             for (i in 0 until n) {
                 val index = start + i
-                val byte = if (index in flash.indices) flash[index] else 0xFF.toByte()
+                val byte = when {
+                    erased -> 0xFF.toByte()
+                    index in flash.indices -> flash[index]
+                    else -> 0xFF.toByte()
+                }
                 sb.append("%02X".format(byte.toInt() and 0xFF))
             }
             reply("PMTK182,8,%08X,%s".format(start, sb))

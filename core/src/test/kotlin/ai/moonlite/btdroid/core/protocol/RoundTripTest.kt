@@ -453,17 +453,28 @@ class RoundTripTest {
     }
 
     @Test
-    fun `erase is not reachable from the command surface`() {
-        // Erase is out of scope entirely. Assert the payload is absent from the
-        // Pmtk object rather than merely unused, so adding it back is a
-        // deliberate act that breaks this test.
+    fun `erase is spelled exactly once and exactly correctly`() {
+        // This test previously asserted that no erase payload existed at all.
+        // Prep doc §0.2 reversed that: the device holds three weeks against a
+        // four-month trip, so refusing to erase does not keep the data safe, it
+        // makes the logger useless once full. The safety argument moved into
+        // EraseGate, which is tested separately and far more heavily.
+        //
+        // What is still worth pinning here is the payload itself. `PMTK182,6`
+        // takes a subcommand, this project only ever means `,1`, and a typo in
+        // a constant nothing else validates would be discovered on hardware, in
+        // the field, once.
         val payloads = Pmtk::class.java.declaredFields
             .filter { it.type == String::class.java }
             .mapNotNull { it.isAccessible = true; it.get(Pmtk) as? String }
-        assertTrue(
-            payloads.none { it.startsWith("PMTK182,6") },
-            "an erase payload has appeared in Pmtk: $payloads",
+        val eraseLike = payloads.filter { it.startsWith("PMTK182,6") }
+
+        assertEquals(
+            listOf("PMTK182,6,1"),
+            eraseLike,
+            "expected exactly one erase payload, spelled PMTK182,6,1",
         )
+        assertEquals("PMTK182,6,1", Pmtk.WRITE_ERASE_FLASH)
     }
 }
 

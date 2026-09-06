@@ -2,6 +2,7 @@ package ai.moonlite.btdroid.ui
 
 import ai.moonlite.btdroid.AppContainer
 import ai.moonlite.btdroid.core.format.LogFormat
+import ai.moonlite.btdroid.core.protocol.FlashEraser
 import ai.moonlite.btdroid.data.DumpRepository
 import ai.moonlite.btdroid.service.DownloadService
 import ai.moonlite.btdroid.session.ConnectionState
@@ -675,13 +676,110 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
         ) { Text("Restore original format") }
     }
 
+    EraseCard(container, busy)
+}
+
+/**
+ * The erase gate, rendered.
+ *
+ * The layout follows the decision rather than decorating it: when erase is not
+ * permitted the card shows *why*, and what would open it, instead of a greyed
+ * button with no explanation. A gate that only says no teaches people to look
+ * for a way round it.
+ */
+@Composable
+private fun EraseCard(container: AppContainer, parentBusy: Boolean) {
+    val session = container.session
+    val evidence by session.eraseEvidence.collectAsState()
+    val eraseState by session.erase.collectAsState()
+    val downloadState by session.download.collectAsState()
+
+    var blockers by remember { mutableStateOf<List<ai.moonlite.btdroid.core.protocol.EraseGate.Blocker>>(emptyList()) }
+    // Deliberately not rememberSaveable. A typed confirmation for an
+    // irreversible action should not survive the process being killed and
+    // restored underneath the user.
+    var typed by remember { mutableStateOf("") }
+
+    // Re-check whenever the evidence changes or the device stops being busy.
+    // The pointer is read from the device, so this cannot be a pure function of
+    // UI state -- and it must not run mid-transfer, which eraseBlockers guards.
+    LaunchedEffect(evidence, eraseState.running, downloadState.running) {
+        blockers = session.eraseBlockers()
+    }
+
     SectionCard("Erase") {
         Text(
-            "btdroid cannot erase the logger. The flash is the only copy of your data, " +
-                "the erase is irreversible, and this device is demonstrably unreliable " +
-                "about its own state. The command is not implemented at all.",
+            "The logger holds about three weeks of tracking at five-second intervals. " +
+                "Dump, verify, erase, repeat is the only workflow that covers a long trip, " +
+                "so this is a normal part of using the device — but it is irreversible, " +
+                "and the flash is the only copy until you export.",
             style = MaterialTheme.typography.bodyMedium,
         )
+
+        HorizontalDivider()
+
+        if (blockers.isNotEmpty()) {
+            Text(
+                "Not available yet",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            for (b in blockers) {
+                Text(b.reason, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    b.remedy,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            return@SectionCard
+        }
+
+        val ready = evidence ?: return@SectionCard
+        val word = ai.moonlite.btdroid.core.protocol.EraseGate.confirmationWord(ready)
+
+        Row2("Verified against", ready.fileName)
+        Row2("Fixes held", ready.fixes.toString())
+        Text(
+            "This will destroy ${ready.fixes} fixes on the logger. ${ready.fileName} stays " +
+                "on this phone and is never deleted, but it is the only copy — export it " +
+                "first if you have not already.",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+
+        OutlinedTextField(
+            value = typed,
+            onValueChange = { typed = it },
+            label = { Text("Type $word to confirm") },
+            singleLine = true,
+            enabled = !eraseState.running && !parentBusy,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        if (eraseState.running) {
+            Text(
+                when (eraseState.phase) {
+                    FlashEraser.Phase.DISABLING_LOGGING -> "Disabling logging…"
+                    FlashEraser.Phase.ERASING -> "Erasing — this takes up to a minute…"
+                    FlashEraser.Phase.VERIFYING -> "Reading sector 0 back to confirm…"
+                    FlashEraser.Phase.RESTORING_LOGGING -> "Re-enabling logging…"
+                    null -> "Working…"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        }
+
+        Button(
+            onClick = { session.eraseFlash(typed) { typed = "" } },
+            enabled = !eraseState.running && !parentBusy &&
+                ai.moonlite.btdroid.core.protocol.EraseGate.isConfirmed(typed, ready),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.error,
+                contentColor = MaterialTheme.colorScheme.onError,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Erase the logger") }
     }
 }
 

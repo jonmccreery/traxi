@@ -89,6 +89,9 @@ class SimulatedLoggerTransport(
     /** Moves to zero on erase, as the real device's does. */
     private var currentWritePointer = writePointer
 
+    /** Reported through `PMTK182,3,7`; starts on, as a live logger would be. */
+    private var logging = true
+
     private val _received = mutableListOf<String>()
 
     /**
@@ -192,7 +195,12 @@ class SimulatedLoggerTransport(
                     "4" -> reply("PMTK182,3,4,0")
                     "5" -> reply("PMTK182,3,5,0")
                     "6" -> reply("PMTK182,3,6,1")
-                    "7" -> reply("PMTK182,3,7,256")
+                    // Tracks the enable/disable commands rather than answering
+                    // a constant. It used to always report 256 -- logging off
+                    // -- which is both wrong for a device that is notionally
+                    // recording and useless for exercising the recording
+                    // indicator, since it could never change.
+                    "7" -> reply("PMTK182,3,7,${if (logging) 0x0102 else 0x0100}")
                     // A byte address, not a record count -- confirmed against
                     // the real device.
                     "8" -> reply("PMTK182,3,8,%08X".format(currentWritePointer))
@@ -212,11 +220,15 @@ class SimulatedLoggerTransport(
             f[0] == "PMTK182" && f.getOrNull(1) == "1" ->
                 reply("PMTK001,182,1,3")
 
-            f[0] == "PMTK182" && f.getOrNull(1) == "4" ->
+            f[0] == "PMTK182" && f.getOrNull(1) == "4" -> {
+                logging = true
                 reply("PMTK001,182,4,3")
+            }
 
-            f[0] == "PMTK182" && f.getOrNull(1) == "5" ->
+            f[0] == "PMTK182" && f.getOrNull(1) == "5" -> {
+                logging = false
                 reply("PMTK001,182,5,3")
+            }
 
             f[0] == "PMTK182" && f.getOrNull(1) == "6" -> {
                 if (!eraseSilentlyFails) {

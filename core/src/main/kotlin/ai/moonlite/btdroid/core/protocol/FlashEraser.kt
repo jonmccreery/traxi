@@ -59,39 +59,37 @@ class FlashEraser(
         var verified = false
         var pointerAfter: Long? = null
         var failure: String? = null
+        var restoreFailure: String? = null
 
         try {
             // Clause 5. Erasing while the logger is mid-record is exactly the
-            // kind of concurrent state this device handles badly.
+            // kind of concurrent state this device handles badly. The restore
+            // is the client's guarantee, not this method's -- see
+            // PmtkClient.withLoggingPaused.
             onPhase(Phase.DISABLING_LOGGING)
-            client.writeLoggingEnabled(false)
+            client.withLoggingPaused(
+                onRestoring = { onPhase(Phase.RESTORING_LOGGING) },
+                onRestoreFailed = { restoreFailure = it },
+            ) {
+                onPhase(Phase.ERASING)
+                client.writeEraseFlash()
+                erased = true
 
-            onPhase(Phase.ERASING)
-            client.writeEraseFlash()
-            erased = true
-
-            // Clause 6. An erase that silently failed leaves the user believing
-            // they have free space, and they discover otherwise when the chip
-            // fills a week early, in the field.
-            onPhase(Phase.VERIFYING)
-            verified = verify()
-            pointerAfter = client.queryWritePointer()
-            if (!verified) {
-                failure = "the logger acknowledged the erase but sector 0 still holds data"
+                // Clause 6. An erase that silently failed leaves the user
+                // believing they have free space, and they discover otherwise
+                // when the chip fills a week early, in the field.
+                onPhase(Phase.VERIFYING)
+                verified = verify()
+                pointerAfter = client.queryWritePointer()
+                if (!verified) {
+                    failure = "the logger acknowledged the erase but sector 0 still holds data"
+                }
             }
         } catch (e: Exception) {
             failure = e.message ?: e.toString()
         }
 
-        // Always attempt to restore, whatever happened above.
-        var restored = false
-        try {
-            onPhase(Phase.RESTORING_LOGGING)
-            client.writeLoggingEnabled(true)
-            restored = true
-        } catch (e: Exception) {
-            client.transcript.note("could not re-enable logging after erase: ${e.message}")
-        }
+        val restored = restoreFailure == null
 
         return Result(
             erased = erased,

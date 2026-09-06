@@ -314,11 +314,11 @@ class SessionController(
         val flash = c.queryFlashId()
         val pointer = c.queryWritePointer()
 
-        // Only Bluetooth has an ACL broadcast to watch. A USB unplug surfaces
-        // as a failed transfer instead, which noticeIfLinkDied() picks up.
         if (!simulated && t.description.startsWith("bluetooth ")) {
             connectedAddress = t.description.substringAfterLast(' ')
             connectedAddress?.let { watchLink(it) }
+        } else if (!simulated && t.description.startsWith("usb ")) {
+            watchUsbDetach()
         }
 
         _connection.value = ConnectionState.Connected(
@@ -377,6 +377,39 @@ class SessionController(
             receiver,
             android.content.IntentFilter(
                 android.bluetooth.BluetoothDevice.ACTION_ACL_DISCONNECTED
+            ),
+        )
+        linkWatcher = receiver
+    }
+
+    /**
+     * Notice an OTG cable being pulled.
+     *
+     * This used to be left to `noticeIfLinkDied()`, on the reasoning that a USB
+     * unplug "surfaces as a failed transfer". It does -- but only if there *is*
+     * a transfer. An idle session sat there reporting "Connected" to a device
+     * that was no longer physically attached, and the first thing to fail was
+     * whatever the user tried next, with an error that pointed nowhere near a
+     * cable. Android broadcasts the detach, so there is no reason to wait.
+     *
+     * Matched on vendor and product id rather than on the device object, which
+     * does not compare usefully across processes.
+     */
+    private fun watchUsbDetach() {
+        stopWatchingLink()
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(ctx: android.content.Context?, intent: android.content.Intent?) {
+                if (intent?.action != android.hardware.usb.UsbManager.ACTION_USB_DEVICE_DETACHED) return
+                val gone: android.hardware.usb.UsbDevice? =
+                    intent.getParcelableExtra(android.hardware.usb.UsbManager.EXTRA_DEVICE)
+                if (gone != null && gone.vendorId != UsbSerialTransport.VENDOR_MEDIATEK) return
+                onLinkLost("The logger was unplugged.")
+            }
+        }
+        context.registerReceiver(
+            receiver,
+            android.content.IntentFilter(
+                android.hardware.usb.UsbManager.ACTION_USB_DEVICE_DETACHED
             ),
         )
         linkWatcher = receiver
@@ -777,6 +810,52 @@ class SessionController(
     // ---------------- config writes ----------------
 
     /**
+     * Wrap [PmtkClient.withLoggingPaused] and surface a restore failure.
+     *
+     * The guarantee itself lives in the client, where it is tested. This adds
+     * only the user-facing half: telling them, in the strongest terms the app
+     * has, that the device is not recording.
+     */
+    private suspend fun withLoggingPaused(c: PmtkClient, body: suspend () -> Unit) {
+        c.withLoggingPaused(
+            onRestoreFailed = { failure ->
+                _message.value =
+                    "The logger is NOT recording — re-enabling it failed ($failure). " +
+                        "Use Resume logging on the Config tab, or power-cycle the device."
+            },
+            body = body,
+        )
+    }
+
+    /**
+     * Turn logging on or off explicitly.
+     *
+     * The recovery path when something has left the device not recording, and
+     * the reason the log-status row in the UI is decoded rather than raw: a
+     * state the user can see is a state they can fix.
+     */
+    fun setLogging(enabled: Boolean, onDone: () -> Unit = {}) {
+        val c = client ?: run { _message.value = "Not connected"; return }
+        if (downloadJob?.isActive == true || _erase.value.running) {
+            _message.value = "The logger is busy"
+            onDone()
+            return
+        }
+        scope.launch {
+            try {
+                c.writeLoggingEnabled(enabled)
+                _message.value = if (enabled) "Logging resumed" else "Logging paused"
+                refreshConfig()
+            } catch (e: Exception) {
+                _message.value = "Could not ${if (enabled) "resume" else "pause"} logging: ${e.message}"
+                noticeIfLinkDied()
+            } finally {
+                onDone()
+            }
+        }
+    }
+
+    /**
      * Write the log interval.
      *
      * Logging is disabled first and restored afterwards, and the whole sequence
@@ -789,9 +868,9 @@ class SessionController(
             try {
                 val tenths = (seconds * 10).toInt()
                 require(tenths in 1..packedMaxTenths) { "interval out of range" }
-                c.writeLoggingEnabled(false)
-                c.writeConfig(Pmtk.ConfigField.TIME_INTERVAL, tenths.toString())
-                c.writeLoggingEnabled(true)
+                withLoggingPaused(c) {
+                    c.writeConfig(Pmtk.ConfigField.TIME_INTERVAL, tenths.toString())
+                }
                 _message.value = "Log interval set to ${seconds}s"
                 refreshConfig()
             } catch (e: Exception) {
@@ -812,12 +891,12 @@ class SessionController(
         val c = client ?: run { _message.value = "Not connected"; return }
         scope.launch {
             try {
-                c.writeLoggingEnabled(false)
-                c.writeConfig(
-                    Pmtk.ConfigField.LOG_FORMAT,
-                    "%08X".format(format.bits),
-                )
-                c.writeLoggingEnabled(true)
+                withLoggingPaused(c) {
+                    c.writeConfig(
+                        Pmtk.ConfigField.LOG_FORMAT,
+                        "%08X".format(format.bits),
+                    )
+                }
                 _message.value = "Log format set to ${format.describe()}"
                 refreshConfig()
             } catch (e: Exception) {
@@ -833,8 +912,16 @@ class SessionController(
         val current = _connection.value as? ConnectionState.Connected ?: return
         val format = runCatching { c.queryLogFormat() }.getOrNull() ?: return
         val interval = runCatching { c.queryTimeIntervalSeconds() }.getOrNull() ?: return
+        // Re-read the log status too. Without this the recording indicator kept
+        // whatever it said at connect, so pausing or resuming logging changed
+        // the device and not the one row in the UI that reports it.
+        val status = runCatching { c.queryLogStatus() }.getOrDefault(current.info.logStatus)
         _connection.value = ConnectionState.Connected(
-            current.info.copy(logFormat = format, timeIntervalSeconds = interval)
+            current.info.copy(
+                logFormat = format,
+                timeIntervalSeconds = interval,
+                logStatus = status,
+            )
         )
     }
 

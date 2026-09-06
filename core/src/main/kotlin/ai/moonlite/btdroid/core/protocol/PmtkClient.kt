@@ -322,6 +322,47 @@ class PmtkClient(
     }
 
     /**
+     * Run [body] with logging disabled, and **always** switch it back on.
+     *
+     * Both config writes used to spell this out longhand as disable / write /
+     * enable with no `finally`. When the write in the middle threw -- a
+     * timeout, a rejected ack, a cable pulled -- logging stayed off, and the
+     * only thing reported was that the setting change had failed. The device
+     * then sat there powered on and not recording, which looks identical to
+     * recording until the trip is over.
+     *
+     * Lives here rather than in the caller so the guarantee is tested once and
+     * cannot be re-broken by the next call site that needs it.
+     *
+     * @param onRestoring invoked immediately before logging is switched back
+     *   on, for callers reporting progress.
+     * @param onRestoreFailed invoked with the failure message if logging could
+     *   not be switched back on. A callback rather than a return value or an
+     *   exception, because it must reach the caller even when [body] itself
+     *   threw — that is precisely the case where the device is most likely to
+     *   be left silently not recording, and a `return` never runs.
+     */
+    suspend fun withLoggingPaused(
+        onRestoring: () -> Unit = {},
+        onRestoreFailed: (String) -> Unit = {},
+        body: suspend () -> Unit,
+    ) {
+        writeLoggingEnabled(false)
+        try {
+            body()
+        } finally {
+            onRestoring()
+            try {
+                writeLoggingEnabled(true)
+            } catch (e: Exception) {
+                val message = e.message ?: e.toString()
+                transcript.note("FAILED to re-enable logging: $message")
+                onRestoreFailed(message)
+            }
+        }
+    }
+
+    /**
      * Erase the whole log flash.
      *
      * **Irreversible.** Do not call this directly -- [FlashEraser] owns the

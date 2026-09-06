@@ -3,6 +3,7 @@ package ai.moonlite.btdroid.ui
 import ai.moonlite.btdroid.AppContainer
 import ai.moonlite.btdroid.core.format.LogFormat
 import ai.moonlite.btdroid.core.protocol.FlashEraser
+import ai.moonlite.btdroid.core.protocol.Pmtk
 import ai.moonlite.btdroid.data.DumpRepository
 import ai.moonlite.btdroid.service.DownloadService
 import ai.moonlite.btdroid.session.ConnectionState
@@ -373,7 +374,27 @@ private fun DeviceInfoCard(info: DeviceInfo, simulated: Boolean) {
         Row2("Log format", "0x%08X".format(info.logFormat.bits))
         Row2("Fields", info.logFormat.describe(), mono = true)
         Row2("Interval", "${info.timeIntervalSeconds} s")
-        Row2("Status", info.logStatus)
+
+        // Decoded, and called out when it is off. A logger that is not
+        // recording is indistinguishable from one that is until the trip ends,
+        // so this is the one status the user must not have to interpret.
+        val status = Pmtk.LogStatus.parse(info.logStatus)
+        if (status == null) {
+            Row2("Status", info.logStatus)
+        } else if (status.isLoggingEnabled) {
+            Row2("Status", status.describe())
+        } else {
+            Text(
+                "NOT RECORDING",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.error,
+            )
+            Text(
+                "The logger is powered on but not writing fixes. This is how it is " +
+                    "left if a settings write is interrupted partway.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
 
         info.flash?.let { Row2("Flash", it.describe()) }
         info.writePointer?.let { Row2("Written", "${it / 1024} KB") }
@@ -622,6 +643,36 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
                 "afterwards. Nothing here happens as a side effect of connecting.",
             style = MaterialTheme.typography.bodyMedium,
         )
+    }
+
+    SectionCard("Recording") {
+        val status = Pmtk.LogStatus.parse(info.logStatus)
+        Row2("Status", status?.describe() ?: info.logStatus)
+        Text(
+            "Pausing is not needed for a download — reading the flash does not stop " +
+                "the logger. This is here so a device left switched off by an " +
+                "interrupted write can be switched back on.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        if (status?.isLoggingEnabled != true) {
+            Button(
+                onClick = {
+                    busy = true
+                    container.session.setLogging(true) { busy = false }
+                },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Resume logging") }
+        } else {
+            OutlinedButton(
+                onClick = {
+                    busy = true
+                    container.session.setLogging(false) { busy = false }
+                },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Pause logging") }
+        }
     }
 
     SectionCard("Log interval") {

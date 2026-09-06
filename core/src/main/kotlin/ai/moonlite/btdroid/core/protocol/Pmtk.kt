@@ -101,6 +101,51 @@ object Pmtk {
         FLASH_SIZE(9),
     }
 
+    /**
+     * Decoded `PMTK182,3,7` log status.
+     *
+     * The device answers in **decimal**, and the meaning of the bits is not
+     * guesswork: the reference dump carries 200 type-`0x07` markers with arg
+     * `0x0100` and 200 with `0x0102`, which the internals doc identifies as
+     * logging disabled and enabled respectively. The only bit that differs is
+     * `0x02`, so that is the logging flag.
+     *
+     * Worth decoding rather than displaying raw, because "logging is off" is a
+     * state the user must be able to *see*. A logger that is not recording
+     * looks exactly like one that is, until the trip is over.
+     */
+    @JvmInline
+    value class LogStatus(val bits: Int) {
+
+        val isLoggingEnabled: Boolean get() = (bits and LOGGING_ENABLED) != 0
+
+        fun describe(): String =
+            if (isLoggingEnabled) "logging (0x%04X)".format(bits)
+            else "NOT logging (0x%04X)".format(bits)
+
+        companion object {
+            /** Set when the device is recording. `0x0102` vs `0x0100`. */
+            const val LOGGING_ENABLED = 0x0002
+
+            /**
+             * Parse the raw field, which the device sends in decimal.
+             *
+             * Hex is accepted as a fallback because nothing in the protocol
+             * guarantees the radix and a `0x` form would otherwise silently
+             * decode as zero -- which would read as "not logging" and send the
+             * user chasing a problem that does not exist.
+             */
+            fun parse(raw: String): LogStatus? {
+                val s = raw.trim()
+                if (s.isEmpty()) return null
+                val value = s.toIntOrNull()
+                    ?: s.removePrefix("0x").removePrefix("0X").toIntOrNull(16)
+                    ?: return null
+                return LogStatus(value)
+            }
+        }
+    }
+
     /** A `PMTK001` acknowledgement. */
     data class Ack(val command: String, val subcommand: String?, val flag: Int) {
         val isSuccess: Boolean get() = flag == FLAG_SUCCESS

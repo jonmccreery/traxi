@@ -200,6 +200,8 @@ class PmtkClient(
         // hex-encoded, interleaved with NMEA. Waiting on *silence* rather than
         // on a fixed budget works on both without either being tuned for.
         var lastProgress = clock()
+        val started = clock()
+        var chunks = 0
         val hardDeadline = clock() + overallTimeoutMillis
 
         while (filled < length && clock() < hardDeadline) {
@@ -233,10 +235,26 @@ class PmtkClient(
             }
             // Only genuine progress resets the idle clock. A chunk belonging to
             // some other block must not keep a stalled read alive.
-            if (placed > 0) lastProgress = clock()
+            if (placed > 0) {
+                lastProgress = clock()
+                chunks++
+            }
         }
 
-        return LogBlock(address, out, filled)
+        // Work out exactly which bytes never arrived.
+        val gaps = mutableListOf<IntRange>()
+        var runStart = -1
+        for (i in 0 until length) {
+            if (!covered[i]) {
+                if (runStart < 0) runStart = i
+            } else if (runStart >= 0) {
+                gaps += (address + runStart)..(address + i - 1)
+                runStart = -1
+            }
+        }
+        if (runStart >= 0) gaps += (address + runStart)..(address + length - 1)
+
+        return LogBlock(address, out, filled, gaps, clock() - started, chunks)
     }
 
     /**
@@ -290,7 +308,24 @@ class PmtkClient(
         transcript.note("logging ${if (enabled) "enabled" else "disabled"}")
     }
 
-    data class LogBlock(val address: Int, val bytes: ByteArray, val filled: Int) {
+    data class LogBlock(
+        val address: Int,
+        val bytes: ByteArray,
+        val filled: Int,
+        /**
+         * Byte ranges that never arrived, as absolute offsets.
+         *
+         * These matter enormously: a missing range is left as 0xFF, which is
+         * indistinguishable from erased flash. Without reporting it, a block
+         * with holes looks like a valid block that happens to end early, and
+         * the corruption is silent and parses cleanly.
+         */
+        val gaps: List<IntRange> = emptyList(),
+        /** Wall-clock milliseconds spent on this block. */
+        val elapsedMillis: Long = 0,
+        /** Response chunks received. */
+        val chunks: Int = 0,
+    ) {
         val isComplete: Boolean get() = filled == bytes.size
 
         override fun equals(other: Any?): Boolean =

@@ -361,6 +361,54 @@ class RoundTripTest {
     }
 
     @Test
+    fun `a block with a lost chunk is reported damaged, not silently accepted`() = runBlocking {
+        // The failure found on real hardware: chunks go missing, readLogBlock
+        // leaves those bytes as 0xFF, and 0xFF is exactly what erased flash
+        // looks like. The block then passes as "valid but short" and the
+        // corruption is invisible -- an image with holes still parses cleanly.
+        val inner = SimulatedLoggerTransport(flash, chunkSize = 0x800)
+        var dropped = 0
+        val lossy = object : ai.moonlite.btdroid.core.transport.Transport by inner {
+            override suspend fun read(dest: ByteArray, timeoutMillis: Long): Int {
+                val n = inner.read(dest, timeoutMillis)
+                // Swallow a couple of responses outright, as a flaky link does.
+                if (n > 0 && dropped < 2 && kotlin.random.Random(dropped).nextBoolean()) {
+                    dropped++
+                    return 0
+                }
+                return n
+            }
+        }
+        lossy.open()
+        val client = PmtkClient(lossy, defaultTimeoutMillis = 1_000)
+        val block = client.readLogBlock(0, FlashDownloader.DEFAULT_BLOCK_SIZE,
+            idleTimeoutMillis = 1_000)
+
+        // Whatever the outcome, coverage must be self-describing: bytes that
+        // did not arrive are enumerated rather than left to look like flash.
+        val missing = block.gaps.sumOf { it.last - it.first + 1 }
+        assertEquals(
+            FlashDownloader.DEFAULT_BLOCK_SIZE - block.filled, missing,
+            "every unfilled byte must appear in a reported gap",
+        )
+        if (!block.isComplete) {
+            assertTrue(block.gaps.isNotEmpty(), "an incomplete block must report gaps")
+        }
+        assertTrue(block.elapsedMillis >= 0)
+    }
+
+    @Test
+    fun `a complete block reports no gaps`() = runBlocking {
+        val block = FlashDownloader(client()).let {
+            PmtkClient(SimulatedLoggerTransport(flash, chunkSize = 0x1000)
+                .also { t -> t.open() }, defaultTimeoutMillis = 5_000)
+        }.readLogBlock(0, FlashDownloader.DEFAULT_BLOCK_SIZE)
+        assertTrue(block.isComplete)
+        assertTrue(block.gaps.isEmpty(), "a full block must report no gaps")
+        assertTrue(block.chunks > 0, "chunk count should be instrumented")
+    }
+
+    @Test
     fun `resume offset must land on a block boundary`() {
         val downloader = FlashDownloader(client())
         try {

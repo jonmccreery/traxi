@@ -53,8 +53,24 @@ class FlashDownloader(
          * is worth strictly more than none, and it is resumable.
          */
         val failure: String? = null,
+        /**
+         * Byte ranges that never arrived and are therefore 0xFF in [image].
+         *
+         * **This is the most dangerous condition this class can produce.** A
+         * missing range is indistinguishable from erased flash, so an image
+         * with holes parses cleanly and looks complete. Reporting them is what
+         * keeps that corruption from being silent — and no dump carrying them
+         * may be treated as a verified copy, least of all as grounds to erase
+         * the device.
+         */
+        val damagedRanges: List<IntRange> = emptyList(),
     ) {
-        val isComplete: Boolean get() = stoppedOnUnwritten && failure == null
+        val isComplete: Boolean
+            get() = stoppedOnUnwritten && failure == null && damagedRanges.isEmpty()
+
+        val isDamaged: Boolean get() = damagedRanges.isNotEmpty()
+
+        val damagedBytes: Int get() = damagedRanges.sumOf { it.last - it.first + 1 }
 
         override fun equals(other: Any?): Boolean =
             other is Result && sectorsRead == other.sectorsRead &&
@@ -184,6 +200,7 @@ class FlashDownloader(
         var retries = 0
         var consecutiveUnwritten = 0
         var stoppedOnUnwritten = false
+        val damaged = mutableListOf<IntRange>()
 
         if (resumeFrom > 0) {
             client.transcript.note("resuming download at 0x%08X".format(resumeFrom))
@@ -225,11 +242,27 @@ class FlashDownloader(
                 break
             }
 
-            if (!block.isComplete) {
-                client.transcript.note(
-                    "block 0x%08X incomplete (%d/%d) after $ATTEMPTS_PER_BLOCK attempts; " +
-                        "keeping what arrived".format(address, block.filled, blockSize)
+            // Per-block timing, so a link that stalls or bursts is visible
+            // rather than showing up only as a total that feels wrong.
+            client.transcript.note(
+                "block 0x%08X %d/%d bytes, %d chunks, %d ms (%.1f KB/s)".format(
+                    address, block.filled, blockSize, block.chunks, block.elapsedMillis,
+                    if (block.elapsedMillis > 0)
+                        block.filled / 1.024 / block.elapsedMillis else 0.0
                 )
+            )
+
+            if (!block.isComplete) {
+                damaged += block.gaps
+                client.transcript.note(
+                    ("block 0x%08X STILL INCOMPLETE after $ATTEMPTS_PER_BLOCK attempts: " +
+                        "%d bytes missing in %d gap(s). Those bytes read as 0xFF and are " +
+                        "indistinguishable from erased flash.").format(
+                        address, blockSize - block.filled, block.gaps.size)
+                )
+                block.gaps.take(4).forEach {
+                    client.transcript.note("    missing 0x%08X..0x%08X".format(it.first, it.last))
+                }
             }
 
             out.write(block.bytes, 0, blockSize)
@@ -260,7 +293,16 @@ class FlashDownloader(
             )
         }
 
-        return Result(out.toByteArray(), sectors, retries, stoppedOnUnwritten, failure)
+        if (damaged.isNotEmpty()) {
+            client.transcript.note(
+                "DOWNLOAD DAMAGED: %d bytes missing across %d range(s). This image must " +
+                    "not be trusted as a complete copy.".format(
+                    damaged.sumOf { it.last - it.first + 1 }, damaged.size)
+            )
+        }
+        return Result(
+            out.toByteArray(), sectors, retries, stoppedOnUnwritten, failure, damaged
+        )
     }
 
     private fun isUnwritten(block: ByteArray): Boolean =

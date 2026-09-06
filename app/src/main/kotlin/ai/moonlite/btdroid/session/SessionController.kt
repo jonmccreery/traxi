@@ -528,6 +528,9 @@ class SessionController(
                 dumps.save(target, result.image, partial = partial)
                 val kb = result.image.size / 1024
                 _message.value = when {
+                    result.isDamaged ->
+                        "Downloaded $kb KB but ${result.damagedBytes} bytes never arrived — " +
+                            "this copy has holes and is NOT a verified dump"
                     result.failure != null ->
                         "Interrupted after $kb KB — saved and resumable (${result.failure})"
                     partial -> "Stopped early — $kb KB saved and resumable"

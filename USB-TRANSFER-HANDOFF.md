@@ -3,9 +3,33 @@
 Written 2026-09-06 at the end of a long session. Everything here is measured,
 not inferred, unless explicitly marked as a hypothesis.
 
-**The state in one line:** USB transfer *works* and produces verified-correct
-dumps, but ~12% of blocks lose a chunk on first attempt and are silently
-recovered by retry. The corruption is not fixed, only survived.
+> ## RESOLVED 2026-09-06 11:00 — commit `eadbb81`
+>
+> **Cause:** `CommonUsbSerialPort.read` branches on its timeout argument.
+>
+> ```java
+> if (timeout != 0) nread = mConnection.bulkTransfer(ep, dest, len, timeout);
+> else { mUsbRequest.queue(ByteBuffer.wrap(dest, 0, len), len);
+>        mConnection.requestWait(); nread = buf.position(); }
+> ```
+>
+> `bulkTransfer` returns `-1` on timeout and **discards the bytes already
+> received into that URB** — the caller cannot even learn how many there were.
+> We passed `readTimeout = 200`, so every read took that path.
+>
+> **Fix:** `readTimeout = 0`, which selects the `UsbRequest` path. It has no
+> timeout to expire and so has nothing to discard. Also raised `readBufferSize`
+> off the library's one-max-packet default.
+>
+> **Result, full 86-block read:** 0 retries, 0 malformed chunk lines, 0
+> unrecovered gaps, slowest block 1317 ms (was 10,782 ms), 95 s of block time.
+> Byte-identical to `data/usb_final.bin` across the entire 5,479,850-byte common
+> prefix. Capture and transcript at `data/usb_clean_2026-09-06.{bin,log}`.
+>
+> Sections 1–5 and 10 below are kept as the record of how it was found. **§6
+> (device facts), §7 (environment), §8 (code map) and §9 (traps) are still
+> current and still worth reading.** Corrections from the resolving session are
+> marked inline.
 
 ---
 
@@ -65,11 +89,32 @@ of the hex payload**.
 Arithmetic worth chasing: `4121 - 2840 = 1281`, and `1280 = 20 x 64` (the
 endpoint max packet size). One byte off from a clean 20-packet loss.
 
+> **Resolved.** The clue was sound and the reasoning from it was right: a fixed
+> quantum meant a buffer boundary, not packet loss. It was a whole number of
+> packets discarded by a timing-out `bulkTransfer`. The stray one byte is the
+> 42-char log-prefix assumption being off by one, not a real remainder — do not
+> read significance into it.
+
 ---
 
 ## 3. Ranked hypotheses for next session
 
+> **Outcome:** H1 was wrong and cost nothing to disprove — `step()` already
+> copies. H2 was the right instinct and the right first move; reading the
+> library's `read()` from the AAR found the mechanism *without a device run*.
+> H3 was nearly correct: the cure was not to bypass `SerialInputOutputManager`
+> but to change the one argument that decides which read path it uses. H4 and
+> H5 were never needed.
+>
+> **The lesson worth carrying:** the answer was in 30 lines of the dependency's
+> bytecode, reachable in minutes with `javap` on the cached AAR, after a whole
+> session of parameter changes on the near side of the interface. When a
+> library's behaviour is the suspect, read the library.
+
 ### H1 — the library reuses its read buffer (start here, one line to test)
+
+> **Disproved, no device needed.** `SerialInputOutputManager.step()` does
+> `System.arraycopy` into a fresh `new byte[len]` before calling `onNewData`.
 
 `UsbSerialTransport.onNewData(data: ByteArray)` currently does:
 
@@ -140,6 +185,13 @@ Requesting 8 KB per `PMTK182,7` instead of 64 KB was tried and made things
 | Split requests into 8 KB for flow control | **Worse.** Reverted |
 | Swap to `usb-serial-for-android` 3.8.1 | Unrecovered gaps 5 → 1. Retries and the fixed-size corruption persist |
 | Shorten block idle timeout 10 s → 2.5 s | 240 s → 152 s, damage recovered rather than kept. Does not touch the corruption |
+| **`readTimeout` 200 → 0, `readBufferSize` 64 → 4096** | **Fixed it.** 0 retries, 0 malformed, 0 gaps, 95 s |
+
+The 10 s row above is not just a failed attempt — it is direct evidence for the
+real mechanism, and was already correctly interpreted at the time ("a larger
+buffer waiting longer accumulates more data before the timeout discards it").
+The sentence names the bug. What was missing was that the timeout could be
+turned *off* rather than tuned.
 
 **Lesson from the session:** every change made without a measured mechanism
 either did nothing or made it worse. The two that helped came from
@@ -167,6 +219,7 @@ Script: `$CLAUDE_JOB_DIR/tmp/fulldump.py` (see §7 to recreate).
 | 01:56 | + 8 KB requests | aborted | rising | — | — | yes |
 | 02:13 | library, 64 KB | 240 s | 11 | 14 | 1 (2,048 B) | yes |
 | **02:22** | **library + 2.5 s idle** | **152 s** | **10** | — | **0** | **no** |
+| **11:00** | **+ `readTimeout = 0`** | **~110 s** | **0** | **0** | **0** | **no** |
 
 ### Per-block timing, run 02:13 (86 blocks)
 
@@ -230,9 +283,24 @@ Standard CDC puts COMM at 0 and DATA at 1. Consequences:
 
 - `PMTK182,7,<addr>,<len>` is answered as `PMTK182,8,<addr>,<hex>` in
   **2048-byte payload chunks** — 4119-char sentences, 4121 bytes with CRLF.
-- 2048 is an exact multiple of the 64-byte packet size, so **a large bulk read
+- ~~2048 is an exact multiple of the 64-byte packet size, so **a large bulk read
   has no short packet to terminate it**. This is why big read buffers behave
-  badly here.
+  badly here.~~
+
+  > **Wrong, and it steered a whole session away from the fix.** Big read
+  > buffers behaved badly because a timing-out `bulkTransfer` discarded them,
+  > not for want of a short packet. Short packets arrive constantly. The
+  > measured delivery histogram on a clean run:
+  >
+  > ```
+  > usb reads=42000 avg=268 sizes: 1x19472 511x19465 537x2288 25x245 20x139
+  > ```
+  >
+  > The device emits in ~512-byte units split as `1 + 511` — the two counts are
+  > exactly paired from the first sample on — and each ends short. Deliveries
+  > never exceed 537 bytes even behind a 4096-byte buffer, so transfers are
+  > bounded by the firmware's write granularity. **Raising `readBufferSize`
+  > above 4096 would gain nothing.**
 - Read length must be even. Odd lengths are silently ignored.
 - A 512-byte read request is ignored *and drops the link*. Only full-block
   reads have ever been reliable.
@@ -445,6 +513,21 @@ fails confusingly.
 lines**, in roughly 95 s, verified byte-identical against
 `data/usb_final.bin` on the common prefix.
 
+> **Met on the 11:00 run.** 0 retries, 0 malformed chunk lines, 95 s of block
+> time, identical across the whole 5,479,850-byte common prefix.
+>
+> The transcript still reports one malformed line, `0,27,15,18,,,,,,1.44,1.16,
+> 0.86*04`. It is transcript line 3, before any block read: the tail of a
+> `$GPGSA` already in flight when DTR was asserted. Expect it on every connect;
+> it is the live NMEA stream, not a chunk. If a future run needs a truly clean
+> count, filter to `PMTK182,8` sentences.
+>
+> **Not chased, and deliberately so:** the `1 + 511` split doubles the number of
+> transfers (42,000 where ~21,000 would do), and per-block throughput is
+> 53 KB/s against the laptop's 64 KB/s. It is firmware-side write granularity,
+> every unit legitimately ends in a short packet, and no host-side change can
+> merge them. Correctness is unaffected.
+
 ---
 
 ## 11. What is already finished and should not be re-litigated
@@ -455,7 +538,9 @@ lines**, in roughly 95 s, verified byte-identical against
   incremental download — proven byte-for-byte against hardware.
 - **Incremental fetch**: wrap-probe safety argument, verified on hardware
   (4 blocks instead of 82; new data reconciled to the exact byte).
-- **USB**: works, produces verified dumps, 152 s.
+- **USB**: clean. 0 retries, 0 corruption, ~110 s, verified byte-identical on
+  the common prefix. Do not tune transport parameters again without a measured
+  mechanism — that was the failure mode of the whole first session.
 - **69 tests**, none requiring hardware.
 
 Erase (prep doc §0.2) is designed and gated but **not built** — that is the

@@ -57,6 +57,20 @@ way to obtain them. See §1.3.
 
 ### 0.2 Erase is the point of the app, not an optional extra
 
+> **Built 2026-09-06, commit `94492c1`.** All seven clauses below are
+> implemented: `core/.../protocol/EraseGate.kt` holds the decision and
+> `FlashEraser.kt` the sequence, with 19 tests.
+>
+> One gap in the design as written, found while building it: clause 2 assumes
+> the dump is the newest thing that exists, but the logger keeps recording
+> after a download ends. Dump at 10:00, erase at 10:40, and forty minutes of
+> tracking is destroyed by an erase this gate would have called safe. The
+> implementation reads the write pointer *at the moment of the erase* rather
+> than using the one cached at connect, which closes both that and the
+> stopped-short case clause 2 was written for.
+>
+> Not yet exercised against real hardware — see the handoff's outstanding list.
+
 An earlier revision put erase **out of scope**, reasoning that the flash is the
 only copy of the data and the device is unreliable about its own state. That
 reasoning was sound and the conclusion was wrong, because it was reached without

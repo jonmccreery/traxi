@@ -656,7 +656,19 @@ lines**, in roughly 95 s, verified byte-identical against
 - **USB**: clean. 0 retries, 0 corruption, ~110 s, verified byte-identical on
   the common prefix. Do not tune transport parameters again without a measured
   mechanism — that was the failure mode of the whole first session.
-- **69 tests**, none requiring hardware.
+- **88 tests**, none requiring hardware.
+- **Erase**: built, gated and tested — commit `94492c1`. All seven of prep doc
+  §0.2's clauses are implemented in `core/.../protocol/EraseGate.kt` (the
+  decision) and `FlashEraser.kt` (the sequence), with 19 tests.
 
-Erase (prep doc §0.2) is designed and gated but **not built** — that is the
-other outstanding piece of work, and it is the one the whole app exists for.
+**Still outstanding, in rough order:**
+
+1. **Erase against real hardware.** Everything so far is verified against the
+   simulator and the on-phone UI. The one path no test can cover is the real
+   device's response to `PMTK182,6,1` — how long it actually takes, and whether
+   the 90 s ack budget in `PmtkClient.ERASE_TIMEOUT_MILLIS` is right. Do it with
+   a dump already exported off the phone, since that is the run where a mistake
+   is real.
+2. **Tighten the simulator** (§9). It still accepts sub-block reads and answers
+   instantly, and every download bug this project has had lived in that gap.
+3. The `1 + 511` throughput curiosity in §10, which is optional.

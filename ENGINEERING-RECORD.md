@@ -767,3 +767,65 @@ and skimming is how the serious case gets missed. Silence is the good news.
 Any future code that disables logging must go through `withLoggingPaused`. If
 you find yourself writing `writeLoggingEnabled(false)` at a call site, that is
 the bug being reintroduced.
+
+---
+
+## 13. v2 — the field-testing superpowers
+
+Agreed 2026-09-06, at the point where v1 was closed and field testing was about
+to start. All four are wanted; the order below is the order they were proposed,
+not a settled sequence. Two constraints cut across them, recorded here so they
+are not rediscovered:
+
+- **The watchdog has the strongest claim on going first.** It is the only one of
+  the four that attacks the §12 failure class directly, and §12 is the only
+  class of bug here that can cost data that never existed.
+- **The trail loop must not ship before erase has run against real hardware**
+  (§11, outstanding item 1). Wrapping an unverified erase inside a one-button
+  flow is how a deliberate step becomes an incidental one.
+
+### 13.1 The trail loop as one button
+
+Dump → verify → export off-phone → erase → confirm, as a single guarded flow
+over the existing `EraseGate` clauses rather than five manual steps.
+
+The case for it is the duty cycle, not the convenience: at the current 5 s
+interval the flash holds roughly 5 days, so a long trail means running this
+loop ~25 times — tired, in a tent, on a low battery. That is the condition
+under which a manual multi-step workflow loses a step.
+
+**Precondition:** the real-hardware erase run. Until `PMTK182,6,1` has been
+timed against the device, `PmtkClient.ERASE_TIMEOUT_MILLIS = 90 s` is a guess,
+and §9's warning stands — the simulator is more forgiving than the device.
+
+### 13.2 Burn-rate forecast
+
+Turn the write pointer, log interval and record size into a real calendar date:
+"dump by <date>". Currently the user has to hold 5 days / 5 s / 48 bytes in
+their head.
+
+Derivable and honest from what the device reports: field 8 of the status
+response is a **byte address** and is trustworthy. Its *record count* is not —
+247,133 against 126,613 actual (§9). Build on field 8; ignore the count.
+
+### 13.3 Recording watchdog
+
+A periodic status poll plus a notification when `PMTK182,2,7` bit `0x02` says
+NOT RECORDING.
+
+§12 cost 1h40m of trail that was never recorded, and it was caught only because
+a human happened to notice an unlit LED. The Device tab already decodes and
+displays the bit — the gap is that something has to be looking. This turns "I
+happened to look" into "the phone told me."
+
+Subject to §12's rule: alarm on real loss, stay silent otherwise. A watchdog
+that reports good news is a watchdog that trains you to swipe it away.
+
+### 13.4 Download that survives the trail
+
+Checkpoint completed blocks to disk so a dropped link resumes rather than
+restarts.
+
+Relevant to §11 outstanding item 2: a full Bluetooth read is ~3 hours at
+493 B/s against a nearly-full chip. Three hours is long enough that a link drop
+is a question of when, and a restart-from-zero costs the whole run.

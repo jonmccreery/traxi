@@ -54,6 +54,10 @@ class UsbSerialTransport(
     private var pending: ByteArray? = null
     private var pendingOffset = 0
 
+    /** Delivery-size histogram; see [recordDelivery]. */
+    private val sizes = HashMap<Int, Long>()
+    private var deliveries = 0L
+
     @Volatile private var failure: String? = null
 
     override val description: String
@@ -100,11 +104,16 @@ class UsbSerialTransport(
         incoming.clear()
         pending = null
         pendingOffset = 0
+        synchronized(sizes) { sizes.clear(); deliveries = 0L }
 
         // Keeps a read posted continuously and delivers through onNewData.
         // This is the part the hand-rolled transport never got right.
         io = SerialInputOutputManager(p, this@UsbSerialTransport).apply {
+            // Zero is not "no timeout" in the casual sense -- it selects an
+            // entirely different code path in CommonUsbSerialPort.read. See
+            // READ_TIMEOUT below.
             readTimeout = READ_TIMEOUT
+            readBufferSize = READ_BUFFER
             start()
         }
 
@@ -115,7 +124,35 @@ class UsbSerialTransport(
     // ---------------- SerialInputOutputManager.Listener ----------------
 
     override fun onNewData(data: ByteArray) {
+        recordDelivery(data.size)
         if (!incoming.offer(data)) note("usb read queue full; dropped ${data.size} bytes")
+    }
+
+    /**
+     * Delivery sizes are the evidence for whether a transfer ends on a short
+     * packet or on a full buffer, which decides whether [READ_BUFFER] can go
+     * higher. A response sentence is 4121 bytes on the wire -- 64 whole packets
+     * and a 25-byte remainder -- so a stream of sizes at the buffer ceiling
+     * with a small tail means transfers are terminating per sentence, and the
+     * ceiling can be raised. Sizes pinned at exactly [READ_BUFFER] with no tail
+     * would mean the opposite.
+     */
+    private fun recordDelivery(size: Int) {
+        val total = synchronized(sizes) {
+            sizes.merge(size, 1L, Long::plus)
+            ++deliveries
+        }
+        if (total % DELIVERY_REPORT_EVERY == 0L) reportDeliveries()
+    }
+
+    private fun reportDeliveries() {
+        val snapshot = synchronized(sizes) { sizes.toSortedMap() to deliveries }
+        val (histogram, total) = snapshot
+        if (total == 0L) return
+        val bytes = histogram.entries.sumOf { it.key.toLong() * it.value }
+        val top = histogram.entries.sortedByDescending { it.value }.take(6)
+            .joinToString(" ") { "${it.key}x${it.value}" }
+        note("usb reads=$total bytes=$bytes avg=${bytes / total} sizes: $top")
     }
 
     override fun onRunError(e: Exception) {
@@ -167,6 +204,7 @@ class UsbSerialTransport(
     }
 
     override fun close() {
+        reportDeliveries()
         runCatching { io?.listener = null }
         runCatching { io?.stop() }
         runCatching { port?.close() }
@@ -185,7 +223,70 @@ class UsbSerialTransport(
         /** Nominal; a native CDC device on USB ignores it. */
         private const val BAUD = 115_200
         private const val WRITE_TIMEOUT = 5_000
-        private const val READ_TIMEOUT = 200
+
+        /**
+         * Zero, and it must stay zero.
+         *
+         * `CommonUsbSerialPort.read` branches on this value:
+         *
+         * ```java
+         * if (timeout != 0) nread = mConnection.bulkTransfer(ep, dest, len, timeout);
+         * else { mUsbRequest.queue(ByteBuffer.wrap(dest, 0, len), len);
+         *        mConnection.requestWait(); nread = buf.position(); }
+         * ```
+         *
+         * `bulkTransfer` returns -1 on timeout and the bytes already received
+         * into that URB are **thrown away** -- the caller cannot even find out
+         * how many there were. The `UsbRequest` path has no timeout to expire
+         * and so has nothing to discard. That is the whole difference.
+         *
+         * This also explains the earlier result where raising the transfer
+         * timeout to 10 s made corruption worse: a bigger buffer waiting longer
+         * simply had more accumulated data to lose when the timeout finally
+         * fired.
+         *
+         * A blocked `requestWait` is not a leak. `stop()` only sets a flag, but
+         * `close()` below calls `port.close()`, which cancels the outstanding
+         * request and unblocks the manager thread.
+         */
+        private const val READ_TIMEOUT = 0
+
+        /**
+         * The library defaults this to the endpoint's max packet size, 64 bytes
+         * here, which is a thousand round trips a second at 61 KB/s -- and
+         * after each one the manager thread copies, dispatches to `onNewData`
+         * and takes the write-buffer lock before posting the next read, all
+         * with nothing posted on the endpoint.
+         *
+         * 4096 is comfortably more than enough and there is no point raising
+         * it. The measured delivery histogram never exceeds 537 bytes:
+         *
+         * ```
+         * usb reads=42000 avg=268 sizes: 1x19472 511x19465 537x2288 25x245
+         * ```
+         *
+         * The device emits in ~512-byte units split as 1 + 511 -- the counts
+         * are exactly paired from the first sample on -- and every one of those
+         * ends in a short packet, which terminates the transfer regardless of
+         * how much buffer is left. So transfers are bounded by the firmware's
+         * write granularity, not by this number.
+         *
+         * That also retires the old worry that a 2048-byte payload is an exact
+         * multiple of the packet size and so leaves nothing to terminate a
+         * large read. Short packets arrive constantly; that was never the
+         * constraint.
+         *
+         * Honest limitation: this landed in the same run as [READ_TIMEOUT], so
+         * the two are confounded. `readTimeout` is the one with a proven
+         * mechanism; this one is defensible but unmeasured on its own.
+         */
+        private const val READ_BUFFER = 4096
+
+        /**
+         * One line per ~2 MB at the sizes we expect, so a full read leaves a
+         * handful of samples in the transcript rather than burying it.
+         */
+        private const val DELIVERY_REPORT_EVERY = 500L
 
         /** Attached devices that look like a logger. */
         fun candidates(usbManager: UsbManager): List<UsbDevice> =

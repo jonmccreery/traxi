@@ -10,6 +10,8 @@ import android.hardware.usb.UsbManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.IOException
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 
 /**
  * USB CDC-ACM transport.
@@ -112,9 +114,14 @@ class UsbSerialTransport(
             }
 
             connection = conn
-            note("claimed if%d, read ep=0x%02X write ep=0x%02X".format(
-                data.id, readEndpoint!!.address, writeEndpoint!!.address))
+            note("claimed if%d, read ep=0x%02X (max packet %d) write ep=0x%02X (max packet %d)"
+                .format(
+                    data.id,
+                    readEndpoint!!.address, readEndpoint!!.maxPacketSize,
+                    writeEndpoint!!.address, writeEndpoint!!.maxPacketSize,
+                ))
             configureLine(conn, control?.id ?: 0)
+            startReader(conn, readEndpoint!!)
         } catch (e: Exception) {
             runCatching { conn.close() }
             connection = null
@@ -197,15 +204,94 @@ class UsbSerialTransport(
      * treating an ordinary quiet moment as end-of-stream is what aborted a
      * Bluetooth download earlier in this project.
      */
+    // Read accounting. A high timeout count against few bytes points at the
+    // gap between reads; whole-chunk losses point at the device overrunning
+    // while no read is posted.
+    private var reads = 0
+    private var timeouts = 0
+    private var bytesIn = 0L
+    private var slowReads = 0
+
+    /**
+     * Bytes captured by a reader thread that keeps a transfer posted at all
+     * times.
+     *
+     * Synchronous `bulkTransfer` calls leave a window between them where no
+     * read is outstanding. At 64 KB/s this device emits a 2 KB chunk every
+     * ~32 ms, and per-read coroutine dispatch, NMEA reassembly and checksumming
+     * comfortably exceed that — so the device overruns and a whole response
+     * vanishes. The losses were exactly that shape: entire 0x800-aligned chunks
+     * missing, never partial ones.
+     *
+     * Decoupling reading from parsing is the fix. The thread does nothing but
+     * move bytes; all the expensive work happens on the consumer side.
+     */
+    private val incoming = LinkedBlockingQueue<ByteArray>(1024)
+    private var pending: ByteArray? = null
+    private var pendingOffset = 0
+
+    @Volatile private var running = false
+    private var reader: Thread? = null
+
+    private fun startReader(conn: UsbDeviceConnection, ep: UsbEndpoint) {
+        running = true
+        reader = Thread({
+            val buffer = ByteArray(READ_BUFFER_BYTES)
+            while (running) {
+                val started = System.currentTimeMillis()
+                val n = conn.bulkTransfer(ep, buffer, 0, buffer.size, READ_TIMEOUT)
+                val took = System.currentTimeMillis() - started
+                synchronized(this) {
+                    reads++
+                    if (n < 0) timeouts++ else bytesIn += n
+                    if (took > 250) slowReads++
+                    if (reads % READ_REPORT_INTERVAL == 0) {
+                        note(("usb reads=%d timeouts=%d (%.1f%%) slow>250ms=%d bytes=%d " +
+                            "avg=%.0f b/read queue=%d").format(
+                            reads, timeouts, 100.0 * timeouts / reads, slowReads, bytesIn,
+                            if (reads > timeouts) bytesIn.toDouble() / (reads - timeouts) else 0.0,
+                            incoming.size))
+                    }
+                }
+                if (n > 0 && !incoming.offer(buffer.copyOf(n))) {
+                    note("usb read queue full; dropping $n bytes")
+                }
+            }
+        }, "usb-reader").apply { isDaemon = true; start() }
+    }
+
     override suspend fun read(dest: ByteArray, timeoutMillis: Long): Int =
         withContext(Dispatchers.IO) {
-            val conn = connection ?: return@withContext -1
-            val ep = readEndpoint ?: return@withContext -1
-            val n = conn.bulkTransfer(ep, dest, 0, dest.size, timeoutMillis.toInt().coerceAtLeast(1))
-            if (n < 0) 0 else n
+            if (connection == null) return@withContext -1
+
+            var chunk = pending
+            if (chunk == null) {
+                chunk = incoming.poll(timeoutMillis.coerceAtLeast(1), TimeUnit.MILLISECONDS)
+                    ?: return@withContext if (running || incoming.isNotEmpty()) 0 else -1
+                pendingOffset = 0
+            }
+            var written = copyFrom(chunk, dest, 0)
+            while (written < dest.size) {
+                val next = incoming.poll() ?: break
+                pending = next
+                pendingOffset = 0
+                written += copyFrom(next, dest, written)
+            }
+            written
         }
 
+    private fun copyFrom(chunk: ByteArray, dest: ByteArray, at: Int): Int {
+        val n = minOf(dest.size - at, chunk.size - pendingOffset)
+        chunk.copyInto(dest, at, pendingOffset, pendingOffset + n)
+        pendingOffset += n
+        pending = if (pendingOffset >= chunk.size) null else chunk
+        return n
+    }
+
     override fun close() {
+        running = false
+        reader?.interrupt()
+        reader = null
         val conn = connection
         claimed?.let { runCatching { conn?.releaseInterface(it) } }
         control?.let { runCatching { conn?.releaseInterface(it) } }
@@ -215,6 +301,9 @@ class UsbSerialTransport(
         control = null
         readEndpoint = null
         writeEndpoint = null
+        incoming.clear()
+        pending = null
+        pendingOffset = 0
     }
 
     companion object {
@@ -226,6 +315,19 @@ class UsbSerialTransport(
         private const val SET_CONTROL_LINE_STATE = 0x22
         private const val CONTROL_TIMEOUT = 2_000
         private const val WRITE_TIMEOUT = 5_000
+
+        /** How often to summarise read accounting into the transcript. */
+        private const val READ_REPORT_INTERVAL = 250
+
+        /**
+         * Floor on a bulk read timeout. Short transfers lose data outright,
+         * so a caller that is nearly out of budget still gets a whole read.
+         */
+        /** Per posted transfer. Long enough that silence is cheap. */
+        private const val READ_TIMEOUT = 500
+
+        /** Per posted transfer; comfortably above the device's 2 KB chunk. */
+        private const val READ_BUFFER_BYTES = 16 * 1024
 
         /**
          * Attached devices that look like a logger.

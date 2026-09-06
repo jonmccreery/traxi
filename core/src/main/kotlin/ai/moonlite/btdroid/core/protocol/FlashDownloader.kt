@@ -294,9 +294,11 @@ class FlashDownloader(
         }
 
         if (damaged.isNotEmpty()) {
+            // Parenthesised: .format() binds to the last literal otherwise,
+            // and the placeholders in the first half print verbatim.
             client.transcript.note(
-                "DOWNLOAD DAMAGED: %d bytes missing across %d range(s). This image must " +
-                    "not be trusted as a complete copy.".format(
+                ("DOWNLOAD DAMAGED: %d bytes missing across %d range(s). This image " +
+                    "must not be trusted as a complete copy.").format(
                     damaged.sumOf { it.last - it.first + 1 }, damaged.size)
             )
         }

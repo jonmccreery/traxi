@@ -27,6 +27,10 @@ class PmtkClient(
     /** Sentences received while waiting for a different response. */
     private val queued = ArrayDeque<NmeaSentence>()
 
+    /** Bulk log chunks seen, counted rather than logged. */
+    var bulkChunks = 0
+        private set
+
     // ---------------- primitives ----------------
 
     suspend fun send(payload: String) {
@@ -71,7 +75,16 @@ class PmtkClient(
                     transcript.note("dropped malformed or bad-checksum line: $line")
                     continue
                 }
-                transcript.rx(sentence.raw)
+                // Elide bulk log payloads. A full download is ~2,700 of these,
+                // each a couple of kilobytes of hex, which would flush every
+                // useful note out of the transcript's ring buffer -- exactly
+                // the lines needed when diagnosing a transfer problem. The
+                // per-block summary carries the information that matters.
+                if (sentence.matches("PMTK182", "8")) {
+                    bulkChunks++
+                } else {
+                    transcript.rx(sentence.raw)
+                }
                 if (queued.size >= MAX_QUEUED) queued.removeFirst()
                 queued.addLast(sentence)
             }

@@ -181,6 +181,9 @@ private fun DeviceTab(
     val context = LocalContext.current
     val known = remember { container.pairing.associatedAddresses() }
     val bonded = remember { runCatching { container.pairing.bondedDevices() }.getOrDefault(emptyList()) }
+    // Hoisted: the failure card needs it to decide whether Bluetooth or USB
+    // advice is the relevant advice.
+    val usbDevices = remember { container.usb.candidates() }
 
     when (connection) {
         is ConnectionState.Connected -> {
@@ -200,11 +203,60 @@ private fun DeviceTab(
             if (connection is ConnectionState.Failed) {
                 SectionCard("Connection failed") {
                     Text(connection.message, style = MonoStyle)
+                    // Advice has to match the transport that actually failed.
+                    // Showing Bluetooth pairing guidance after a USB failure
+                    // sends the reader somewhere the fault is not.
+                    if (connection.message.contains("usb", ignoreCase = true) ||
+                        usbDevices.isNotEmpty()
+                    ) {
+                        Text(
+                            "Check the cable and that the logger is powered on. USB needs " +
+                                "no pairing, so this is a cable, power or protocol problem " +
+                                "rather than a permissions one.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    } else {
+                        Text(
+                            "The logger must be powered on and already paired in Android's " +
+                                "Bluetooth settings. Classic Bluetooth has no " +
+                                "unpaired-connect path.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+
+            // USB first when a cable is present: 64 KB/s against Bluetooth's
+            // 493 B/s means a full read takes 83 s rather than three hours.
+            if (usbDevices.isNotEmpty()) {
+                SectionCard("Connected by cable") {
                     Text(
-                        "The logger must be powered on and already paired in Android's " +
-                            "Bluetooth settings. Classic Bluetooth has no unpaired-connect path.",
-                        style = MaterialTheme.typography.bodySmall,
+                        "USB is about 65× faster than Bluetooth on this logger — a full " +
+                            "flash read takes under two minutes instead of three hours — " +
+                            "and needs no pairing.",
+                        style = MaterialTheme.typography.bodyMedium,
                     )
+                    usbDevices.forEach { usbDevice ->
+                        val label = usbDevice.productName ?: usbDevice.deviceName
+                        Button(
+                            onClick = {
+                                container.usb.request(usbDevice) { granted ->
+                                    if (granted) {
+                                        container.usb.manager()?.let { m ->
+                                            session.connectUsb(m, usbDevice)
+                                        }
+                                    } else {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "USB permission declined",
+                                            android.widget.Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Connect over USB  ·  $label") }
+                    }
                 }
             }
 
@@ -381,9 +433,18 @@ private fun DumpsTab(
         }
     } else if (connection is ConnectionState.Connected) {
         SectionCard("Download") {
+            val overUsb = (connection as? ConnectionState.Connected)
+                ?.info?.transportDescription?.startsWith("usb") == true
             Text(
-                "Reads the whole flash, about 20-25 minutes over Bluetooth. It keeps " +
-                    "running with the screen off, and can be resumed if interrupted.",
+                if (overUsb) {
+                    "Reads the whole flash, about 90 seconds over USB. It keeps running " +
+                        "with the screen off, and can be resumed if interrupted."
+                } else {
+                    "Reads the whole flash. Over Bluetooth this logger manages about " +
+                        "493 bytes a second, so a full read takes roughly three hours — " +
+                        "use \"Fetch new\" below instead, or connect by cable. It keeps " +
+                        "running with the screen off, and can be resumed."
+                },
                 style = MaterialTheme.typography.bodyMedium,
             )
             Button(

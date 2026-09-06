@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The BT-Q1000XT: MediaTek 0x0E8D / 0x3329, in decimal because the
+      manifest filter takes decimal. Confirmed from the device itself.
+    -->
+    <usb-device vendor-id="3725" product-id="13097" />
+
+    <!--
+      Any MediaTek device presenting a CDC control interface. Other loggers in
+      this family are badged differently and report different product ids; an
+      over-tight filter means the app is never offered when one is plugged in,
+      which looks exactly like the feature not existing.
+    -->
+    <usb-device vendor-id="3725" class="2" />
+</resources>

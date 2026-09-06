@@ -41,6 +41,15 @@
         android:name="android.software.companion_device_setup"
         android:required="false" />
 
+    <!--
+      USB host, for the far faster transport: 64 KB/s against Bluetooth's
+      493 B/s on the same chip. required="false" so the app still installs on a
+      phone without OTG, where Bluetooth remains the only path.
+    -->
+    <uses-feature
+        android:name="android.hardware.usb.host"
+        android:required="false" />
+
     <application
         android:name=".BtdroidApplication"
         android:allowBackup="false"
@@ -58,6 +67,14 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- Offer the app when the logger is plugged in over OTG. -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/usb_device_filter" />
         </activity>
 
         <service

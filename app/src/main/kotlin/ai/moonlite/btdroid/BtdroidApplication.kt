@@ -2,6 +2,7 @@ package ai.moonlite.btdroid
 
 import ai.moonlite.btdroid.bt.CompanionPairing
 import ai.moonlite.btdroid.data.DumpRepository
+import ai.moonlite.btdroid.usb.UsbPermission
 import ai.moonlite.btdroid.session.SessionController
 import android.app.Application
 import android.app.NotificationChannel
@@ -53,5 +54,6 @@ class AppContainer(application: Application) {
 
     val dumpRepository = DumpRepository(application)
     val pairing = CompanionPairing(application)
+    val usb = UsbPermission(application)
     val session = SessionController(application, pairing, dumpRepository, applicationScope)
 }

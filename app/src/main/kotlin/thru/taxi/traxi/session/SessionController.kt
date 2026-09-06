@@ -24,6 +24,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 
 /** What the app knows about the attached logger, all of it read-only. */
@@ -162,6 +164,28 @@ class SessionController(
     )
 
     private var pendingEvidence: PendingEvidence? = null
+
+    /**
+     * Serialises everything that reads from or writes to the transport.
+     *
+     * Device operations were kept apart by convention rather than by
+     * construction: each one checked [downloadJob] and [_erase] on the way in.
+     * Two of them never did. `writeTimeInterval` and `writeLogFormat` had no
+     * busy check at all, so a settings change during a transfer ran straight
+     * into it, and two settings changes could run into each other.
+     *
+     * That is not a near-miss. [PmtkClient] holds a single `readBuffer`, one
+     * `NmeaLineAssembler` and one queue of pending sentences, all shared by
+     * every caller and none of them synchronised, and this scope runs on
+     * `Dispatchers.Default`. Two coroutines in there at once read into the same
+     * array and feed the same assembler, so both sides see a corrupted stream:
+     * the transfer loses bytes and the config write loses its acknowledgement.
+     *
+     * Only top-level, user-initiated operations take this lock. Helpers they
+     * call -- `refreshConfig`, `withLoggingPaused` -- must not, because the
+     * mutex is not reentrant and the caller already holds it.
+     */
+    private val readLock = Mutex()
 
     private var transport: Transport? = null
     private var client: PmtkClient? = null
@@ -308,6 +332,14 @@ class SessionController(
             }
         }
     }
+
+    /**
+     * Run a device operation with exclusive use of the transport.
+     *
+     * Use `return@launchExclusive` inside the body.
+     */
+    private fun launchExclusive(block: suspend () -> Unit): Job =
+        scope.launch { readLock.withLock { block() } }
 
     private suspend fun openWith(t: Transport, simulated: Boolean) {
         transport = t
@@ -512,7 +544,7 @@ class SessionController(
 
         cancelRequested = false
         invalidateEraseEvidence()
-        downloadJob = scope.launch {
+        downloadJob = launchExclusive {
             try {
                 val previous = dumps.read(source)
                 _download.value = DownloadState(
@@ -540,7 +572,7 @@ class SessionController(
                 if (result.image.isEmpty()) {
                     _message.value =
                         "Nothing was read — ${result.failure ?: "the logger did not respond"}"
-                    return@launch
+                    return@launchExclusive
                 }
 
                 dumps.save(target, result.image, partial = !result.isComplete)
@@ -581,7 +613,7 @@ class SessionController(
         // Any previous verdict describes a dump that is no longer the newest
         // thing we know about the device. Drop it before the first byte lands.
         invalidateEraseEvidence()
-        downloadJob = scope.launch {
+        downloadJob = launchExclusive {
             var target = resumeFile
             var existing = ByteArray(0)
             var resumeFrom = 0
@@ -618,7 +650,7 @@ class SessionController(
                 if (result.image.isEmpty()) {
                     _message.value =
                         "Nothing was read — ${result.failure ?: "the logger did not respond"}"
-                    return@launch
+                    return@launchExclusive
                 }
 
                 val partial = !result.isComplete
@@ -741,7 +773,7 @@ class SessionController(
                 )
             )
         }
-        val pointer = runCatching { c.queryWritePointer() }.getOrNull()
+        val pointer = runCatching { readLock.withLock { c.queryWritePointer() } }.getOrNull()
         return EraseGate.blockers(_eraseEvidence.value, pointer)
     }
 
@@ -765,7 +797,7 @@ class SessionController(
         val c = client ?: run { _message.value = "Not connected"; return }
         if (_erase.value.running || downloadJob?.isActive == true) return
 
-        scope.launch {
+        launchExclusive {
             _erase.value = EraseState(running = true)
             try {
                 val evidence = _eraseEvidence.value
@@ -781,7 +813,7 @@ class SessionController(
                                 "Type the fix count from the parse summary."
                     }
                     transcript.note("erase refused: ${blockers.size} blocker(s)")
-                    return@launch
+                    return@launchExclusive
                 }
 
                 val result = FlashEraser(c).erase { phase ->
@@ -852,7 +884,7 @@ class SessionController(
             onDone()
             return
         }
-        scope.launch {
+        launchExclusive {
             try {
                 c.writeLoggingEnabled(enabled)
                 _message.value = if (enabled) "Logging resumed" else "Logging paused"
@@ -875,7 +907,7 @@ class SessionController(
      */
     fun writeTimeInterval(seconds: Double, onDone: () -> Unit = {}) {
         val c = client ?: run { _message.value = "Not connected"; return }
-        scope.launch {
+        launchExclusive {
             try {
                 val tenths = (seconds * 10).toInt()
                 require(tenths in 1..packedMaxTenths) { "interval out of range" }
@@ -900,7 +932,7 @@ class SessionController(
      */
     fun writeLogFormat(format: LogFormat, onDone: () -> Unit = {}) {
         val c = client ?: run { _message.value = "Not connected"; return }
-        scope.launch {
+        launchExclusive {
             try {
                 withLoggingPaused(c) {
                     c.writeConfig(

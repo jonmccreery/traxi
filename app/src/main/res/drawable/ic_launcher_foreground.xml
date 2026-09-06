@@ -1,40 +1,76 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- A satellite over a track line: the two halves of what this app does. -->
+<!--
+  Two boot prints climbing, tread checkered: the trail and the trail name
+  in one shape. Geometry is generated, not hand-authored: regenerate with
+  tools/icon/bake.py rather than editing coordinates here by hand.
+
+  The tread is a real checkerboard clipped to the sole, not squares drawn
+  to fit it. VectorDrawable does not antialias a clip-path, so the sole
+  outline is stroked on top of the clip seam at 2.07 wide, which covers
+  the jagged edge with margin either side. Do not remove the outline
+  without replacing the clip.
+
+  The forefoot/heel gap is 4.4 in sole units against two 2.2 strokes: the
+  strokes already eat half of it. A heavier outline closes the sole into a
+  bare footprint and loses the boot.
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- orbit arc -->
+    <!-- low print, left foot: tread, clipped to the sole -->
+    <group>
+        <clip-path android:pathData="M48.24,68.53C49.21,63.94 49.61,58.66 48.69,54.80C47.49,49.65 44.56,47.03 41.02,47.53C37.11,48.08 34.20,51.71 34.79,56.56C35.33,61.05 36.71,64.84 37.98,67.79Z M47.79,72.77L37.71,71.91C36.92,75.06 37.62,78.76 39.59,80.57C41.78,82.64 46.66,82.23 48.60,79.87C50.07,78.15 49.41,74.82 47.79,72.77Z" />
+        <path android:pathData="M49.73,45.35 L43.68,46.20 L44.53,52.25 L50.58,51.40 Z" android:fillColor="#F2E4C9" />
+        <path android:pathData="M37.63,47.05 L31.58,47.90 L32.43,53.95 L38.48,53.10 Z" android:fillColor="#F2E4C9" />
+        <path android:pathData="M44.53,52.25 L38.48,53.10 L39.33,59.15 L45.38,58.30 Z" android:fillColor="#F2E4C9" />
+        <path android:pathData="M51.43,57.45 L45.38,58.30 L46.23,64.35 L52.28,63.50 Z" android:fillColor="#F2E4C9" />
+        <path android:pathData="M39.33,59.15 L33.28,60.00 L34.13,66.05 L40.18,65.20 Z" android:fillColor="#F2E4C9" />
+        <path android:pathData="M46.23,64.35 L40.18,65.20 L41.03,71.25 L47.08,70.40 Z" android:fillColor="#F2E4C9" />
+        <path android:pathData="M53.13,69.55 L47.08,70.40 L47.93,76.46 L53.98,75.60 Z" android:fillColor="#F2E4C9" />
+        <path android:pathData="M41.03,71.25 L34.98,72.11 L35.83,78.16 L41.88,77.31 Z" android:fillColor="#F2E4C9" />
+        <path android:pathData="M47.93,76.46 L41.88,77.31 L42.73,83.36 L48.78,82.51 Z" android:fillColor="#F2E4C9" />
+    </group>
+
+    <!-- high print, right foot: tread, clipped to the sole -->
+    <group>
+        <clip-path android:pathData="M59.76,46.53C58.79,41.94 58.39,36.66 59.31,32.80C60.51,27.65 63.44,25.03 66.98,25.53C70.89,26.08 73.80,29.71 73.21,34.56C72.67,39.05 71.29,42.84 70.02,45.79Z M60.21,50.77L70.29,49.91C71.08,53.06 70.38,56.76 68.41,58.57C66.22,60.64 61.34,60.23 59.40,57.87C57.93,56.15 58.59,52.82 60.21,50.77Z" />
+        <path android:pathData="M58.27,23.35 L64.32,24.20 L63.47,30.25 L57.42,29.40 Z" android:fillColor="#F2E4C9" />
+        <path android:pathData="M70.37,25.05 L76.42,25.90 L75.57,31.95 L69.52,31.10 Z" android:fillColor="#F2E4C9" />
+        <path android:pathData="M63.47,30.25 L69.52,31.10 L68.67,37.15 L62.62,36.30 Z" android:fillColor="#F2E4C9" />
+        <path android:pathData="M56.57,35.45 L62.62,36.30 L61.77,42.35 L55.72,41.50 Z" android:fillColor="#F2E4C9" />
+        <path android:pathData="M68.67,37.15 L74.72,38.00 L73.87,44.05 L67.82,43.20 Z" android:fillColor="#F2E4C9" />
+        <path android:pathData="M61.77,42.35 L67.82,43.20 L66.97,49.25 L60.92,48.40 Z" android:fillColor="#F2E4C9" />
+        <path android:pathData="M54.87,47.55 L60.92,48.40 L60.07,54.46 L54.02,53.60 Z" android:fillColor="#F2E4C9" />
+        <path android:pathData="M66.97,49.25 L73.02,50.11 L72.17,56.16 L66.12,55.31 Z" android:fillColor="#F2E4C9" />
+        <path android:pathData="M60.07,54.46 L66.12,55.31 L65.27,61.36 L59.22,60.51 Z" android:fillColor="#F2E4C9" />
+    </group>
+
+    <!-- sole outlines, drawn last so they cover the clip seams -->
     <path
-        android:pathData="M30,42 A24,24 0 0 1 78,42"
+        android:pathData="M48.24,68.53C49.21,63.94 49.61,58.66 48.69,54.80C47.49,49.65 44.56,47.03 41.02,47.53C37.11,48.08 34.20,51.71 34.79,56.56C35.33,61.05 36.71,64.84 37.98,67.79Z"
         android:strokeColor="#7FD4C1"
-        android:strokeWidth="2.5"
-        android:strokeLineCap="round"
+        android:strokeWidth="2.07"
+        android:strokeLineJoin="round"
         android:fillColor="#00000000" />
-
-    <!-- satellite body -->
     <path
-        android:pathData="M50,34 h8 v8 h-8 z"
-        android:fillColor="#F2E4C9" />
-    <!-- solar panels -->
+        android:pathData="M47.79,72.77L37.71,71.91C36.92,75.06 37.62,78.76 39.59,80.57C41.78,82.64 46.66,82.23 48.60,79.87C50.07,78.15 49.41,74.82 47.79,72.77Z"
+        android:strokeColor="#7FD4C1"
+        android:strokeWidth="2.07"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000" />
     <path
-        android:pathData="M38,35.5 h10 v5 h-10 z M60,35.5 h10 v5 h-10 z"
-        android:fillColor="#7FD4C1" />
-
-    <!-- signal cone -->
+        android:pathData="M59.76,46.53C58.79,41.94 58.39,36.66 59.31,32.80C60.51,27.65 63.44,25.03 66.98,25.53C70.89,26.08 73.80,29.71 73.21,34.56C72.67,39.05 71.29,42.84 70.02,45.79Z"
+        android:strokeColor="#7FD4C1"
+        android:strokeWidth="2.07"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000" />
     <path
-        android:pathData="M54,44 L44,62 L64,62 Z"
-        android:fillColor="#F2E4C9"
-        android:fillAlpha="0.35" />
-
-    <!-- track -->
-    <path
-        android:pathData="M32,74 L44,66 L54,72 L66,60 L78,68"
-        android:strokeColor="#F2E4C9"
-        android:strokeWidth="3"
-        android:strokeLineCap="round"
+        android:pathData="M60.21,50.77L70.29,49.91C71.08,53.06 70.38,56.76 68.41,58.57C66.22,60.64 61.34,60.23 59.40,57.87C57.93,56.15 58.59,52.82 60.21,50.77Z"
+        android:strokeColor="#7FD4C1"
+        android:strokeWidth="2.07"
         android:strokeLineJoin="round"
         android:fillColor="#00000000" />
 </vector>

@@ -548,47 +548,32 @@ private fun DumpRow(
 }
 
 /**
- * What the dump says about whether the logger was actually recording.
+ * Speaks only when recording was actually lost.
  *
- * Loud when it needs to be and quiet when it does not. A dump that simply ends
- * with the device powered down is the common case and must not look like an
- * alarm, or the alarm stops meaning anything.
+ * A clean parse renders nothing here. Silence is the signal that all is well —
+ * anything printed in this section means data does not exist, so the reader
+ * never has to decide whether a recording note is the serious kind.
  */
 @Composable
 private fun RecordingAuditRows(report: RecordingAudit.Report) {
-    if (report.hasFault) {
-        HorizontalDivider()
-        Text(
-            "RECORDING WAS LOST",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.error,
-        )
-        Row2("Stops never resumed", report.unansweredStops.toString())
-        report.lastStopAt?.let { Row2("Stopped at", it.toString()) }
-        report.explanation()?.let {
-            Text(it, style = MaterialTheme.typography.bodySmall)
-        }
-        Text(
-            "Those fixes were never written and cannot be recovered by downloading " +
-                "again. Check the logger is recording before setting off.",
-            style = MaterialTheme.typography.bodySmall,
-        )
-        return
-    }
+    if (!report.hasFault) return
 
-    if (!report.endsRecording) {
-        HorizontalDivider()
-        Row2("Ends", "logger stopped")
-        report.lastStopAt?.let { Row2("Stopped at", it.toString()) }
-        report.explanation()?.let {
-            Text(it, style = MaterialTheme.typography.bodySmall)
-        }
-        return
+    HorizontalDivider()
+    Text(
+        "RECORDING WAS LOST",
+        style = MaterialTheme.typography.titleMedium,
+        color = MaterialTheme.colorScheme.error,
+    )
+    Row2("Stops never resumed", report.unansweredStops.toString())
+    report.lastStopAt?.let { Row2("Stopped at", it.toString()) }
+    report.explanation()?.let {
+        Text(it, style = MaterialTheme.typography.bodySmall)
     }
-
-    report.longestGap?.takeIf { it.toMinutes() >= 1 }?.let {
-        Row2("Longest gap", "${it.toHours()}h ${it.toMinutesPart()}m")
-    }
+    Text(
+        "Those fixes were never written and cannot be recovered by downloading " +
+            "again. Check the logger is recording before setting off.",
+        style = MaterialTheme.typography.bodySmall,
+    )
 }
 
 @Composable

@@ -56,15 +56,26 @@ class RecordingAuditTest {
     }
 
     @Test
-    fun `ending on a stop is NOT a fault by itself`() {
+    fun `ending on a stop is NOT a fault, and says nothing at all`() {
         // Powering the device off writes a stop; the matching start arrives at
         // the next power-on. The reference dump from before any of this ends
         // exactly that way, and treating it as a fault would cry wolf on every
         // dump taken from a switched-off logger.
+        //
+        // It does not warrant a reassuring note either. Explaining on every
+        // ordinary parse why a benign thing is benign is the noise that teaches
+        // people to skim past the line that matters.
         val r = RecordingAudit.of(stats(change(true), change(false)), emptyList())
         assertFalse(r.hasFault)
         assertFalse(r.endsRecording)
-        assertTrue(r.explanation()!!.contains("normal if the device was powered down"))
+        assertNull(r.explanation())
+    }
+
+    @Test
+    fun `a healthy log says nothing`() {
+        val r = RecordingAudit.of(stats(change(false), change(true)), emptyList())
+        assertFalse(r.hasFault)
+        assertNull(r.explanation(), "a clean parse must not comment on recording")
     }
 
     @Test

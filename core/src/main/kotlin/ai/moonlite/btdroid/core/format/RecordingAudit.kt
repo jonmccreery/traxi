@@ -49,18 +49,31 @@ object RecordingAudit {
          */
         val hasFault: Boolean get() = unansweredStops > 0
 
-        fun explanation(): String? = when {
-            unansweredStops > 0 ->
+        /**
+         * What to tell the user, or null when there is nothing to say.
+         *
+         * Null on every healthy dump, deliberately. A clean parse gets **no**
+         * recording commentary at all -- not a reassurance, not a "looks fine",
+         * not an explanation of why a benign condition is benign. This alarm
+         * only ever fires for real data loss, so silence is what carries the
+         * good news, and a reader who sees anything here knows immediately that
+         * it matters.
+         *
+         * That rules out speaking about [endsRecording] here. A dump ending
+         * with a stop is the ordinary result of switching the logger off, and a
+         * paragraph explaining that on every such parse is precisely the noise
+         * that teaches people to skim. The live device state on the Device tab
+         * is where a stopped logger is both authoritative and actionable.
+         */
+        fun explanation(): String? =
+            if (unansweredStops > 0) {
                 "$unansweredStops time(s) the logger was told to stop recording and " +
                     "nothing started it again. This is what an interrupted settings " +
                     "write used to leave behind, and any stretch of trip after it was " +
                     "not recorded."
-            !endsRecording ->
-                "This dump ends with the logger stopped. That is normal if the device " +
-                    "was powered down — the restart is recorded at the next power-on — " +
-                    "but if the logger is powered on and idle, it is not recording."
-            else -> null
-        }
+            } else {
+                null
+            }
     }
 
     fun of(stats: MtkLogParser.Stats, fixes: List<Fix>): Report {

@@ -676,7 +676,29 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
         ) { Text("Restore original format") }
     }
 
-    EraseCard(container, busy)
+    EraseCard(container, info, busy)
+}
+
+/**
+ * How long the chip will last once emptied, at the settings it is on **now**.
+ *
+ * Derived rather than written down. An earlier version of this card claimed
+ * "about three weeks at five-second intervals", which was wrong twice over: the
+ * interval is configurable and was 20 s until recently, and three weeks is the
+ * capacity from empty, not what remains. A hardcoded number in a confirmation
+ * dialogue is a number that goes stale silently.
+ *
+ * @return null when the device has not given us everything needed. The flash id
+ *   or the interval can both be absent, and prep doc §1 is emphatic that an
+ *   invented capacity is worse than none.
+ */
+private fun continuousLoggingDays(info: DeviceInfo): Double? {
+    val capacity = info.flash?.bytes ?: return null
+    val interval = info.timeIntervalSeconds.takeIf { it > 0 } ?: return null
+    val recordBytes = info.logFormat.recordSizeWithChecksum().takeIf { it > 0 } ?: return null
+    val bytesPerSecond = recordBytes / interval
+    if (bytesPerSecond <= 0) return null
+    return capacity / bytesPerSecond / 86_400.0
 }
 
 /**
@@ -688,11 +710,12 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
  * for a way round it.
  */
 @Composable
-private fun EraseCard(container: AppContainer, parentBusy: Boolean) {
+private fun EraseCard(container: AppContainer, info: DeviceInfo, parentBusy: Boolean) {
     val session = container.session
     val evidence by session.eraseEvidence.collectAsState()
     val eraseState by session.erase.collectAsState()
     val downloadState by session.download.collectAsState()
+    val summary by session.summary.collectAsState()
 
     var blockers by remember { mutableStateOf<List<ai.moonlite.btdroid.core.protocol.EraseGate.Blocker>>(emptyList()) }
     // Deliberately not rememberSaveable. A typed confirmation for an
@@ -709,8 +732,7 @@ private fun EraseCard(container: AppContainer, parentBusy: Boolean) {
 
     SectionCard("Erase") {
         Text(
-            "The logger holds about three weeks of tracking at five-second intervals. " +
-                "Dump, verify, erase, repeat is the only workflow that covers a long trip, " +
+            "Dump, verify, erase, repeat is the only workflow that covers a long trip, " +
                 "so this is a normal part of using the device — but it is irreversible, " +
                 "and the flash is the only copy until you export.",
             style = MaterialTheme.typography.bodyMedium,
@@ -740,6 +762,22 @@ private fun EraseCard(container: AppContainer, parentBusy: Boolean) {
 
         Row2("Verified against", ready.fileName)
         Row2("Fixes held", ready.fixes.toString())
+
+        // The span comes from the parse of this same file, so it describes the
+        // data actually being destroyed rather than anything assumed about it.
+        summary?.takeIf { it.fileName == ready.fileName }?.let {
+            Row2("Recorded", "${it.firstFix} → ${it.lastFix}")
+        }
+
+        continuousLoggingDays(info)?.let { days ->
+            Row2(
+                "Frees",
+                "%.0f days at %.1f s, %d-byte records".format(
+                    days, info.timeIntervalSeconds, info.logFormat.recordSizeWithChecksum(),
+                ),
+            )
+        }
+
         Text(
             "This will destroy ${ready.fixes} fixes on the logger. ${ready.fileName} stays " +
                 "on this phone and is never deleted, but it is the only copy — export it " +

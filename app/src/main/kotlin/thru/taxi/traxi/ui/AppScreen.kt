@@ -1,6 +1,7 @@
 package thru.taxi.traxi.ui
 
 import thru.taxi.traxi.AppContainer
+import thru.taxi.traxi.core.format.Bytes
 import thru.taxi.traxi.core.format.LogFormat
 import thru.taxi.traxi.core.format.RecordingAudit
 import thru.taxi.traxi.core.protocol.FixType
@@ -404,14 +405,14 @@ private fun DeviceInfoCard(info: DeviceInfo, simulated: Boolean) {
         }
 
         info.flash?.let { Row2("Flash", it.describe()) }
-        info.writePointer?.let { Row2("Written", "${it / 1024} KB") }
+        info.writePointer?.let { Row2("Written", Bytes.describe(it)) }
         info.flashUsedFraction?.let { fraction ->
             LinearProgressIndicator(
                 progress = { fraction.toFloat() },
                 modifier = Modifier.fillMaxWidth(),
             )
             Text(
-                "${(fraction * 100).toInt()}% of flash used. This is a hint only — " +
+                "${Bytes.describePercent(fraction)} of flash used. This is a hint only — " +
                     "in overlap mode a full log wraps and overwrites the oldest data, " +
                     "so a download always reads the whole chip.",
                 style = MaterialTheme.typography.bodySmall,
@@ -656,9 +657,9 @@ private fun DumpsTab(
         SectionCard("Downloading") {
             // No percentage: the device's own record count and flash size are
             // both wrong, so there is no honest denominator. Report work done.
-            Text("${download.bytesDownloaded / 1024} KB", style = MaterialTheme.typography.titleLarge)
+            Text(Bytes.describe(download.bytesDownloaded), style = MaterialTheme.typography.titleLarge)
             Row2("Sectors", download.sectorsRead.toString())
-            if (download.resumedFrom > 0) Row2("Resumed from", "${download.resumedFrom / 1024} KB")
+            if (download.resumedFrom > 0) Row2("Resumed from", Bytes.describe(download.resumedFrom))
             if (download.retries > 0) Row2("Retries", download.retries.toString())
             LinearProgressIndicator(Modifier.fillMaxWidth())
             OutlinedButton(
@@ -726,7 +727,7 @@ private fun DumpRow(
         HorizontalDivider()
         Text(dump.name, style = MonoStyle)
         Text(
-            "${dump.sizeBytes / 1024} KB · ${dump.sectorsComplete} sectors · $stamp" +
+            "${Bytes.describe(dump.sizeBytes)} · ${dump.sectorsComplete} sectors · $stamp" +
                 if (dump.isPartial) " · partial" else "",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

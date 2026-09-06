@@ -1,5 +1,6 @@
 package thru.taxi.traxi.core.protocol
 
+import thru.taxi.traxi.core.format.Bytes
 import thru.taxi.traxi.core.format.SectorHeader
 
 /**
@@ -235,9 +236,14 @@ class FlashDownloader(
                 // here would silently truncate the dump and present the result
                 // as complete, which is the worst outcome available: the user
                 // would keep a short image believing it was the whole chip.
+                // Parenthesised deliberately: `.format` binds to the literal it
+                // follows, so without these the call applied to the second half
+                // of the concatenation -- which has no specifiers -- and the
+                // transcript printed a literal "0x%08X". The line that says
+                // which block died was the one line not saying it.
                 client.transcript.note(
-                    "block 0x%08X returned nothing after $ATTEMPTS_PER_BLOCK attempts; " +
-                        "stopping with a partial image".format(address)
+                    ("block 0x%08X returned nothing after $ATTEMPTS_PER_BLOCK attempts; " +
+                        "stopping with a partial image").format(address)
                 )
                 break
             }
@@ -288,8 +294,8 @@ class FlashDownloader(
             // all the same from here. Keep what arrived.
             failure = e.message ?: e.toString()
             client.transcript.note(
-                "download interrupted at 0x%08X after %d KB: %s"
-                    .format(address, out.size() / 1024, failure)
+                "download interrupted at 0x%08X after %s: %s"
+                    .format(address, Bytes.describe(out.size()), failure)
             )
         }
 

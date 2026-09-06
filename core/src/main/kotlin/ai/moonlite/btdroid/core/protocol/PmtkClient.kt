@@ -359,6 +359,7 @@ class PmtkClient(
         private const val DRAIN_MILLIS = 300L
 
         private const val MAX_QUEUED = 256
+
         const val UNWRITTEN: Byte = 0xFF.toByte()
 
         /** Decode an even-length hex string, or null if malformed. */

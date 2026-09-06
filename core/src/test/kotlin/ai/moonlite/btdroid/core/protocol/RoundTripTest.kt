@@ -196,28 +196,31 @@ class RoundTripTest {
     }
 
     @Test
-    fun `a block abandoned mid-transfer does not contaminate the next one`() = runBlocking {
-        // Exactly the observed failure. Block 0 is cut short while the device
-        // is still sending; its late chunks are then sitting in the transport
-        // when block 1 is requested. Without resetStream they are parsed as
-        // block 1's data, land outside its window, and block 1 returns zero
-        // bytes -- which the downloader used to report as end of flash.
+    fun `a request abandoned mid-transfer does not contaminate the next one`() = runBlocking {
+        // Exactly the observed failure. A read is cut short while the device is
+        // still sending; its late chunks are then sitting in the transport when
+        // the next read is issued. Without resetStream they are parsed as the
+        // new read's data, land outside its window, and it returns nothing --
+        // which the downloader used to report as end of flash.
+        //
+        // Deliberately small so the stall lands inside a single read.
         val inner = SimulatedLoggerTransport(flash, chunkSize = 0x200)
-        val size = FlashDownloader.DEFAULT_BLOCK_SIZE
+        val size = 8 * 1024
 
-        // Count reads that actually carried data, so the stall lands inside the
-        // transfer rather than in the pre-request drain, and jump the clock far
-        // enough to trip the idle timeout while the device is still sending.
+        // After a few chunks the link goes quiet and stays quiet, with time
+        // passing. A single clock jump is not enough: progress immediately
+        // after it resets the idle timer and absorbs the stall.
         var dataReads = 0
         var now = 0L
+        var stalled = false
         val transport = object : ai.moonlite.btdroid.core.transport.Transport by inner {
             override suspend fun read(dest: ByteArray, timeoutMillis: Long): Int {
+                if (stalled) { now += 1_000; return 0 }
                 val window = ByteArray(minOf(512, dest.size))
                 val n = inner.read(window, timeoutMillis)
                 if (n > 0) {
                     window.copyInto(dest, 0, 0, n)
-                    dataReads++
-                    if (dataReads == 40) now += 60_000
+                    if (++dataReads >= 3) stalled = true
                 }
                 return n
             }
@@ -226,16 +229,18 @@ class RoundTripTest {
         val client = PmtkClient(transport, clock = { now })
 
         val first = client.readLogBlock(0, size, idleTimeoutMillis = 10_000)
-        assertTrue(!first.isComplete, "block 0 should have been cut short by the stall")
-        assertTrue(first.filled > 0, "block 0 should have partial data")
+        assertTrue(!first.isComplete, "the read should have been cut short by the stall")
+        assertTrue(first.filled > 0, "it should still have partial data")
 
-        // Now the next block, with the device's leftovers still queued.
+        // The device recovers; the next read must not inherit the mess.
+        stalled = false
+        dataReads = -1_000_000
         val second = client.readLogBlock(size, size, idleTimeoutMillis = 10_000)
         assertTrue(
             second.filled > 0,
-            "block 1 came back empty -- stale chunks from block 0 were absorbed",
+            "the next read came back empty -- stale chunks were absorbed",
         )
-        assertEquals(flash[size], second.bytes[0], "block 1 starts at the wrong data")
+        assertEquals(flash[size], second.bytes[0], "the next read starts at the wrong data")
     }
 
     @Test

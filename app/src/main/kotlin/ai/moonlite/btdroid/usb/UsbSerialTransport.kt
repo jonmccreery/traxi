@@ -3,10 +3,12 @@ package ai.moonlite.btdroid.usb
 import ai.moonlite.btdroid.core.transport.Transport
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
-import android.hardware.usb.UsbDeviceConnection
-import android.hardware.usb.UsbEndpoint
-import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
+import com.hoho.android.usbserial.driver.CdcAcmSerialDriver
+import com.hoho.android.usbserial.driver.ProbeTable
+import com.hoho.android.usbserial.driver.UsbSerialPort
+import com.hoho.android.usbserial.driver.UsbSerialProber
+import com.hoho.android.usbserial.util.SerialInputOutputManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.IOException
@@ -14,262 +16,138 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
 /**
- * USB CDC-ACM transport.
+ * USB CDC-ACM transport, on `usb-serial-for-android`.
  *
- * Written directly against Android's `UsbManager` rather than pulling in
- * `usb-serial-for-android`. That library is excellent and handles FTDI,
- * PL2303, CP210x and CH34x — none of which this device is. The BT-Q1000XT
- * enumerates as **native CDC-ACM** with no bridge chip at all (Linux binds it
- * as `usb-MTK_GPS_Receiver-if01` → `/dev/ttyACM0`), so the whole of the driver
- * we would use is the part written below. It is also only published on JitPack,
- * and adding a third-party repository to the build to obtain drivers we will
- * never execute is a poor trade.
+ * This was originally hand-written against `UsbManager`, on the reasoning that
+ * the device is plain CDC-ACM and the library's FTDI, PL2303, CP210x and CH34x
+ * drivers would never run. The reasoning was correct and the decision was still
+ * wrong: the hand-rolled version lost data, and four attempts at fixing it --
+ * flooring the read timeout, a reader thread, a longer transfer timeout,
+ * smaller requests -- each removed some symptoms without curing it.
  *
- * **This is worth 65x.** Measured on the same chip: USB moves the full 5.4 MB
- * flash in 83 s at 64 KB/s, where Bluetooth manages 493 B/s and takes about
- * three hours, because the logger bridges its Bluetooth module to the GPS chip
- * over an internal 9600-baud UART. USB talks to the chip directly.
+ * The losses were whole 2 KB chunks and corrupted sentence boundaries, which is
+ * what happens when the host fails to keep a transfer posted while the device
+ * is emitting. Getting that right across devices and Android versions is
+ * exactly the decade of accumulated fixes this library carries, and none of it
+ * was interesting to reproduce.
+ *
+ * What is worth keeping from the exercise is the shape of this device, which is
+ * unusual and cost real time to establish:
+ *
+ *  - its interfaces are **reversed** from the normal CDC layout. `if0` is the
+ *    data interface (class 0x0A, bulk 0x81 IN / 0x01 OUT) and `if1` is
+ *    communications (class 0x02), so control requests belong to `if1`.
+ *  - it stays mute until DTR is asserted.
+ *  - it answers `PMTK182,7` in 2 KB chunks, an exact multiple of the 64-byte
+ *    packet size, so a large read has no short packet to terminate it.
  */
 class UsbSerialTransport(
     private val usbManager: UsbManager,
     private val device: UsbDevice,
-    /** Receives descriptor and setup detail, so a silent link can be diagnosed. */
     private val note: (String) -> Unit = {},
-) : Transport {
+) : Transport, SerialInputOutputManager.Listener {
 
-    private var connection: UsbDeviceConnection? = null
-    private var claimed: UsbInterface? = null
-    private var control: UsbInterface? = null
-    private var readEndpoint: UsbEndpoint? = null
-    private var writeEndpoint: UsbEndpoint? = null
+    private var port: UsbSerialPort? = null
+    private var io: SerialInputOutputManager? = null
+
+    private val incoming = LinkedBlockingQueue<ByteArray>(4096)
+    private var pending: ByteArray? = null
+    private var pendingOffset = 0
+
+    @Volatile private var failure: String? = null
 
     override val description: String
         get() = "usb ${device.productName ?: device.deviceName}"
 
     override val isOpen: Boolean
-        get() = connection != null
+        get() = port != null
 
     override suspend fun open() = withContext(Dispatchers.IO) {
-        check(connection == null) { "transport already open" }
+        check(port == null) { "transport already open" }
         if (!usbManager.hasPermission(device)) {
             throw IOException("No USB permission for ${device.deviceName}")
         }
 
-        val conn = usbManager.openDevice(device)
+        // The default prober does not know 0e8d:3329, so name it explicitly and
+        // fall back to the built-in table for anything else.
+        val table = ProbeTable().apply {
+            addProduct(VENDOR_MEDIATEK, PRODUCT_BT_Q1000XT, CdcAcmSerialDriver::class.java)
+        }
+        val driver = UsbSerialProber(table).probeDevice(device)
+            ?: UsbSerialProber.getDefaultProber().probeDevice(device)
+            ?: throw IOException("No serial driver matches ${device.deviceName}")
+
+        val connection = usbManager.openDevice(device)
             ?: throw IOException("Could not open ${device.deviceName}")
 
-        // Report what the descriptors actually say. A CDC device that opens but
-        // never speaks is almost always a wrong-interface or wrong-endpoint
-        // problem, and guessing at it from a silent link wastes far more time
-        // than logging it once.
-        note("usb %04X:%04X, %d interface(s)"
-            .format(device.vendorId, device.productId, device.interfaceCount))
-        for (i in 0 until device.interfaceCount) {
-            val iface = device.getInterface(i)
-            note("  if%d class=0x%02X sub=0x%02X proto=0x%02X endpoints=%d".format(
-                iface.id, iface.interfaceClass, iface.interfaceSubclass,
-                iface.interfaceProtocol, iface.endpointCount))
-            for (e in 0 until iface.endpointCount) {
-                val ep = iface.getEndpoint(e)
-                note("    ep addr=0x%02X %s %s".format(
-                    ep.address,
-                    if (ep.direction == UsbConstants.USB_DIR_IN) "IN" else "OUT",
-                    when (ep.type) {
-                        UsbConstants.USB_ENDPOINT_XFER_BULK -> "bulk"
-                        UsbConstants.USB_ENDPOINT_XFER_INT -> "interrupt"
-                        UsbConstants.USB_ENDPOINT_XFER_CONTROL -> "control"
-                        else -> "iso"
-                    }))
-            }
-        }
+        val p = driver.ports.firstOrNull()
+            ?: throw IOException("Driver exposes no ports")
 
         try {
-            // The data interface carries the bulk endpoints. Prefer the CDC
-            // data class, but fall back to any interface offering one bulk IN
-            // and one bulk OUT -- some firmware mislabels its descriptors and
-            // the endpoint shape is the part that actually matters.
-            val data = findInterface(UsbConstants.USB_CLASS_CDC_DATA)
-                ?: findInterface(null)
-                ?: throw IOException("No bulk data interface on ${device.deviceName}")
-
-            // Claim the control interface too where present. Leaving it to the
-            // kernel's own cdc-acm driver causes the claim below to fail on
-            // some hosts.
-            control = findInterface(UsbConstants.USB_CLASS_COMM)
-            control?.let { conn.claimInterface(it, true) }
-
-            if (!conn.claimInterface(data, true)) {
-                throw IOException("Could not claim the data interface")
-            }
-            claimed = data
-
-            for (i in 0 until data.endpointCount) {
-                val ep = data.getEndpoint(i)
-                if (ep.type != UsbConstants.USB_ENDPOINT_XFER_BULK) continue
-                if (ep.direction == UsbConstants.USB_DIR_IN) readEndpoint = ep
-                else writeEndpoint = ep
-            }
-            if (readEndpoint == null || writeEndpoint == null) {
-                throw IOException("Data interface lacks bulk endpoints")
-            }
-
-            connection = conn
-            note("claimed if%d, read ep=0x%02X (max packet %d) write ep=0x%02X (max packet %d)"
-                .format(
-                    data.id,
-                    readEndpoint!!.address, readEndpoint!!.maxPacketSize,
-                    writeEndpoint!!.address, writeEndpoint!!.maxPacketSize,
-                ))
-            configureLine(conn, control?.id ?: 0)
-            startReader(conn, readEndpoint!!)
+            p.open(connection)
+            p.setParameters(BAUD, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
+            // Without DTR this device never transmits.
+            runCatching { p.dtr = true }
+            runCatching { p.rts = true }
         } catch (e: Exception) {
-            runCatching { conn.close() }
-            connection = null
-            claimed = null
-            control = null
-            throw e
+            runCatching { p.close() }
+            runCatching { connection.close() }
+            throw IOException("Could not configure the serial port: ${e.message}", e)
         }
+
+        port = p
+        failure = null
+        incoming.clear()
+        pending = null
+        pendingOffset = 0
+
+        // Keeps a read posted continuously and delivers through onNewData.
+        // This is the part the hand-rolled transport never got right.
+        io = SerialInputOutputManager(p, this@UsbSerialTransport).apply {
+            readTimeout = READ_TIMEOUT
+            start()
+        }
+
+        note("usb ${driver.javaClass.simpleName} on " +
+            "${device.productName ?: device.deviceName}, $BAUD 8N1, DTR asserted")
     }
 
-    /**
-     * Apply CDC-ACM line settings.
-     *
-     * Both requests are best-effort. A native CDC device on USB ignores the
-     * baud rate entirely — the wire runs at USB speed, and 115200 is a fiction
-     * inherited from the serial abstraction. What does matter is asserting DTR:
-     * some firmware stays silent until the host says a terminal is present, and
-     * a device that never speaks is indistinguishable from a broken cable.
-     */
-    private fun configureLine(conn: UsbDeviceConnection, commInterface: Int) {
-        // SET_LINE_CODING: 115200 8N1
-        val coding = byteArrayOf(
-            0x00, 0xC2.toByte(), 0x01, 0x00,  // 115200, little endian
-            0,                                 // 1 stop bit
-            0,                                 // no parity
-            8,                                 // 8 data bits
-        )
-        val codingResult = conn.controlTransfer(
-            0x21, SET_LINE_CODING, 0, commInterface, coding, coding.size, CONTROL_TIMEOUT)
-        // SET_CONTROL_LINE_STATE: DTR | RTS. Some firmware stays mute until a
-        // host asserts DTR, so a failure here explains a silent link.
-        val dtrResult = conn.controlTransfer(
-            0x21, SET_CONTROL_LINE_STATE, 0x03, commInterface, null, 0, CONTROL_TIMEOUT)
-        note("line coding -> $codingResult, DTR/RTS -> $dtrResult (negative means refused)")
+    // ---------------- SerialInputOutputManager.Listener ----------------
+
+    override fun onNewData(data: ByteArray) {
+        if (!incoming.offer(data)) note("usb read queue full; dropped ${data.size} bytes")
     }
 
-    private fun findInterface(usbClass: Int?): UsbInterface? {
-        for (i in 0 until device.interfaceCount) {
-            val iface = device.getInterface(i)
-            if (usbClass != null) {
-                if (iface.interfaceClass == usbClass) {
-                    if (usbClass == UsbConstants.USB_CLASS_COMM) return iface
-                    if (hasBulkPair(iface)) return iface
-                }
-            } else if (hasBulkPair(iface)) {
-                return iface
-            }
-        }
-        return null
+    override fun onRunError(e: Exception) {
+        failure = e.message ?: e.toString()
+        note("usb read error: $failure")
     }
 
-    private fun hasBulkPair(iface: UsbInterface): Boolean {
-        var input = false
-        var output = false
-        for (i in 0 until iface.endpointCount) {
-            val ep = iface.getEndpoint(i)
-            if (ep.type != UsbConstants.USB_ENDPOINT_XFER_BULK) continue
-            if (ep.direction == UsbConstants.USB_DIR_IN) input = true else output = true
-        }
-        return input && output
-    }
+    // ---------------- Transport ----------------
 
     override suspend fun write(bytes: ByteArray) = withContext(Dispatchers.IO) {
-        val conn = connection ?: throw IOException("transport not open")
-        val ep = writeEndpoint ?: throw IOException("no write endpoint")
-        var sent = 0
-        while (sent < bytes.size) {
-            val n = conn.bulkTransfer(ep, bytes, sent, bytes.size - sent, WRITE_TIMEOUT)
-            if (n <= 0) throw IOException("USB write failed at byte $sent")
-            sent += n
-        }
+        val p = port ?: throw IOException("transport not open")
+        p.write(bytes, WRITE_TIMEOUT)
     }
 
     /**
-     * @return bytes read, or 0 on timeout.
+     * @return bytes read, 0 on silence, or -1 once the port is gone.
      *
-     * `bulkTransfer` reports a timeout and a genuine error identically, with a
-     * negative return, so a short read cannot be distinguished from a dead
-     * device here. Reporting silence rather than failure is the right default:
-     * the protocol layer already decides when silence has gone on too long, and
-     * treating an ordinary quiet moment as end-of-stream is what aborted a
-     * Bluetooth download earlier in this project.
+     * Silence is not failure. The protocol layer decides when it has gone on
+     * too long, and treating a quiet moment as end-of-stream is what aborted a
+     * download earlier in this project.
      */
-    // Read accounting. A high timeout count against few bytes points at the
-    // gap between reads; whole-chunk losses point at the device overrunning
-    // while no read is posted.
-    private var reads = 0
-    private var timeouts = 0
-    private var bytesIn = 0L
-    private var slowReads = 0
-
-    /**
-     * Bytes captured by a reader thread that keeps a transfer posted at all
-     * times.
-     *
-     * Synchronous `bulkTransfer` calls leave a window between them where no
-     * read is outstanding. At 64 KB/s this device emits a 2 KB chunk every
-     * ~32 ms, and per-read coroutine dispatch, NMEA reassembly and checksumming
-     * comfortably exceed that — so the device overruns and a whole response
-     * vanishes. The losses were exactly that shape: entire 0x800-aligned chunks
-     * missing, never partial ones.
-     *
-     * Decoupling reading from parsing is the fix. The thread does nothing but
-     * move bytes; all the expensive work happens on the consumer side.
-     */
-    private val incoming = LinkedBlockingQueue<ByteArray>(1024)
-    private var pending: ByteArray? = null
-    private var pendingOffset = 0
-
-    @Volatile private var running = false
-    private var reader: Thread? = null
-
-    private fun startReader(conn: UsbDeviceConnection, ep: UsbEndpoint) {
-        running = true
-        reader = Thread({
-            val buffer = ByteArray(READ_BUFFER_BYTES)
-            while (running) {
-                val started = System.currentTimeMillis()
-                val n = conn.bulkTransfer(ep, buffer, 0, buffer.size, READ_TIMEOUT)
-                val took = System.currentTimeMillis() - started
-                synchronized(this) {
-                    reads++
-                    if (n < 0) timeouts++ else bytesIn += n
-                    if (took > 250) slowReads++
-                    if (reads % READ_REPORT_INTERVAL == 0) {
-                        note(("usb reads=%d timeouts=%d (%.1f%%) slow>250ms=%d bytes=%d " +
-                            "avg=%.0f b/read queue=%d").format(
-                            reads, timeouts, 100.0 * timeouts / reads, slowReads, bytesIn,
-                            if (reads > timeouts) bytesIn.toDouble() / (reads - timeouts) else 0.0,
-                            incoming.size))
-                    }
-                }
-                if (n > 0 && !incoming.offer(buffer.copyOf(n))) {
-                    note("usb read queue full; dropping $n bytes")
-                }
-            }
-        }, "usb-reader").apply { isDaemon = true; start() }
-    }
-
     override suspend fun read(dest: ByteArray, timeoutMillis: Long): Int =
         withContext(Dispatchers.IO) {
-            if (connection == null) return@withContext -1
+            if (port == null) return@withContext -1
 
             var chunk = pending
             if (chunk == null) {
                 chunk = incoming.poll(timeoutMillis.coerceAtLeast(1), TimeUnit.MILLISECONDS)
-                    ?: return@withContext if (running || incoming.isNotEmpty()) 0 else -1
+                    ?: return@withContext if (failure != null && incoming.isEmpty()) -1 else 0
                 pendingOffset = 0
             }
+
             var written = copyFrom(chunk, dest, 0)
             while (written < dest.size) {
                 val next = incoming.poll() ?: break
@@ -289,18 +167,11 @@ class UsbSerialTransport(
     }
 
     override fun close() {
-        running = false
-        reader?.interrupt()
-        reader = null
-        val conn = connection
-        claimed?.let { runCatching { conn?.releaseInterface(it) } }
-        control?.let { runCatching { conn?.releaseInterface(it) } }
-        runCatching { conn?.close() }
-        connection = null
-        claimed = null
-        control = null
-        readEndpoint = null
-        writeEndpoint = null
+        runCatching { io?.listener = null }
+        runCatching { io?.stop() }
+        runCatching { port?.close() }
+        io = null
+        port = null
         incoming.clear()
         pending = null
         pendingOffset = 0
@@ -311,35 +182,15 @@ class UsbSerialTransport(
         const val VENDOR_MEDIATEK = 0x0E8D
         const val PRODUCT_BT_Q1000XT = 0x3329
 
-        private const val SET_LINE_CODING = 0x20
-        private const val SET_CONTROL_LINE_STATE = 0x22
-        private const val CONTROL_TIMEOUT = 2_000
+        /** Nominal; a native CDC device on USB ignores it. */
+        private const val BAUD = 115_200
         private const val WRITE_TIMEOUT = 5_000
+        private const val READ_TIMEOUT = 200
 
-        /** How often to summarise read accounting into the transcript. */
-        private const val READ_REPORT_INTERVAL = 250
-
-        /**
-         * Floor on a bulk read timeout. Short transfers lose data outright,
-         * so a caller that is nearly out of budget still gets a whole read.
-         */
-        /** Per posted transfer. Long enough that silence is cheap. */
-        private const val READ_TIMEOUT = 500
-
-        /** Per posted transfer; comfortably above the device's 2 KB chunk. */
-        private const val READ_BUFFER_BYTES = 16 * 1024
-
-        /**
-         * Attached devices that look like a logger.
-         *
-         * Matches the known MediaTek id first, then anything exposing a CDC
-         * data interface. The broad case is deliberate: a differently-badged
-         * MTK logger is far more likely than a user who wants to be told their
-         * device does not exist.
-         */
+        /** Attached devices that look like a logger. */
         fun candidates(usbManager: UsbManager): List<UsbDevice> =
             usbManager.deviceList.values.filter { device ->
-                (device.vendorId == VENDOR_MEDIATEK) || looksLikeCdc(device)
+                device.vendorId == VENDOR_MEDIATEK || looksLikeCdc(device)
             }
 
         private fun looksLikeCdc(device: UsbDevice): Boolean {

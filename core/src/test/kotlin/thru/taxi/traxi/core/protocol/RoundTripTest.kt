@@ -195,6 +195,74 @@ class RoundTripTest {
         }
     }
 
+    /** A clock the transport advances by hand: fast on data, slow on a stall. */
+    private class SteppedClock {
+        var now = 0L
+            private set
+        fun advance(ms: Long) { now += ms }
+        fun read(): Long = now
+    }
+
+    /**
+     * A link that delivers chunks with a real gap between them, the way RFCOMM
+     * does and USB never does: every [stallEvery]-th read is a beat of silence
+     * lasting [stallMillis] -- longer than a USB-sized idle timeout, shorter than
+     * a Bluetooth-sized one. [blockReadIdleTimeoutMillis] is the single knob the
+     * download path is supposed to take from the transport rather than hard-code.
+     */
+    private class GappyTransport(
+        private val inner: SimulatedLoggerTransport,
+        override val blockReadIdleTimeoutMillis: Long,
+        private val clock: SteppedClock,
+        private val stallEvery: Int = 5,
+        private val stallMillis: Long = 4_000,
+    ) : thru.taxi.traxi.core.transport.Transport by inner {
+        private var reads = 0
+        override suspend fun read(dest: ByteArray, timeoutMillis: Long): Int {
+            reads++
+            if (reads % stallEvery == 0) { clock.advance(stallMillis); return 0 }
+            clock.advance(50)
+            return inner.read(dest, timeoutMillis)
+        }
+    }
+
+    @Test
+    fun `the block idle timeout comes from the transport, not a fixed constant`() = runBlocking {
+        // The regression: FlashDownloader hard-coded a 2.5 s idle timeout that
+        // was right for USB and cut every Bluetooth block short. A 4 s gap
+        // between chunks -- unremarkable over RFCOMM -- must fail under a
+        // USB-sized 2.5 s timeout and pass under a Bluetooth-sized 10 s one,
+        // with nothing changing but the value the transport advertises.
+        fun run(idleTimeout: Long): FlashDownloader.Result = runBlocking {
+            val clock = SteppedClock()
+            val inner = SimulatedLoggerTransport(flash, chunkSize = 0x1000)
+            inner.open()
+            val client = PmtkClient(
+                GappyTransport(inner, idleTimeout, clock),
+                defaultTimeoutMillis = 20_000,
+                clock = clock::read,
+            )
+            var blocks = 0
+            FlashDownloader(client).download(shouldContinue = { blocks++ < 2 })
+        }
+
+        val overBluetooth = run(10_000)
+        assertTrue(overBluetooth.damagedRanges.isEmpty(), "a 4 s gap is normal over RFCOMM")
+        assertEquals(null, overBluetooth.failure)
+        assertEquals(2 * FlashDownloader.DEFAULT_BLOCK_SIZE, overBluetooth.image.size)
+        for (i in overBluetooth.image.indices) {
+            if (flash[i] != overBluetooth.image[i]) {
+                throw AssertionError("byte mismatch at 0x%08X".format(i))
+            }
+        }
+
+        val overUsbTimeout = run(2_500)
+        assertTrue(
+            overUsbTimeout.isDamaged,
+            "a USB-sized 2.5 s idle timeout must choke on a 4 s gap, not pass silently",
+        )
+    }
+
     @Test
     fun `a request abandoned mid-transfer does not contaminate the next one`() = runBlocking {
         // Exactly the observed failure. A read is cut short while the device is

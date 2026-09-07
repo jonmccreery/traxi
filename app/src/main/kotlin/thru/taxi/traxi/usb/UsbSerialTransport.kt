@@ -63,6 +63,11 @@ class UsbSerialTransport(
     override val description: String
         get() = "usb ${device.productName ?: device.deviceName}"
 
+    // USB delivers a 64 KB block in about a second (~33 ms between chunks), so
+    // 2.5 s cannot end a healthy read but a failed block costs seconds instead
+    // of the slow-link default. See [Transport.blockReadIdleTimeoutMillis].
+    override val blockReadIdleTimeoutMillis: Long get() = 2_500
+
     override val isOpen: Boolean
         get() = port != null
 

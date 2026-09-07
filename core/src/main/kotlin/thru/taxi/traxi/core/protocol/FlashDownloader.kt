@@ -36,6 +36,17 @@ class FlashDownloader(
      */
     private val unwrittenSectorsToStop: Int = 2,
     private val maxBytes: Int = 32 * 1024 * 1024,
+    /**
+     * Silence that ends a block read before it is retried, sized to the link.
+     *
+     * Defaults to the active transport's own value — 2.5 s over USB, 10 s over
+     * Bluetooth — because how long a block takes is a property of the link, not
+     * the protocol. A single hard-coded constant here was the bug: 2.5 s is
+     * generous over USB and cuts every healthy Bluetooth block short, since one
+     * hex-encoded chunk needs seconds on the wire and arrives interleaved with
+     * live NMEA. See [Transport.blockReadIdleTimeoutMillis].
+     */
+    private val blockIdleTimeoutMillis: Long = client.blockReadIdleTimeoutMillis,
 ) {
     data class Progress(
         val bytesDownloaded: Int,
@@ -216,7 +227,7 @@ class FlashDownloader(
 
         try {
         while (address < maxBytes && shouldContinue()) {
-            var block = client.readLogBlock(address, blockSize, BLOCK_IDLE_TIMEOUT)
+            var block = client.readLogBlock(address, blockSize, blockIdleTimeoutMillis)
 
             // A short block means dropped chunks, never end of flash: an erased
             // sector still answers, with 0xFF bytes. Retry the whole block.
@@ -228,7 +239,7 @@ class FlashDownloader(
                     "block 0x%08X short (%d/%d), attempt %d of %d"
                         .format(address, block.filled, blockSize, attempt, ATTEMPTS_PER_BLOCK)
                 )
-                block = client.readLogBlock(address, blockSize, BLOCK_IDLE_TIMEOUT)
+                block = client.readLogBlock(address, blockSize, blockIdleTimeoutMillis)
             }
 
             if (block.filled == 0) {
@@ -334,20 +345,11 @@ class FlashDownloader(
          */
         const val ATTEMPTS_PER_BLOCK = 3
 
-        /**
-         * Silence that ends a block read, before retrying.
-         *
-         * A working block arrives as ~32 chunks in about a second, so
-         * consecutive chunks are roughly 33 ms apart. The 10 s default was
-         * therefore 300x longer than any legitimate gap, and it was paid in
-         * full every time a block came up short: 11 retries in one run cost
-         * 110 s of a 240 s download, while the reads themselves totalled 101 s.
-         *
-         * 2.5 s is still 75x the normal inter-chunk gap, so it cannot end a
-         * healthy read, and it makes a failed block cost seconds instead of
-         * ten.
-         */
-        const val BLOCK_IDLE_TIMEOUT = 2_500L
+        // The block-read idle timeout is no longer a constant here: it is a
+        // property of the link, supplied by [Transport.blockReadIdleTimeoutMillis]
+        // (2.5 s over USB, 10 s over Bluetooth) and taken as a constructor
+        // default above. A single value here suited USB and silently broke
+        // Bluetooth, which is the regression this replaced.
 
         /**
          * The wrap probe reads block 0 and compares everything past the sector

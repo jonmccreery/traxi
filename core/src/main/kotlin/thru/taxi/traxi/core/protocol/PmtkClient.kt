@@ -26,6 +26,14 @@ class PmtkClient(
     private val assembler = NmeaLineAssembler()
     private val readBuffer = ByteArray(8 * 1024)
 
+    /**
+     * The active link's tolerance for silence during a block read, surfaced so
+     * [FlashDownloader] can size its idle timeout to the transport rather than
+     * to a single hard-coded value that only suits one of them. See
+     * [Transport.blockReadIdleTimeoutMillis].
+     */
+    val blockReadIdleTimeoutMillis: Long get() = transport.blockReadIdleTimeoutMillis
+
     /** Sentences received while waiting for a different response. */
     private val queued = ArrayDeque<NmeaSentence>()
 

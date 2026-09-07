@@ -75,14 +75,16 @@ data class DownloadState(
 )
 
 /**
- * A heartbeat for the Live tab: proof that navigation data is arriving right
- * now, not a stale snapshot. [pulse] increments on every sentence so the UI can
- * blink; [lastSentenceAtNanos] lets it show "last update Xs ago" and turn stale;
- * [sentencesPerSecond] is the flow rate.
+ * A heartbeat for the Live tab: proof that the receiver is producing position
+ * fixes right now, not a stale snapshot. Keyed on fixes rather than raw NMEA
+ * sentences, because a fix is what gets logged and is what the user is looking
+ * to confirm. [pulse] increments on each fix so the UI can blink;
+ * [lastFixAtNanos] lets it show "last fix Xs ago" and turn stale;
+ * [fixesPerSecond] is the fix rate.
  */
 data class LiveActivity(
-    val lastSentenceAtNanos: Long = 0L,
-    val sentencesPerSecond: Double = 0.0,
+    val lastFixAtNanos: Long = 0L,
+    val fixesPerSecond: Double = 0.0,
     val pulse: Long = 0L,
 )
 
@@ -190,11 +192,11 @@ class SessionController(
     private var rateLastNanos = 0L
     private var rateEmaBps = 0.0
 
-    // Sentence-arrival window for the Live heartbeat. A sliding count over wall
-    // time, not an inter-arrival rate: RFCOMM delivers a whole second of
-    // sentences in one burst, so the sub-millisecond gaps within a burst are
-    // meaningless and an interval-based rate reads absurdly high (hundreds/sec).
-    private val sentTimestamps = ArrayDeque<Long>()
+    // Fix-arrival window for the Live heartbeat. A sliding count over wall time,
+    // not an inter-arrival rate: RFCOMM delivers a whole second of sentences in
+    // one burst, so the sub-millisecond gaps within a burst are meaningless and
+    // an interval-based rate reads absurdly high (hundreds/sec).
+    private val fixTimestamps = ArrayDeque<Long>()
 
     /**
      * The download half of the evidence, waiting for its parse.
@@ -473,21 +475,21 @@ class SessionController(
         )
     }
 
-    /** Record that a navigation sentence just arrived, for the Live heartbeat. */
-    private fun noteSentenceArrived() {
+    /** Record that a position fix just arrived, for the Live heartbeat. */
+    private fun noteFixArrived() {
         val now = System.nanoTime()
         val rate: Double
-        synchronized(sentTimestamps) {
-            sentTimestamps.addLast(now)
-            val cutoff = now - SENTENCE_RATE_WINDOW_NANOS
-            while (sentTimestamps.isNotEmpty() && sentTimestamps.first() < cutoff) {
-                sentTimestamps.removeFirst()
+        synchronized(fixTimestamps) {
+            fixTimestamps.addLast(now)
+            val cutoff = now - FIX_RATE_WINDOW_NANOS
+            while (fixTimestamps.isNotEmpty() && fixTimestamps.first() < cutoff) {
+                fixTimestamps.removeFirst()
             }
-            rate = sentTimestamps.size * 1e9 / SENTENCE_RATE_WINDOW_NANOS
+            rate = fixTimestamps.size * 1e9 / FIX_RATE_WINDOW_NANOS
         }
         _liveActivity.value = LiveActivity(
-            lastSentenceAtNanos = now,
-            sentencesPerSecond = rate,
+            lastFixAtNanos = now,
+            fixesPerSecond = rate,
             pulse = _liveActivity.value.pulse + 1,
         )
     }
@@ -496,11 +498,18 @@ class SessionController(
         val assembler = TelemetryAssembler(
             if (needsRollover) GpsRollover.AXN_130B else GpsRollover.NONE
         )
-        synchronized(sentTimestamps) { sentTimestamps.clear() }
+        synchronized(fixTimestamps) { fixTimestamps.clear() }
         _liveActivity.value = LiveActivity()
         c.onSentence = { sentence ->
-            noteSentenceArrived()
             if (assembler.accept(sentence)) _telemetry.value = assembler.current
+            // A fix is one GGA epoch (~1 Hz) that actually resolved a position.
+            // Counting GGA rather than every sentence gives an honest fix rate,
+            // and a GGA with quality 0 -- receiver alive but no fix -- correctly
+            // does not count, so the heartbeat goes stale when fixes stop.
+            if (sentence.type.takeLast(3) == "GGA") {
+                val t = assembler.current
+                if (t.hasPosition && (t.fixQuality ?: 0) > 0) noteFixArrived()
+            }
         }
 
         telemetryJob?.cancel()
@@ -1128,8 +1137,8 @@ class SessionController(
     private val TELEMETRY_IDLE_MILLIS = 50L
 
     /**
-     * Window for the Live tab's sentence-rate readout. Two seconds smooths the
-     * per-second RFCOMM burst into a steady number without lagging a real stall.
+     * Window for the Live tab's fix-rate readout. Four seconds gives a steady
+     * number at the ~1 Hz fix cadence without lagging a real stall for long.
      */
-    private val SENTENCE_RATE_WINDOW_NANOS = 2_000_000_000L
+    private val FIX_RATE_WINDOW_NANOS = 4_000_000_000L
 }

@@ -478,27 +478,29 @@ private fun LiveTab(
 
 @Composable
 private fun LiveHeartbeat(activity: LiveActivity) {
-    // Advance a local clock so "X s ago" keeps counting up even when nothing
+    // Advance a local clock so "X s ago" keeps counting up even when no fix
     // arrives -- that climbing number is exactly how a stall becomes visible.
     var now by remember { mutableStateOf(System.nanoTime()) }
     LaunchedEffect(Unit) {
         while (true) { now = System.nanoTime(); delay(500) }
     }
 
-    // Blink the dot on each sentence.
+    // Blink the dot on each fix.
     var blink by remember { mutableStateOf(false) }
     LaunchedEffect(activity.pulse) { blink = true; delay(150); blink = false }
     val alpha by animateFloatAsState(if (blink) 1f else 0.3f, label = "pulse")
 
-    val hasData = activity.lastSentenceAtNanos != 0L
-    // Clamp: a sentence can land just after the 'now' tick was sampled, which
-    // would otherwise render a nonsensical "-0.0 s ago".
-    val ageSec = if (hasData) ((now - activity.lastSentenceAtNanos) / 1e9).coerceAtLeast(0.0)
+    val hasFix = activity.lastFixAtNanos != 0L
+    // Clamp: a fix can land just after the 'now' tick was sampled, which would
+    // otherwise render a nonsensical "-0.0 s ago".
+    val ageSec = if (hasFix) ((now - activity.lastFixAtNanos) / 1e9).coerceAtLeast(0.0)
         else Double.NaN
-    val stale = hasData && ageSec > 3.0
+    // A fix is ~1 Hz, so a few seconds of silence means fixes have actually
+    // stopped -- not just jitter.
+    val stale = hasFix && ageSec > 4.0
     val accent = if (stale) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
 
-    SectionCard(if (stale) "Stalled" else "Receiving") {
+    SectionCard(if (stale) "No fix" else "Fixing") {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier
@@ -509,17 +511,17 @@ private fun LiveHeartbeat(activity: LiveActivity) {
             Spacer(Modifier.width(10.dp))
             Text(
                 when {
-                    !hasData -> "waiting for the first navigation sentence"
-                    stale -> "no data for %.0f s".format(ageSec)
-                    else -> "last update %.1f s ago".format(ageSec)
+                    !hasFix -> "waiting for the first fix"
+                    stale -> "no fix for %.0f s".format(ageSec)
+                    else -> "last fix %.1f s ago".format(ageSec)
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = if (stale) MaterialTheme.colorScheme.error
                 else MaterialTheme.colorScheme.onSurface,
             )
         }
-        if (activity.sentencesPerSecond > 0) {
-            Row2("Flow", "~%.0f sentences/sec".format(activity.sentencesPerSecond))
+        if (activity.fixesPerSecond > 0) {
+            Row2("Fixes", "~%.1f per second".format(activity.fixesPerSecond))
         }
     }
 }

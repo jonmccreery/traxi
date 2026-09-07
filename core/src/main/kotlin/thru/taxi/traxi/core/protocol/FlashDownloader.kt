@@ -133,8 +133,18 @@ class FlashDownloader(
      * So the probe costs one block, about two minutes on the slow link. Against
      * three hours for a full re-read that is still overwhelmingly worth it, and
      * it uses a request shape the device is known to honour.
+     *
+     * Because those two minutes are the *first* thing fetch-new does, the probe
+     * reports [onProgress] as its chunks accumulate and polls [shouldContinue]
+     * between them, exactly as [download] does. Without that, fetch-new opens
+     * with a dead bar for a whole block and a cancel waits the block out —
+     * which is the regression this fixed.
      */
-    suspend fun planIncremental(previous: ByteArray): Plan {
+    suspend fun planIncremental(
+        previous: ByteArray,
+        onProgress: (Progress) -> Unit = {},
+        shouldContinue: () -> Boolean = { true },
+    ): Plan {
         // Trim to the last whole block rather than refusing. Dumps made by other
         // tools are not block-aligned -- the reference mtkbabel image is 82
         // blocks plus 2 KB -- and rejecting those would force a three-hour
@@ -144,7 +154,28 @@ class FlashDownloader(
             return Plan.FullRequired("no previous dump worth extending")
         }
 
-        val probe = client.readLogBlock(0, blockSize)
+        // During the probe nothing new has been fetched, so bytesDownloaded
+        // holds at what the previous dump already covers and only the
+        // per-sector bar moves. Same signal, same honesty, as a download block.
+        val usableSectors = usable / SectorHeader.SECTOR_SIZE
+        val probe = client.readLogBlock(
+            0, blockSize, blockIdleTimeoutMillis,
+            onChunk = { filledInBlock ->
+                onProgress(
+                    Progress(
+                        bytesDownloaded = usable,
+                        sectorsRead = usableSectors,
+                        retries = 0,
+                        blockBytes = filledInBlock,
+                        blockSizeBytes = blockSize,
+                    )
+                )
+            },
+            shouldContinue = shouldContinue,
+        )
+        if (!shouldContinue()) {
+            return Plan.FullRequired("cancelled during the wrap probe")
+        }
         if (!probe.isComplete) {
             return Plan.FullRequired("could not read the flash to check for a wrap")
         }
@@ -169,6 +200,9 @@ class FlashDownloader(
         client.transcript.note(
             "wrap probe matches; extending from 0x%08X".format(from)
         )
+        // Block boundary, as in [download]: empty the in-flight bar so it does
+        // not sit at 64/64 KB while the first extend chunk is still on the wire.
+        onProgress(Progress(usable, usableSectors, 0, blockBytes = 0, blockSizeBytes = blockSize))
         return Plan.Extend(from, usable)
     }
 
@@ -182,11 +216,21 @@ class FlashDownloader(
         previous: ByteArray,
         onProgress: (Progress) -> Unit = {},
         shouldContinue: () -> Boolean = { true },
-    ): Result = when (val plan = planIncremental(previous)) {
-        is Plan.Extend -> download(previous, plan.fromOffset, onProgress, shouldContinue)
-        is Plan.FullRequired -> {
-            client.transcript.note("full download required: ${plan.reason}")
-            download(ByteArray(0), 0, onProgress, shouldContinue)
+    ): Result {
+        val plan = planIncremental(previous, onProgress, shouldContinue)
+        if (!shouldContinue()) {
+            // Not a wrap and not a failure: the user stopped it. Falling through
+            // to the full-download branch would note "full download required"
+            // for a transfer that was never going to run.
+            client.transcript.note("cancelled during the wrap probe; nothing fetched")
+            return Result(ByteArray(0), sectorsRead = 0, retries = 0, stoppedOnUnwritten = false)
+        }
+        return when (plan) {
+            is Plan.Extend -> download(previous, plan.fromOffset, onProgress, shouldContinue)
+            is Plan.FullRequired -> {
+                client.transcript.note("full download required: ${plan.reason}")
+                download(ByteArray(0), 0, onProgress, shouldContinue)
+            }
         }
     }
 

@@ -794,8 +794,13 @@ class SessionController(
                 // a meaningless "0 fixes" summary presented as a result, and it
                 // clutters the list that the real dumps live in.
                 if (result.image.isEmpty()) {
-                    _message.value =
+                    // A cancel during the wrap probe lands here too, and blaming
+                    // the logger for a stop the user asked for is a lie.
+                    _message.value = if (cancelRequested) {
+                        "Cancelled — nothing had been fetched; ${source.name} is untouched"
+                    } else {
                         "Nothing was read — ${result.failure ?: "the logger did not respond"}"
+                    }
                     return@launchExclusive
                 }
 
@@ -810,6 +815,10 @@ class SessionController(
                 _message.value = when {
                     result.failure != null ->
                         "Interrupted — ${result.image.size / 1024} KB saved and resumable"
+                    // Cancelled mid-extend: "already up to date" would present a
+                    // stop the user requested as a checked fact about the logger.
+                    cancelRequested && !result.isComplete ->
+                        "Cancelled — ${result.image.size / 1024} KB saved and resumable"
                     gained > 0 -> "Added ${gained / 1024} KB of new tracking to ${target.name}"
                     else -> "Already up to date — nothing new on the logger"
                 }
@@ -867,8 +876,13 @@ class SessionController(
                 )
 
                 if (result.image.isEmpty()) {
-                    _message.value =
+                    // Over Bluetooth the first block is minutes long, so a
+                    // cancel before it completes is a real path, not a race.
+                    _message.value = if (cancelRequested) {
+                        "Cancelled — nothing had been read yet"
+                    } else {
                         "Nothing was read — ${result.failure ?: "the logger did not respond"}"
+                    }
                     return@launchExclusive
                 }
 

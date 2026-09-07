@@ -392,6 +392,49 @@ class RoundTripTest {
     }
 
     @Test
+    fun `the wrap probe reports sub-sector progress, like any other block`() = runBlocking {
+        val size = FlashDownloader.DEFAULT_BLOCK_SIZE
+        val previous = flash.copyOf(40 * size)
+
+        // Over Bluetooth the probe is the first two minutes of fetch-new. It
+        // must fill the per-sector bar as chunks arrive, not sit dead — that
+        // was the regression: download() gained onChunk, the probe did not.
+        val bars = mutableListOf<Int>()
+        val plan = FlashDownloader(client()).planIncremental(previous, onProgress = {
+            assertEquals(size, it.blockSizeBytes, "the probe bar needs its denominator")
+            bars += it.blockBytes
+        })
+
+        assertTrue(plan is FlashDownloader.Plan.Extend, "got $plan")
+        assertTrue(bars.count { it > 0 } >= 2, "the bar should move as chunks accumulate: $bars")
+        assertTrue(
+            bars.zipWithNext().all { (a, b) -> b >= a || b == 0 },
+            "the bar must only grow within the block: $bars",
+        )
+        assertEquals(size, bars.max(), "the probe reads a whole block")
+        assertEquals(0, bars.last(), "the bar resets at the block boundary")
+    }
+
+    @Test
+    fun `a cancel during the wrap probe fetches nothing and touches nothing`() = runBlocking {
+        val size = FlashDownloader.DEFAULT_BLOCK_SIZE
+        val previous = flash.copyOf(40 * size)
+
+        // Cancel as soon as the probe shows life. Before the fix this waited
+        // the whole block out and then fell into the full-download branch.
+        var cancelled = false
+        val result = FlashDownloader(client()).downloadIncremental(
+            previous,
+            onProgress = { cancelled = true },
+            shouldContinue = { !cancelled },
+        )
+
+        assertTrue(cancelled, "the probe never reported progress to cancel from")
+        assertTrue(result.image.isEmpty(), "a cancelled probe must not fetch anything")
+        assertTrue(!result.stoppedOnUnwritten, "a cancel is not end-of-flash")
+    }
+
+    @Test
     fun `extending produces the same image as a full download`() = runBlocking {
         val size = FlashDownloader.DEFAULT_BLOCK_SIZE
         val previous = flash.copyOf(40 * size)

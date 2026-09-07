@@ -83,7 +83,16 @@ class DownloadService : Service() {
     }
 
     override fun onDestroy() {
+        // Order matters. The progress collector posts with notify(), and an
+        // emission dispatched after stopSelf() would re-post the notification
+        // as an orphan no longer owned by the service -- ongoing, unswipeable,
+        // and cleared by nothing short of killing the app. Cancel the collector
+        // first so no post-mortem notify can run (both are on Main, so there is
+        // no interleaving), then remove the notification it may already have
+        // re-posted.
         scope.cancel()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        NotificationManagerCompat.from(this).cancel(NOTIFICATION_ID)
         super.onDestroy()
     }
 

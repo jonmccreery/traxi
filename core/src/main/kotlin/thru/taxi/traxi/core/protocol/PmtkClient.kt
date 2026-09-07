@@ -126,18 +126,25 @@ class PmtkClient(
      */
     suspend fun awaitSentence(
         timeoutMillis: Long = defaultTimeoutMillis,
+        /**
+         * Polled between reads. When it turns false the wait ends at once with a
+         * timeout, so a cancelled block read stops within one read rather than
+         * waiting out the idle budget for the next chunk that will never matter.
+         */
+        shouldContinue: () -> Boolean = { true },
         predicate: (NmeaSentence) -> Boolean,
     ): NmeaSentence {
         queued.firstOrNull(predicate)?.let { queued.remove(it); return it }
 
         val deadline = clock() + timeoutMillis
         while (true) {
+            if (!shouldContinue()) throw PmtkTimeoutException("read cancelled")
             val remaining = deadline - clock()
             if (remaining <= 0) {
                 throw PmtkTimeoutException("no matching response in ${timeoutMillis}ms")
             }
 
-            val n = transport.read(readBuffer, remaining)
+            val n = transport.read(readBuffer, minOf(remaining, READ_SLICE_MILLIS))
             if (n < 0) throw PmtkProtocolException("transport closed while awaiting response")
             if (n == 0) continue
 
@@ -168,7 +175,7 @@ class PmtkClient(
         repeat(retries) { attempt ->
             try {
                 send(payload)
-                return awaitSentence(timeoutMillis, predicate)
+                return awaitSentence(timeoutMillis, predicate = predicate)
             } catch (e: PmtkTimeoutException) {
                 lastFailure = e
                 transcript.note("retry ${attempt + 1}/$retries for $payload: ${e.message}")
@@ -260,6 +267,13 @@ class PmtkClient(
          * once every few minutes.
          */
         onChunk: ((filledInBlock: Int) -> Unit)? = null,
+        /**
+         * Polled between chunks so a cancel takes effect within one chunk rather
+         * than at the end of the block. Over Bluetooth a block is minutes long,
+         * so waiting for it to finish before honouring a stop is a wait worth
+         * removing. The caller discards the partial block a cancel leaves behind.
+         */
+        shouldContinue: () -> Boolean = { true },
     ): LogBlock {
         // Discard anything left over from a previous request. Without this, a
         // late chunk from an abandoned read is parsed as part of *this* block,
@@ -283,13 +297,13 @@ class PmtkClient(
         var chunks = 0
         val hardDeadline = clock() + overallTimeoutMillis
 
-        while (filled < length && clock() < hardDeadline) {
+        while (filled < length && clock() < hardDeadline && shouldContinue()) {
             val idleRemaining = idleTimeoutMillis - (clock() - lastProgress)
             val budget = minOf(idleRemaining, hardDeadline - clock())
             if (budget <= 0) break
 
             val sentence = try {
-                awaitSentence(budget) { it.matches("PMTK182", "8") }
+                awaitSentence(budget, shouldContinue) { it.matches("PMTK182", "8") }
             } catch (e: PmtkTimeoutException) {
                 break
             }
@@ -513,6 +527,16 @@ class PmtkClient(
          */
         /** Upper bound on draining stale input before a block request. */
         private const val DRAIN_MILLIS = 300L
+
+        /**
+         * Longest a single read waits before the loop rechecks its predicate and
+         * `shouldContinue`. The Bluetooth transport blocks for its whole timeout
+         * during an idle gap, so without this slice a cancel issued between
+         * chunks would not be seen until the next chunk -- up to seconds on that
+         * link. Slicing bounds cancel latency without changing the idle budget,
+         * which is still tracked against the deadline across slices.
+         */
+        private const val READ_SLICE_MILLIS = 400L
 
         /**
          * Ack budget for a whole-flash erase. Generous on purpose: the cost of

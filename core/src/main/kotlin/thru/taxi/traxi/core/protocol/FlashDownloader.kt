@@ -247,6 +247,7 @@ class FlashDownloader(
                         )
                     )
                 },
+                shouldContinue = shouldContinue,
             )
 
             // A short block means dropped chunks, never end of flash: an erased
@@ -272,8 +273,15 @@ class FlashDownloader(
                         )
                     )
                 },
+                shouldContinue = shouldContinue,
             )
             }
+
+            // Cancelled mid-block: discard the partial block in flight and keep
+            // only the whole blocks already written. Resume re-reads cleanly
+            // from here, so nothing is lost by not waiting the block out -- and
+            // over Bluetooth that wait is minutes.
+            if (!shouldContinue()) break
 
             if (block.filled == 0) {
                 // A transport failure, not erased flash. Saying "end of flash"

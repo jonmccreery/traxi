@@ -82,9 +82,14 @@ class RoundTripTest {
         val blockSize = FlashDownloader.DEFAULT_BLOCK_SIZE
 
         // Interrupt after three blocks, as a phone going into a pocket would.
+        // Count completed blocks by their boundary progress (blockBytes == 0),
+        // not by shouldContinue calls: shouldContinue is now polled per chunk so
+        // a cancel is honoured mid-block, which a call-counting limiter mistakes
+        // for many blocks.
         var blocks = 0
         val partial = FlashDownloader(client()).download(
-            shouldContinue = { blocks++ < 3 },
+            onProgress = { if (it.blockBytes == 0) blocks++ },
+            shouldContinue = { blocks < 3 },
         )
         assertEquals(3 * blockSize, partial.image.size)
 
@@ -112,7 +117,10 @@ class RoundTripTest {
         val downloader = FlashDownloader(PmtkClient(transport, defaultTimeoutMillis = 5_000))
 
         var blocks = 0
-        val result = downloader.download(shouldContinue = { blocks++ < 2 })
+        val result = downloader.download(
+            onProgress = { if (it.blockBytes == 0) blocks++ },
+            shouldContinue = { blocks < 2 },
+        )
 
         assertEquals(2 * FlashDownloader.DEFAULT_BLOCK_SIZE, result.image.size)
         assertEquals(0, result.retries, "small chunks should not require retries")
@@ -243,7 +251,10 @@ class RoundTripTest {
                 clock = clock::read,
             )
             var blocks = 0
-            FlashDownloader(client).download(shouldContinue = { blocks++ < 2 })
+            FlashDownloader(client).download(
+                onProgress = { if (it.blockBytes == 0) blocks++ },
+                shouldContinue = { blocks < 2 },
+            )
         }
 
         val overBluetooth = run(10_000)
@@ -260,6 +271,61 @@ class RoundTripTest {
         assertTrue(
             overUsbTimeout.isDamaged,
             "a USB-sized 2.5 s idle timeout must choke on a 4 s gap, not pass silently",
+        )
+    }
+
+    @Test
+    fun `a cancel is honoured mid-block, not at the end of it`() = runBlocking {
+        // Over Bluetooth a block is minutes long, so a cancel that waits for the
+        // in-flight block to finish is a wait worth removing. Cancel three chunks
+        // into the first block: the download must return promptly with only the
+        // whole blocks it holds (here none), discarding the partial block.
+        val transport = SimulatedLoggerTransport(flash, chunkSize = 0x1000)
+        transport.open()
+        val client = PmtkClient(transport, defaultTimeoutMillis = 5_000)
+
+        var chunks = 0
+        val result = FlashDownloader(client).download(
+            onProgress = { if (it.blockBytes > 0) chunks++ },
+            shouldContinue = { chunks < 3 },
+        )
+
+        // Block 0 is 32 chunks; cancelled at 3, so no whole block was written.
+        assertEquals(0, result.image.size, "a mid-block cancel must not keep the partial block")
+        assertTrue(!result.isComplete)
+    }
+
+    @Test
+    fun `a cancel during an idle wait ends within a read slice, not the idle budget`() = runBlocking {
+        // The Bluetooth case the display cleanup targets: no chunk is arriving,
+        // the read is parked waiting for the next one. A cancel must end that
+        // wait within a read slice, not at the end of the 10 s idle budget --
+        // otherwise "stop" still hangs for seconds between chunks.
+        val clock = SteppedClock()
+        val inner = SimulatedLoggerTransport(flash, chunkSize = 0x1000)
+        inner.open()
+        var cancelled = false
+        // A link that never yields the awaited chunk: every read costs time and
+        // returns silence, exactly like an inter-chunk gap over RFCOMM.
+        val silent = object : thru.taxi.traxi.core.transport.Transport by inner {
+            override suspend fun read(dest: ByteArray, timeoutMillis: Long): Int {
+                clock.advance(400)
+                if (clock.now >= 2_000) cancelled = true
+                return 0
+            }
+        }
+        val client = PmtkClient(silent, clock = clock::read)
+
+        val block = client.readLogBlock(
+            0, FlashDownloader.DEFAULT_BLOCK_SIZE,
+            idleTimeoutMillis = 10_000,
+            shouldContinue = { !cancelled },
+        )
+
+        assertEquals(0, block.filled, "no chunk ever arrived")
+        assertTrue(
+            clock.now < 5_000,
+            "cancel should end the wait near 2 s, not at the 10 s idle budget; was ${clock.now}",
         )
     }
 

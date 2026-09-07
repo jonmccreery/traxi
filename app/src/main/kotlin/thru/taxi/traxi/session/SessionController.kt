@@ -88,6 +88,22 @@ data class LiveActivity(
     val pulse: Long = 0L,
 )
 
+/**
+ * Ground-truth "is it actually recording?", read from the write pointer rather
+ * than the status bit. The pointer is bytes that have genuinely landed in flash
+ * -- the same number a dump-and-compare checks -- so it cannot misreport the way
+ * the status bit does right after a reconnect. Advancing means fixes are being
+ * written; frozen across several probes means they are not.
+ */
+data class RecordingActivity(
+    val bytesSinceConnect: Long = 0,
+    /** When the pointer last increased; 0 until the first advance is seen. */
+    val lastAdvanceAtNanos: Long = 0L,
+    /** How many times the pointer has been sampled since connecting. */
+    val probes: Int = 0,
+    val confirmedEver: Boolean = false,
+)
+
 /** Result of parsing a dump file, for display. */
 data class ParseSummary(
     val fileName: String,
@@ -185,6 +201,14 @@ class SessionController(
 
     private val _liveActivity = MutableStateFlow(LiveActivity())
     val liveActivity: StateFlow<LiveActivity> = _liveActivity.asStateFlow()
+
+    private val _recording = MutableStateFlow(RecordingActivity())
+    val recording: StateFlow<RecordingActivity> = _recording.asStateFlow()
+
+    // Write-pointer probe baseline. The pointer only ever grows while logging,
+    // so a later sample above an earlier one is proof a fix was written.
+    private var recordingBaseline: Long? = null
+    private var lastProbedPointer: Long? = null
 
     // Download throughput meter. Rate is smoothed because chunks arrive in
     // bursts -- ~30 ms apart over USB, several seconds apart over Bluetooth.
@@ -434,6 +458,12 @@ class SessionController(
             )
         )
 
+        // Seed the recording probe from the connect-time pointer, so the first
+        // sample can already show whether fixes have been written since.
+        recordingBaseline = pointer
+        lastProbedPointer = pointer
+        _recording.value = RecordingActivity()
+
         startTelemetry(c, firmware.needsWeekRollover)
     }
 
@@ -494,6 +524,21 @@ class SessionController(
         )
     }
 
+    /** Fold one write-pointer sample into the recording-confirmation state. */
+    private fun noteWritePointer(ptr: Long, now: Long) {
+        val base = recordingBaseline ?: ptr.also { recordingBaseline = it }
+        val prev = lastProbedPointer
+        val advanced = prev != null && ptr > prev
+        lastProbedPointer = ptr
+        val cur = _recording.value
+        _recording.value = cur.copy(
+            bytesSinceConnect = (ptr - base).coerceAtLeast(0),
+            lastAdvanceAtNanos = if (advanced) now else cur.lastAdvanceAtNanos,
+            probes = cur.probes + 1,
+            confirmedEver = cur.confirmedEver || advanced,
+        )
+    }
+
     private fun startTelemetry(c: PmtkClient, needsRollover: Boolean) {
         val assembler = TelemetryAssembler(
             if (needsRollover) GpsRollover.AXN_130B else GpsRollover.NONE
@@ -514,6 +559,7 @@ class SessionController(
 
         telemetryJob?.cancel()
         telemetryJob = scope.launch {
+            var lastProbeNanos = 0L
             while (isActive) {
                 // A read while another operation holds the lock would take
                 // bytes belonging to that operation.
@@ -526,6 +572,22 @@ class SessionController(
                     -1
                 }
                 if (read < 0) break
+
+                // Periodically confirm fixes are actually landing in flash by
+                // reading the write pointer. This is the ground-truth recording
+                // signal: the status bit misreports right after a reconnect, but
+                // the pointer only grows when a fix is written.
+                val now = System.nanoTime()
+                if (now - lastProbeNanos >= WRITE_PROBE_INTERVAL_NANOS) {
+                    lastProbeNanos = now
+                    val ptr = try {
+                        readLock.withLock { c.queryWritePointer() }
+                    } catch (e: Exception) {
+                        null
+                    }
+                    if (ptr != null) noteWritePointer(ptr, System.nanoTime())
+                }
+
                 // Release the lock briefly between reads so an operation
                 // waiting for it starts promptly rather than queueing behind
                 // another full read window.
@@ -540,6 +602,9 @@ class SessionController(
         client?.onSentence = null
         _telemetry.value = null
         _liveActivity.value = LiveActivity()
+        _recording.value = RecordingActivity()
+        recordingBaseline = null
+        lastProbedPointer = null
     }
 
     fun disconnect() {
@@ -1141,4 +1206,12 @@ class SessionController(
      * number at the ~1 Hz fix cadence without lagging a real stall for long.
      */
     private val FIX_RATE_WINDOW_NANOS = 4_000_000_000L
+
+    /**
+     * How often to sample the write pointer for the recording indicator. Short
+     * enough that a stopped log is caught within a couple of samples, long
+     * enough not to flood the slow Bluetooth link; comfortably above the log
+     * interval so a healthy log advances between samples.
+     */
+    private val WRITE_PROBE_INTERVAL_NANOS = 12_000_000_000L
 }

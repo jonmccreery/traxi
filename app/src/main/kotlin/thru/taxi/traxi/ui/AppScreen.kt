@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import thru.taxi.traxi.session.LiveActivity
+import thru.taxi.traxi.session.RecordingActivity
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -41,6 +42,14 @@ import java.util.Locale
 private enum class Tab(val label: String) {
     DEVICE("Device"), LIVE("Live"), DUMPS("Dumps"), CONFIG("Config"), LOG("Log")
 }
+
+/**
+ * How long the write pointer may sit still before the recording indicator calls
+ * it stopped. Above two probe intervals (~24 s) so a healthy log, which advances
+ * every probe, is never flagged; low enough that a real stop shows within ~half
+ * a minute.
+ */
+private const val RECORDING_STALE_NANOS = 30_000_000_000L
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -201,9 +210,11 @@ private fun DeviceTab(
     // advice is the relevant advice.
     val usbDevices = remember { container.usb.candidates() }
 
+    val recording by session.recording.collectAsState()
+
     when (connection) {
         is ConnectionState.Connected -> {
-            DeviceInfoCard(connection.info, session.isSimulated)
+            DeviceInfoCard(connection.info, session.isSimulated, recording)
             OutlinedButton(
                 onClick = { session.disconnect() },
                 modifier = Modifier.fillMaxWidth(),
@@ -380,7 +391,7 @@ private fun DeviceButton(name: String?, address: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun DeviceInfoCard(info: DeviceInfo, simulated: Boolean) {
+private fun DeviceInfoCard(info: DeviceInfo, simulated: Boolean, recording: RecordingActivity) {
     SectionCard(if (simulated) "Simulated logger" else "Logger") {
         Text(info.displayModel, style = MaterialTheme.typography.titleLarge)
         Row2("Transport", info.transportDescription)
@@ -389,25 +400,60 @@ private fun DeviceInfoCard(info: DeviceInfo, simulated: Boolean) {
         Row2("Fields", info.logFormat.describe(), mono = true)
         Row2("Interval", "${info.timeIntervalSeconds} s")
 
-        // Decoded, and called out when it is off. A logger that is not
-        // recording is indistinguishable from one that is until the trip ends,
-        // so this is the one status the user must not have to interpret.
-        val status = Pmtk.LogStatus.parse(info.logStatus)
-        if (status == null) {
-            Row2("Status", info.logStatus)
-        } else if (status.isLoggingEnabled) {
-            Row2("Status", status.describe())
+        // The one status the user must not have to interpret: is it recording?
+        // Decided by the write pointer actually advancing -- bytes landing in
+        // flash -- not by the status bit, which this device misreports right
+        // after a reconnect. The bit is shown below as a secondary detail.
+        val reported = Pmtk.LogStatus.parse(info.logStatus)
+        if (simulated) {
+            Row2("Status", reported?.describe() ?: info.logStatus)
         } else {
-            Text(
-                "NOT RECORDING",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.error,
-            )
-            Text(
-                "The logger is powered on but not writing fixes. This is how it is " +
-                    "left if a settings write is interrupted partway.",
-                style = MaterialTheme.typography.bodySmall,
-            )
+            var now by remember { mutableStateOf(System.nanoTime()) }
+            LaunchedEffect(Unit) { while (true) { now = System.nanoTime(); delay(1_000) } }
+
+            val confirmed = recording.lastAdvanceAtNanos != 0L &&
+                (now - recording.lastAdvanceAtNanos) < RECORDING_STALE_NANOS
+            when {
+                // Need at least two samples (or one advance) before judging.
+                recording.probes < 2 && !confirmed ->
+                    Row2("Recording", "checking…")
+
+                confirmed -> {
+                    Text(
+                        "RECORDING",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        "${Bytes.describe(recording.bytesSinceConnect)} written to flash " +
+                            "since connecting. This is the live write pointer, not a guess.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+
+                else -> {
+                    Text(
+                        "NOT RECORDING",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Text(
+                        if (recording.confirmedEver) {
+                            "No fixes have been written to flash for " +
+                                "%.0f s. Recording appears to have stopped.".format(
+                                    (now - recording.lastAdvanceAtNanos) / 1e9)
+                        } else {
+                            "No fixes have been written to flash since connecting. " +
+                                "The logger is not recording — resume it before setting off."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+            // The device's own status bit, kept as detail. It is not the alarm:
+            // it reads NOT logging right after a reconnect even while fixes are
+            // still being written, which is the false alarm this card replaces.
+            reported?.let { Row2("Reported", it.describe()) }
         }
 
         info.flash?.let { Row2("Flash", it.describe()) }

@@ -471,14 +471,6 @@ private fun DeviceInfoCard(info: DeviceInfo, simulated: Boolean, recording: Reco
             )
         }
 
-        if (info.needsWeekRollover) {
-            HorizontalDivider()
-            Text(
-                "This firmware predates the 2019 GPS week rollover, so its timestamps " +
-                    "arrive 1024 weeks early. Traxi corrects them automatically.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
     }
 }
 
@@ -785,30 +777,10 @@ private fun DumpsTab(
         }
     } else if (connection is ConnectionState.Connected) {
         SectionCard("Download") {
-            val overUsb = (connection as? ConnectionState.Connected)
-                ?.info?.transportDescription?.startsWith("usb") == true
-            Text(
-                if (overUsb) {
-                    "Reads the whole flash, about 90 seconds over USB. It keeps running " +
-                        "with the screen off, and can be resumed if interrupted."
-                } else {
-                    "Reads the whole flash. Over Bluetooth this logger manages about " +
-                        "493 bytes a second, so a full read takes roughly three hours — " +
-                        "use \"Fetch new\" below instead, or connect by cable. It keeps " +
-                        "running with the screen off, and can be resumed."
-                },
-                style = MaterialTheme.typography.bodyMedium,
-            )
             Button(
                 onClick = { DownloadService.start(context) },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Download flash") }
-            Text(
-                "If you already have a dump, \"Fetch new\" below is far quicker — it " +
-                    "reads only what the logger has recorded since, after checking the " +
-                    "log has not wrapped.",
-                style = MaterialTheme.typography.bodySmall,
-            )
         }
     }
 
@@ -1001,23 +973,9 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
         mutableStateOf(info.timeIntervalSeconds.toString())
     }
 
-    SectionCard("Writing settings") {
-        Text(
-            "These change the device. Logging is disabled for the write and re-enabled " +
-                "afterwards. Nothing here happens as a side effect of connecting.",
-            style = MaterialTheme.typography.bodyMedium,
-        )
-    }
-
     SectionCard("Recording") {
         val status = Pmtk.LogStatus.parse(info.logStatus)
         Row2("Status", status?.describe() ?: info.logStatus)
-        Text(
-            "Pausing is not needed for a download — reading the flash does not stop " +
-                "the logger. This is here so a device left switched off by an " +
-                "interrupted write can be switched back on.",
-            style = MaterialTheme.typography.bodySmall,
-        )
         if (status?.isLoggingEnabled != true) {
             Button(
                 onClick = {
@@ -1146,15 +1104,6 @@ private fun EraseCard(container: AppContainer, info: DeviceInfo, parentBusy: Boo
     }
 
     SectionCard("Erase") {
-        Text(
-            "Dump, verify, erase, repeat is the only workflow that covers a long trip, " +
-                "so this is a normal part of using the device — but it is irreversible, " +
-                "and the flash is the only copy until you export.",
-            style = MaterialTheme.typography.bodyMedium,
-        )
-
-        HorizontalDivider()
-
         if (blockers.isNotEmpty()) {
             Text(
                 "Not available yet",

@@ -559,16 +559,12 @@ class SessionController(
 
         telemetryJob?.cancel()
         telemetryJob = scope.launch {
-            var lastProbeNanos = 0L
-            // A Bluetooth socket can wedge without closing: writes buffer into
-            // the void, reads return nothing, and no ACL broadcast arrives. On
-            // such a link this loop used to poll the write pointer forever --
-            // 99 failed retries in one transcript. Total silence is the tell:
-            // this device streams NMEA continuously, so a failed probe (itself
-            // nine seconds of retries) with not one byte since the previous
-            // probe is not a busy link, it is a dead one.
-            var silentProbes = 0
-            var bytesSinceProbe = 0
+            // Start the clock a full interval back is wrong: probing immediately
+            // on the first iteration hits the link at its least settled moment,
+            // right after connect, while openWith's own flash/pointer queries may
+            // still be echoing. Wait a full interval before the first probe.
+            var lastProbeNanos = System.nanoTime()
+            var bytesSincePump = 0
             while (isActive) {
                 // A read while another operation holds the lock would take
                 // bytes belonging to that operation.
@@ -581,30 +577,35 @@ class SessionController(
                     -1
                 }
                 if (read < 0) break
-                bytesSinceProbe += read
+                if (read > 0) bytesSincePump += read
 
                 // Periodically confirm fixes are actually landing in flash by
                 // reading the write pointer. This is the ground-truth recording
                 // signal: the status bit misreports right after a reconnect, but
                 // the pointer only grows when a fix is written.
+                //
+                // Only probe a link that is actually talking. Firing the query
+                // into a silent link buys nothing but nine seconds of doomed
+                // retries every interval -- the wasteful "99 retries" spin from
+                // a wedged socket -- and a silence this loop could detect is one
+                // the Live heartbeat is *already* showing, stale and red. We do
+                // NOT tear the session down on silence: this logger goes quiet in
+                // RFCOMM bursts, at the edge of range, and (if the vibration
+                // sensor is ever enabled) on its 10-minute sleep, and it comes
+                // back on its own. A teardown here made those recoverable stalls
+                // fatal and forced a fragile manual reconnect. A genuine dead
+                // link still surfaces -- through the ACL-disconnect broadcast
+                // (watchLink), which is the real signal, not a guess from silence.
                 val now = System.nanoTime()
-                if (now - lastProbeNanos >= WRITE_PROBE_INTERVAL_NANOS) {
+                if (now - lastProbeNanos >= WRITE_PROBE_INTERVAL_NANOS && bytesSincePump > 0) {
                     lastProbeNanos = now
+                    bytesSincePump = 0
                     val ptr = try {
                         readLock.withLock { c.queryWritePointer() }
                     } catch (e: Exception) {
                         null
                     }
                     if (ptr != null) noteWritePointer(ptr, System.nanoTime())
-                    silentProbes = if (ptr == null && bytesSinceProbe == 0) silentProbes + 1 else 0
-                    bytesSinceProbe = 0
-                    if (silentProbes >= DEAD_LINK_SILENT_PROBES) {
-                        onLinkLost(
-                            "The logger went silent — nothing has arrived for over " +
-                                "half a minute. The link is probably dead."
-                        )
-                        break
-                    }
                 }
 
                 // Release the lock briefly between reads so an operation
@@ -1247,13 +1248,4 @@ class SessionController(
      * interval so a healthy log advances between samples.
      */
     private val WRITE_PROBE_INTERVAL_NANOS = 12_000_000_000L
-
-    /**
-     * Consecutive write-pointer probes that failed with zero bytes read between
-     * them before the link is declared dead. Two, not one: each probe already
-     * spans nine seconds of retries, and two of them plus the probe interval is
-     * over thirty seconds of proven silence from a device that streams NMEA
-     * every second. One alarm, once, per the rule that alarms keep their meaning.
-     */
-    private val DEAD_LINK_SILENT_PROBES = 2
 }

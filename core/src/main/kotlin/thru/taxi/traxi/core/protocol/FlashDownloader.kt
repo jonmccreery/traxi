@@ -52,6 +52,13 @@ class FlashDownloader(
         val bytesDownloaded: Int,
         val sectorsRead: Int,
         val retries: Int,
+        /**
+         * Bytes filled in the block currently in flight, 0..[blockSizeBytes].
+         * Resets to 0 at each block boundary, so the UI can draw an honest
+         * per-sector bar even though the flash has no trustworthy total size.
+         */
+        val blockBytes: Int = 0,
+        val blockSizeBytes: Int = 0,
     )
 
     data class Result(
@@ -227,7 +234,20 @@ class FlashDownloader(
 
         try {
         while (address < maxBytes && shouldContinue()) {
-            var block = client.readLogBlock(address, blockSize, blockIdleTimeoutMillis)
+            var block = client.readLogBlock(
+                address, blockSize, blockIdleTimeoutMillis,
+                onChunk = { filledInBlock ->
+                    onProgress(
+                        Progress(
+                            bytesDownloaded = out.size() + filledInBlock,
+                            sectorsRead = sectors,
+                            retries = retries,
+                            blockBytes = filledInBlock,
+                            blockSizeBytes = blockSize,
+                        )
+                    )
+                },
+            )
 
             // A short block means dropped chunks, never end of flash: an erased
             // sector still answers, with 0xFF bytes. Retry the whole block.
@@ -239,7 +259,20 @@ class FlashDownloader(
                     "block 0x%08X short (%d/%d), attempt %d of %d"
                         .format(address, block.filled, blockSize, attempt, ATTEMPTS_PER_BLOCK)
                 )
-                block = client.readLogBlock(address, blockSize, blockIdleTimeoutMillis)
+                block = client.readLogBlock(
+                address, blockSize, blockIdleTimeoutMillis,
+                onChunk = { filledInBlock ->
+                    onProgress(
+                        Progress(
+                            bytesDownloaded = out.size() + filledInBlock,
+                            sectorsRead = sectors,
+                            retries = retries,
+                            blockBytes = filledInBlock,
+                            blockSizeBytes = blockSize,
+                        )
+                    )
+                },
+            )
             }
 
             if (block.filled == 0) {
@@ -289,7 +322,9 @@ class FlashDownloader(
             consecutiveUnwritten =
                 if (isUnwritten(block.bytes)) consecutiveUnwritten + 1 else 0
 
-            onProgress(Progress(address, sectors, retries))
+            // Block boundary: the in-flight bar resets to empty for the next
+            // sector, and bytesDownloaded is now the exact completed total.
+            onProgress(Progress(address, sectors, retries, blockBytes = 0, blockSizeBytes = blockSize))
 
             if (consecutiveUnwritten >= unwrittenSectorsToStop) {
                 stoppedOnUnwritten = true

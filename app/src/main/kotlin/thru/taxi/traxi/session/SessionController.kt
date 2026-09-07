@@ -67,6 +67,23 @@ data class DownloadState(
     val sectorsRead: Int = 0,
     val retries: Int = 0,
     val resumedFrom: Int = 0,
+    /** Bytes filled in the sector currently in flight, 0..[blockSizeBytes]. */
+    val blockBytes: Int = 0,
+    val blockSizeBytes: Int = 0,
+    /** Smoothed throughput, so a slow Bluetooth read visibly moves. */
+    val bytesPerSecond: Double = 0.0,
+)
+
+/**
+ * A heartbeat for the Live tab: proof that navigation data is arriving right
+ * now, not a stale snapshot. [pulse] increments on every sentence so the UI can
+ * blink; [lastSentenceAtNanos] lets it show "last update Xs ago" and turn stale;
+ * [sentencesPerSecond] is the flow rate.
+ */
+data class LiveActivity(
+    val lastSentenceAtNanos: Long = 0L,
+    val sentencesPerSecond: Double = 0.0,
+    val pulse: Long = 0L,
 )
 
 /** Result of parsing a dump file, for display. */
@@ -163,6 +180,21 @@ class SessionController(
      */
     private val _telemetry = MutableStateFlow<Telemetry?>(null)
     val telemetry: StateFlow<Telemetry?> = _telemetry.asStateFlow()
+
+    private val _liveActivity = MutableStateFlow(LiveActivity())
+    val liveActivity: StateFlow<LiveActivity> = _liveActivity.asStateFlow()
+
+    // Download throughput meter. Rate is smoothed because chunks arrive in
+    // bursts -- ~30 ms apart over USB, several seconds apart over Bluetooth.
+    private var rateLastBytes = 0
+    private var rateLastNanos = 0L
+    private var rateEmaBps = 0.0
+
+    // Sentence-arrival window for the Live heartbeat. A sliding count over wall
+    // time, not an inter-arrival rate: RFCOMM delivers a whole second of
+    // sentences in one burst, so the sub-millisecond gaps within a burst are
+    // meaningless and an interval-based rate reads absurdly high (hundreds/sec).
+    private val sentTimestamps = ArrayDeque<Long>()
 
     /**
      * The download half of the evidence, waiting for its parse.
@@ -413,11 +445,61 @@ class SessionController(
      * actions, so without it the stream would sit in the transport's bounded
      * queue until it overflowed and was dropped.
      */
+    /** Arm the throughput meter at the byte count a download starts from. */
+    private fun resetRateMeter(startBytes: Int) {
+        rateLastBytes = startBytes
+        rateLastNanos = System.nanoTime()
+        rateEmaBps = 0.0
+    }
+
+    /** Fold one progress callback into [_download], including a smoothed rate. */
+    private fun applyDownloadProgress(p: FlashDownloader.Progress) {
+        val now = System.nanoTime()
+        val dt = (now - rateLastNanos) / 1e9
+        val db = p.bytesDownloaded - rateLastBytes
+        if (dt > 0 && db >= 0) {
+            val inst = db / dt
+            rateEmaBps = if (rateEmaBps == 0.0) inst else 0.4 * inst + 0.6 * rateEmaBps
+            rateLastBytes = p.bytesDownloaded
+            rateLastNanos = now
+        }
+        _download.value = _download.value.copy(
+            bytesDownloaded = p.bytesDownloaded,
+            sectorsRead = p.sectorsRead,
+            retries = p.retries,
+            blockBytes = p.blockBytes,
+            blockSizeBytes = p.blockSizeBytes,
+            bytesPerSecond = rateEmaBps,
+        )
+    }
+
+    /** Record that a navigation sentence just arrived, for the Live heartbeat. */
+    private fun noteSentenceArrived() {
+        val now = System.nanoTime()
+        val rate: Double
+        synchronized(sentTimestamps) {
+            sentTimestamps.addLast(now)
+            val cutoff = now - SENTENCE_RATE_WINDOW_NANOS
+            while (sentTimestamps.isNotEmpty() && sentTimestamps.first() < cutoff) {
+                sentTimestamps.removeFirst()
+            }
+            rate = sentTimestamps.size * 1e9 / SENTENCE_RATE_WINDOW_NANOS
+        }
+        _liveActivity.value = LiveActivity(
+            lastSentenceAtNanos = now,
+            sentencesPerSecond = rate,
+            pulse = _liveActivity.value.pulse + 1,
+        )
+    }
+
     private fun startTelemetry(c: PmtkClient, needsRollover: Boolean) {
         val assembler = TelemetryAssembler(
             if (needsRollover) GpsRollover.AXN_130B else GpsRollover.NONE
         )
+        synchronized(sentTimestamps) { sentTimestamps.clear() }
+        _liveActivity.value = LiveActivity()
         c.onSentence = { sentence ->
+            noteSentenceArrived()
             if (assembler.accept(sentence)) _telemetry.value = assembler.current
         }
 
@@ -448,6 +530,7 @@ class SessionController(
         telemetryJob = null
         client?.onSentence = null
         _telemetry.value = null
+        _liveActivity.value = LiveActivity()
     }
 
     fun disconnect() {
@@ -624,17 +707,12 @@ class SessionController(
                     bytesDownloaded = previous.size,
                     resumedFrom = previous.size,
                 )
+                resetRateMeter(previous.size)
 
                 val target = dumps.newDumpFile()
                 val result = FlashDownloader(c).downloadIncremental(
                     previous = previous,
-                    onProgress = { p ->
-                        _download.value = _download.value.copy(
-                            bytesDownloaded = p.bytesDownloaded,
-                            sectorsRead = p.sectorsRead,
-                            retries = p.retries,
-                        )
-                    },
+                    onProgress = ::applyDownloadProgress,
                     shouldContinue = { !cancelRequested },
                 )
 
@@ -704,18 +782,13 @@ class SessionController(
                     bytesDownloaded = resumeFrom,
                     resumedFrom = resumeFrom,
                 )
+                resetRateMeter(resumeFrom)
 
                 val downloader = FlashDownloader(c)
                 val result = downloader.download(
                     existing = existing,
                     resumeFrom = resumeFrom,
-                    onProgress = { p ->
-                        _download.value = _download.value.copy(
-                            bytesDownloaded = p.bytesDownloaded,
-                            sectorsRead = p.sectorsRead,
-                            retries = p.retries,
-                        )
-                    },
+                    onProgress = ::applyDownloadProgress,
                     shouldContinue = { !cancelRequested },
                 )
 
@@ -1053,4 +1126,10 @@ class SessionController(
 
     /** Lock-free gap between reads, so a waiting operation gets in promptly. */
     private val TELEMETRY_IDLE_MILLIS = 50L
+
+    /**
+     * Window for the Live tab's sentence-rate readout. Two seconds smooths the
+     * per-second RFCOMM burst into a steady number without lagging a real stall.
+     */
+    private val SENTENCE_RATE_WINDOW_NANOS = 2_000_000_000L
 }

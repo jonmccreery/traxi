@@ -15,20 +15,25 @@ import thru.taxi.traxi.session.ConnectionState
 import thru.taxi.traxi.session.DeviceInfo
 import thru.taxi.traxi.session.ParseSummary
 import thru.taxi.traxi.ui.theme.MonoStyle
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import thru.taxi.traxi.session.LiveActivity
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -51,6 +56,7 @@ fun AppScreen(
     val summary by session.summary.collectAsState()
     val message by session.message.collectAsState()
     val telemetry by session.telemetry.collectAsState()
+    val liveActivity by session.liveActivity.collectAsState()
 
     var tab by rememberSaveable { mutableStateOf(Tab.DEVICE) }
     val snackbar = remember { SnackbarHostState() }
@@ -97,7 +103,7 @@ fun AppScreen(
 
             when (tab) {
                 Tab.DEVICE -> DeviceTab(container, connection, onPairDevice)
-                Tab.LIVE -> LiveTab(connection, telemetry)
+                Tab.LIVE -> LiveTab(connection, telemetry, liveActivity)
                 Tab.DUMPS -> DumpsTab(container, connection, download, summary)
                 Tab.CONFIG -> ConfigTab(container, connection)
                 Tab.LOG -> LogTab(container)
@@ -442,7 +448,11 @@ private fun DeviceInfoCard(info: DeviceInfo, simulated: Boolean) {
  * checksummed and thrown away. Nothing here costs an extra request.
  */
 @Composable
-private fun LiveTab(connection: ConnectionState, telemetry: Telemetry?) {
+private fun LiveTab(
+    connection: ConnectionState,
+    telemetry: Telemetry?,
+    activity: LiveActivity,
+) {
     if (connection !is ConnectionState.Connected) {
         SectionCard("Not connected") {
             Text(
@@ -454,21 +464,64 @@ private fun LiveTab(connection: ConnectionState, telemetry: Telemetry?) {
         return
     }
 
-    if (telemetry == null || !telemetry.hasAnything) {
-        SectionCard("Listening") {
-            Text(
-                "Waiting for the first navigation sentence. The logger sends these " +
-                    "about once a second whenever it is powered on.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            LinearProgressIndicator(Modifier.fillMaxWidth())
-        }
-        return
-    }
+    // The heartbeat leads: whether data is flowing is the first thing to know,
+    // ahead of what the data says. It also guards the section 12 failure -- a
+    // stalled stream is visible here rather than looking like a frozen fix.
+    LiveHeartbeat(activity)
+
+    if (telemetry == null || !telemetry.hasAnything) return
 
     FixCard(telemetry)
     if (telemetry.hasPosition) PositionCard(telemetry)
     if (telemetry.satellites.isNotEmpty()) SkyCard(telemetry)
+}
+
+@Composable
+private fun LiveHeartbeat(activity: LiveActivity) {
+    // Advance a local clock so "X s ago" keeps counting up even when nothing
+    // arrives -- that climbing number is exactly how a stall becomes visible.
+    var now by remember { mutableStateOf(System.nanoTime()) }
+    LaunchedEffect(Unit) {
+        while (true) { now = System.nanoTime(); delay(500) }
+    }
+
+    // Blink the dot on each sentence.
+    var blink by remember { mutableStateOf(false) }
+    LaunchedEffect(activity.pulse) { blink = true; delay(150); blink = false }
+    val alpha by animateFloatAsState(if (blink) 1f else 0.3f, label = "pulse")
+
+    val hasData = activity.lastSentenceAtNanos != 0L
+    // Clamp: a sentence can land just after the 'now' tick was sampled, which
+    // would otherwise render a nonsensical "-0.0 s ago".
+    val ageSec = if (hasData) ((now - activity.lastSentenceAtNanos) / 1e9).coerceAtLeast(0.0)
+        else Double.NaN
+    val stale = hasData && ageSec > 3.0
+    val accent = if (stale) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+
+    SectionCard(if (stale) "Stalled" else "Receiving") {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .background(accent.copy(alpha = if (stale) 1f else alpha))
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                when {
+                    !hasData -> "waiting for the first navigation sentence"
+                    stale -> "no data for %.0f s".format(ageSec)
+                    else -> "last update %.1f s ago".format(ageSec)
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (stale) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurface,
+            )
+        }
+        if (activity.sentencesPerSecond > 0) {
+            Row2("Flow", "~%.0f sentences/sec".format(activity.sentencesPerSecond))
+        }
+    }
 }
 
 @Composable
@@ -655,13 +708,28 @@ private fun DumpsTab(
 
     if (download.running) {
         SectionCard("Downloading") {
-            // No percentage: the device's own record count and flash size are
-            // both wrong, so there is no honest denominator. Report work done.
+            // No percentage against the whole flash: the device's own record
+            // count and flash size are both wrong, so there is no honest total.
+            // The block size, though, is known -- so the current sector gets a
+            // real bar, and the rate readout shows the link is flowing.
             Text(Bytes.describe(download.bytesDownloaded), style = MaterialTheme.typography.titleLarge)
-            Row2("Sectors", download.sectorsRead.toString())
+            if (download.blockSizeBytes > 0) {
+                val frac = (download.blockBytes.toFloat() / download.blockSizeBytes)
+                    .coerceIn(0f, 1f)
+                Row2(
+                    "Sector ${download.sectorsRead + 1}",
+                    "${download.blockBytes / 1024} / ${download.blockSizeBytes / 1024} KB",
+                )
+                LinearProgressIndicator(progress = { frac }, modifier = Modifier.fillMaxWidth())
+            } else {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+            if (download.bytesPerSecond > 0) {
+                Row2("Speed", "%.1f KB/s".format(download.bytesPerSecond / 1024))
+            }
+            Row2("Sectors done", download.sectorsRead.toString())
             if (download.resumedFrom > 0) Row2("Resumed from", Bytes.describe(download.resumedFrom))
             if (download.retries > 0) Row2("Retries", download.retries.toString())
-            LinearProgressIndicator(Modifier.fillMaxWidth())
             OutlinedButton(
                 onClick = { container.session.cancelDownload() },
                 modifier = Modifier.fillMaxWidth(),

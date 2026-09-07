@@ -252,6 +252,14 @@ class PmtkClient(
         length: Int,
         idleTimeoutMillis: Long = 10_000,
         overallTimeoutMillis: Long = 240_000,
+        /**
+         * Invoked as bytes accumulate, with the count filled in *this* block so
+         * far. Fires only on genuine progress, so it is the same signal the idle
+         * timer watches. Over Bluetooth a block is minutes of ~2 KB steps, which
+         * is the difference between a progress bar that moves and one that jumps
+         * once every few minutes.
+         */
+        onChunk: ((filledInBlock: Int) -> Unit)? = null,
     ): LogBlock {
         // Discard anything left over from a previous request. Without this, a
         // late chunk from an abandoned read is parsed as part of *this* block,
@@ -309,6 +317,7 @@ class PmtkClient(
             if (placed > 0) {
                 lastProgress = clock()
                 chunks++
+                onChunk?.invoke(filled)
             }
         }
 

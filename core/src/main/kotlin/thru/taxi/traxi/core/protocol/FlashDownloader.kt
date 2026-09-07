@@ -184,21 +184,46 @@ class FlashDownloader(
         // header is stable for a finalized sector, but the records are what a
         // wrap actually destroys and they carry timestamps and positions that
         // cannot coincide by accident.
+        //
+        // Three cases per byte, not two. A byte that was unwritten (0xFF) in
+        // the previous dump proves nothing: on a young log the write frontier
+        // is still inside block 0, and records landing there since the dump are
+        // growth, not corruption. Treating growth as a wrap is how a fetch-new
+        // against a post-erase dump got misdiagnosed and forced a three-hour
+        // re-read. Only a byte the dump holds as *real* can convict: changed to
+        // other data means the log wrapped; changed to 0xFF means it was erased.
         for (i in SectorHeader.SIZE until blockSize) {
-            if (probe.bytes[i] != previous[i]) {
+            val had = previous[i]
+            if (had == PmtkClient.UNWRITTEN) continue
+            if (probe.bytes[i] != had) {
+                val verdict =
+                    if (probe.bytes[i] == PmtkClient.UNWRITTEN) "been erased" else "wrapped"
                 client.transcript.note(
-                    "wrap probe differs at 0x%08X; the log has wrapped or been erased"
-                        .format(i)
+                    "wrap probe differs at 0x%08X; the log has %s since that dump"
+                        .format(i, verdict)
                 )
-                return Plan.FullRequired("the log has wrapped since that dump")
+                return Plan.FullRequired("the log has $verdict since that dump")
             }
         }
 
-        // Re-read the final whole block. It held the sector that was mid-write,
-        // whose record count was 0xFFFF and whose tail has since gained records.
-        val from = usable - blockSize
+        // Re-read from the block holding the previous dump's write frontier —
+        // the last real byte — because that is where new records actually land.
+        // The old rule re-read the *final* block, which assumed growth happens
+        // past the end of the dump. For a dump that captured unwritten sectors
+        // (every complete dump of an unfull chip), that assumption copies the
+        // stale mid-write block forward, drops every record written since, and
+        // reports the result complete: silent loss in the saved image, wearing
+        // an "Added N KB" message. For a data-only prefix dump the frontier IS
+        // the final block, so the old shape is unchanged.
+        var lastReal = usable - 1
+        while (lastReal >= 0 && previous[lastReal] == PmtkClient.UNWRITTEN) lastReal--
+        if (lastReal < 0) {
+            return Plan.FullRequired("the previous dump holds no data")
+        }
+        val from = (lastReal / blockSize) * blockSize
         client.transcript.note(
-            "wrap probe matches; extending from 0x%08X".format(from)
+            "wrap probe matches; frontier at 0x%08X, extending from 0x%08X"
+                .format(lastReal + 1, from)
         )
         // Block boundary, as in [download]: empty the in-flight bar so it does
         // not sit at 64/64 KB while the first extend chunk is still on the wire.

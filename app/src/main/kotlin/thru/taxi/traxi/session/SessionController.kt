@@ -560,6 +560,15 @@ class SessionController(
         telemetryJob?.cancel()
         telemetryJob = scope.launch {
             var lastProbeNanos = 0L
+            // A Bluetooth socket can wedge without closing: writes buffer into
+            // the void, reads return nothing, and no ACL broadcast arrives. On
+            // such a link this loop used to poll the write pointer forever --
+            // 99 failed retries in one transcript. Total silence is the tell:
+            // this device streams NMEA continuously, so a failed probe (itself
+            // nine seconds of retries) with not one byte since the previous
+            // probe is not a busy link, it is a dead one.
+            var silentProbes = 0
+            var bytesSinceProbe = 0
             while (isActive) {
                 // A read while another operation holds the lock would take
                 // bytes belonging to that operation.
@@ -572,6 +581,7 @@ class SessionController(
                     -1
                 }
                 if (read < 0) break
+                bytesSinceProbe += read
 
                 // Periodically confirm fixes are actually landing in flash by
                 // reading the write pointer. This is the ground-truth recording
@@ -586,6 +596,15 @@ class SessionController(
                         null
                     }
                     if (ptr != null) noteWritePointer(ptr, System.nanoTime())
+                    silentProbes = if (ptr == null && bytesSinceProbe == 0) silentProbes + 1 else 0
+                    bytesSinceProbe = 0
+                    if (silentProbes >= DEAD_LINK_SILENT_PROBES) {
+                        onLinkLost(
+                            "The logger went silent — nothing has arrived for over " +
+                                "half a minute. The link is probably dead."
+                        )
+                        break
+                    }
                 }
 
                 // Release the lock briefly between reads so an operation
@@ -1228,4 +1247,13 @@ class SessionController(
      * interval so a healthy log advances between samples.
      */
     private val WRITE_PROBE_INTERVAL_NANOS = 12_000_000_000L
+
+    /**
+     * Consecutive write-pointer probes that failed with zero bytes read between
+     * them before the link is declared dead. Two, not one: each probe already
+     * spans nine seconds of retries, and two of them plus the probe interval is
+     * over thirty seconds of proven silence from a device that streams NMEA
+     * every second. One alarm, once, per the rule that alarms keep their meaning.
+     */
+    private val DEAD_LINK_SILENT_PROBES = 2
 }

@@ -41,8 +41,11 @@ class RoundTripTest {
         }
     }
 
-    private fun client(transcript: PmtkTranscript = PmtkTranscript.NONE): PmtkClient {
-        val transport = SimulatedLoggerTransport(flash, chunkSize = 0x1000)
+    private fun client(
+        transcript: PmtkTranscript = PmtkTranscript.NONE,
+        image: ByteArray = flash,
+    ): PmtkClient {
+        val transport = SimulatedLoggerTransport(image, chunkSize = 0x1000)
         runBlocking { transport.open() }
         return PmtkClient(transport, transcript, defaultTimeoutMillis = 5_000)
     }
@@ -445,6 +448,74 @@ class RoundTripTest {
         assertEquals(full.image.size, extended.image.size)
         assertTrue(full.image.contentEquals(extended.image), "extended image differs")
         assertEquals(EXPECTED_FIXES, MtkLogParser.parse(extended.image, GpsRollover.AXN_130B).fixes.size)
+    }
+
+    @Test
+    fun `growth inside a young first block is extension, not a wrap`() = runBlocking {
+        val size = FlashDownloader.DEFAULT_BLOCK_SIZE
+        // A dump of a post-erase log minutes old: block 0 real up to 0x73C0,
+        // unwritten from there, plus the two 0xFF blocks that ended the read.
+        // The device has since kept recording INTO block 0 — the shape that was
+        // misdiagnosed as "wrapped or erased" on hardware on 2026-09-06.
+        val frontier = 0x73C0
+        val young = ByteArray(3 * size) { 0xFF.toByte() }
+        flash.copyInto(young, destinationOffset = 0, startIndex = 0, endIndex = frontier)
+
+        val plan = FlashDownloader(client()).planIncremental(young)
+        assertTrue(plan is FlashDownloader.Plan.Extend, "growth is not a wrap; got $plan")
+        // The frontier sits inside block 0, so that is where the re-read starts:
+        // re-reading only the final block would copy the stale block 0 forward
+        // and silently drop every record written since the dump.
+        assertEquals(0, (plan as FlashDownloader.Plan.Extend).fromOffset)
+
+        val result = FlashDownloader(client()).downloadIncremental(young)
+        assertTrue(result.isComplete)
+        for (i in 0 until FLASH_BYTES) {
+            if (flash[i] != result.image[i]) {
+                throw AssertionError("young-log extend lost data at 0x%08X".format(i))
+            }
+        }
+        assertEquals(EXPECTED_FIXES, MtkLogParser.parse(result.image, GpsRollover.AXN_130B).fixes.size)
+    }
+
+    @Test
+    fun `a dump whose data ends mid-file extends from its frontier`() = runBlocking {
+        val size = FlashDownloader.DEFAULT_BLOCK_SIZE
+        // Real data through block 34 and a bit of 35, unwritten to the end:
+        // a complete dump of an unfull chip. New records land at the frontier,
+        // not past the end of the file.
+        val cut = 35 * size + 1234
+        val previous = flash.copyOf(40 * size)
+        for (i in cut until previous.size) previous[i] = 0xFF.toByte()
+
+        val plan = FlashDownloader(client()).planIncremental(previous)
+        assertTrue(plan is FlashDownloader.Plan.Extend, "got $plan")
+        assertEquals(35 * size, (plan as FlashDownloader.Plan.Extend).fromOffset)
+
+        val result = FlashDownloader(client()).downloadIncremental(previous)
+        for (i in 0 until FLASH_BYTES) {
+            if (flash[i] != result.image[i]) {
+                throw AssertionError("frontier extend lost data at 0x%08X".format(i))
+            }
+        }
+    }
+
+    @Test
+    fun `an erased flash is detected by the probe, never appended to`() = runBlocking {
+        val size = FlashDownloader.DEFAULT_BLOCK_SIZE
+        val previous = flash.copyOf(40 * size)
+        // The device after a real erase: nothing but unwritten flash.
+        val erased = ByteArray(4 * size) { 0xFF.toByte() }
+
+        val plan = FlashDownloader(client(image = erased)).planIncremental(previous)
+        assertTrue(
+            plan is FlashDownloader.Plan.FullRequired,
+            "real bytes turned 0xFF are an erase, not growth; got $plan",
+        )
+        assertTrue(
+            (plan as FlashDownloader.Plan.FullRequired).reason.contains("erased"),
+            "the reason should name the erase: ${plan.reason}",
+        )
     }
 
     @Test

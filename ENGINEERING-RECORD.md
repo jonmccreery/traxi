@@ -1264,3 +1264,122 @@ costs Bluetooth stability until measured.**
   latency and other sideband as signal, and make **no unattended
   interventions** on a fragile link. One probe at connect, then nothing until
   a person asks. The 10-minute interval is a dose reduction, not that design.
+
+### 15.1 The wedge is per-session, and reconnecting too fast inherits it
+
+Found 2026-09-08, a few hours after §15, when Bluetooth stopped connecting
+entirely and a working pairing had to be restored by hand. Same root cause,
+two new mechanisms, and one of them makes long Bluetooth downloads possible
+where they previously were not.
+
+#### A new radio link clears the wedge; a reused one does not
+
+The exhausted resource lives in the **RFCOMM session**, not in the device.
+Proof, from one evening's transcript: after the logger had gone silent and the
+ACL eventually timed out, a freshly built link answered `PMTK605` in **146 ms**
+and every query after it promptly. Nothing was power-cycled. The device was
+never broken — the session was.
+
+That is why "disconnect and reconnect resumes instantly" was true from the
+first ride, and it is the cure this section is built on.
+
+The trap is that **closing a socket does not drop the ACL.** Android keeps the
+radio link up for some seconds and reuses it for the next connection, which is
+ordinarily a courtesy. Here it hands the next socket the same wedged session.
+
+| Reconnect | Old ACL actually died | Result |
+|---|---|---|
+| 23:45, attempted 7 s after disconnect | **23:46:06**, by supervision timeout | stalled ~65 s, then a clean link — answers in 146 ms |
+| 23:58, attempted 4 s after disconnect | 23:58:48, ten seconds *later* | opened on the old link — NMEA streaming, every command unanswered |
+
+The first reconnect worked *because it was slow enough to fail first*. The
+second was fast enough to succeed at connecting and inherit a dead session.
+
+`AclLink.awaitDown` now blocks a reconnect until the link is genuinely down. If
+it will not drop within the timeout the app says so and connects anyway:
+refusing to connect over a link that merely refused to drop would turn a slow
+reconnect into no reconnect at all.
+
+#### The app deleted a working pairing over it
+
+The stale-link-key recovery — legitimate, and documented in §6 — wrapped the
+whole of connect, including the interrogation that runs *after* a successful
+socket open. `Bonding.looksStale()` is only "is this device bonded". So the
+`PMTK605` timeout above landed in that handler, was read as a bad link key, and
+removed the bond.
+
+Re-pairing then failed nine times: `AUTH_FAIL : 4` each time, uniformly ~6.4 s,
+**and no PIN prompt ever appeared.** That is not a rejection and not a lockout;
+it is the logger never answering the pairing page, because its radio was
+unresponsive to everything by then. Recovery needed a power cycle and a PIN
+typed by hand.
+
+**A live socket is proof the link key was good.** Only the socket open may now
+be blamed on a stale key; the interrogation runs outside that handler, where
+nothing it does can touch the pairing. The message for it says what is true —
+the link opened, the logger stopped answering, power-cycle it, the pairing is
+fine, and USB needs no pairing at all.
+
+This is the auto-remediation rule from §13.3 with teeth on it. The remedy was
+destructive and undoing it needed physical access to the device.
+
+#### Sustained reading wedges it too, which is what long downloads run into
+
+The write-pointer probe was never special. During a resumed download that
+evening, block `0x00010000` transferred perfectly — 65,536 bytes, 32 chunks,
+150 s — and **the very next block returned zero bytes on all three attempts.**
+Not short: nothing. The probe went unanswered 30 s later. So the leak is
+per-command, not per-query-type, and §15's open question is closed.
+
+Note the load. A download runs the UART at ~95% (§6): 415 B/s of NMEA plus
+493 B/s of payload against ~960 B/s. Idle is 43%. Both regimes wedge, the
+loaded one far faster.
+
+The arithmetic this implies is the important part. A full image is 84 blocks at
+~150 s. §11 has always listed a full Bluetooth download as never completed, and
+on this evidence it *could not* complete: it would stall within minutes and save
+a partial. This is not a slow path, it is a blocked one.
+
+#### Pace and recover
+
+The resume machinery built for "resume, never restart" — so a dropped link
+could not cost 25 minutes — turns out to be exactly the tool for this. Each
+recovered segment picks up at the write frontier, so nothing is re-read and
+nothing is lost.
+
+`SessionController.downloadWithLinkRecovery` runs a transfer, and each time the
+device stops answering it rebuilds the radio link and resumes. Bounded twice:
+a cap on cycles, and a hard requirement that **every cycle gain bytes**, so it
+cannot spin. Every rebuild is written to the transcript and counted in the
+progress card as "Link rebuilds", because a transfer that needed six of them is
+a different event from one that needed none, and a recovery the user cannot see
+is indistinguishable from the app being mysteriously slow.
+
+`FlashDownloader.Result.stoppedUnanswered` carries the condition, and
+`UnansweredBlockTest` pins both directions of it: silence must not read as
+end-of-flash (which would truncate a dump and call it complete), and
+end-of-flash must not read as silence (which would rebuild the link forever).
+
+#### Why this one is allowed to act on its own
+
+Two earlier automatic remedies in this project were regressions: tearing down a
+merely-quiet link, and deleting a bond because a query timed out. Both acted on
+a **conjecture** about state, and one was destructive.
+
+This one reacts to an **observed** condition — three consecutive block attempts
+each returning zero bytes — with a non-destructive remedy, during a transfer
+the user explicitly started, and reports every instance. That is a different
+kind of act, and it is the line worth holding when the next automatic recovery
+is proposed.
+
+#### Still open
+
+- **USB remains the right transport for a full dump**: 95 seconds against
+  3.5 hours, and none of this. Bluetooth's job is incremental fetch. The
+  recovery above exists because the phone is sometimes the only computer in the
+  field, not because Bluetooth became a good way to move 5.4 MB.
+- **Pace-and-recover has not yet been proven against a full 84-block read.**
+  Everything above is measured; that specific claim is not, and §11 item 2
+  stays open until a full Bluetooth download actually completes.
+- **`eraseBlockers()` still probes the write pointer** on Dumps-tab
+  composition — the same unattended-intervention blind spot, untouched.

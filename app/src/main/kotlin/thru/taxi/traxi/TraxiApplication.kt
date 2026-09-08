@@ -2,6 +2,7 @@ package thru.taxi.traxi
 
 import thru.taxi.traxi.bt.CompanionPairing
 import thru.taxi.traxi.data.DumpRepository
+import thru.taxi.traxi.data.TranscriptFile
 import thru.taxi.traxi.usb.UsbPermission
 import thru.taxi.traxi.session.SessionController
 import android.app.Application
@@ -56,4 +57,16 @@ class AppContainer(application: Application) {
     val pairing = CompanionPairing(application)
     val usb = UsbPermission(application)
     val session = SessionController(application, pairing, dumpRepository, applicationScope)
+
+    /**
+     * The on-disk mirror of the transcript.
+     *
+     * Attached here, at construction, so that everything the session ever
+     * records is on disk -- including whatever it says on its way down. A
+     * diagnostic that starts later than the thing it diagnoses is no use.
+     */
+    val transcriptFile = TranscriptFile(java.io.File(application.filesDir, "logs")).apply {
+        attachTo(session.transcript)
+        noteSessionStart("traxi ${android.os.Build.MODEL}, Android ${android.os.Build.VERSION.RELEASE}")
+    }
 }

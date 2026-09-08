@@ -265,4 +265,37 @@ class PmtkClientTest {
         repeat(100) { transcript.note("line $it") }
         assertEquals(10, transcript.snapshot().size)
     }
+
+    @Test
+    fun `the sink sees every line, including ones the ring has evicted`() {
+        // The file mirror hangs off this. A line dropped here is a line missing
+        // from the only diagnostic that survives the app being killed, so the
+        // sink must see everything -- not just what the bounded ring still holds.
+        val transcript = RingTranscript(capacity = 3)
+        val mirrored = mutableListOf<String>()
+        transcript.sink = { mirrored += it }
+
+        transcript.note("first")
+        transcript.tx("\$PMTK605*31")
+        transcript.rx("\$PMTK705,AXN*77")
+        repeat(5) { transcript.note("later $it") }
+
+        assertEquals(8, mirrored.size, "sink lost lines the ring evicted")
+        assertEquals(3, transcript.snapshot().size)
+        assertTrue(mirrored.first().contains("first"))
+        assertTrue(mirrored.any { it.contains(">>") && it.contains("PMTK605") })
+        assertTrue(mirrored.any { it.contains("<<") && it.contains("PMTK705") })
+    }
+
+    @Test
+    fun `a throwing sink cannot break the transcript`() {
+        // The sink runs on the socket read path. A full disk or a closed file
+        // must not be able to take the session down with it.
+        val transcript = RingTranscript(capacity = 10)
+        transcript.sink = { throw java.io.IOException("disk full") }
+
+        transcript.note("still recorded")
+
+        assertEquals(1, transcript.snapshot().size)
+    }
 }

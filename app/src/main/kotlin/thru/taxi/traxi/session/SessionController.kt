@@ -1,5 +1,6 @@
 package thru.taxi.traxi.session
 
+import thru.taxi.traxi.bt.AclLink
 import thru.taxi.traxi.bt.BluetoothSppTransport
 import thru.taxi.traxi.bt.Bonding
 import thru.taxi.traxi.bt.CompanionPairing
@@ -402,6 +403,13 @@ class SessionController(
                 // A live socket is proof the key was good. Past this point a
                 // failure means the device is not answering, which this remedy
                 // cannot fix and can only make worse.
+                // Do not race Android's ACL reuse window. A socket opened while
+                // the previous radio link is still up inherits that link, and
+                // with it any wedged session state -- which is how a reconnect
+                // four seconds after a disconnect got silence from a logger
+                // that was streaming NMEA. See [AclLink].
+                AclLink.awaitDown(context, device, note = transcript::note)
+
                 val opened = try {
                     BluetoothSppTransport(device).also { it.open() }
                 } catch (first: Exception) {

@@ -83,6 +83,21 @@ class FlashDownloader(
          * the device.
          */
         val damagedRanges: List<IntRange> = emptyList(),
+        /**
+         * Set when a block returned **nothing at all** after every attempt.
+         *
+         * Distinct from every other stop, and worth its own flag because it has
+         * its own cure. An erased sector still answers, with 0xFF; silence
+         * means the device has stopped serving reads, which on Bluetooth is the
+         * per-session wedge of the engineering record's §15. A new radio link
+         * clears it and the transfer can resume from the frontier, so the
+         * caller can recover from this where it cannot recover from a genuine
+         * transport failure.
+         *
+         * Observed, not inferred: three consecutive attempts each returning
+         * zero bytes is not a judgement call.
+         */
+        val stoppedUnanswered: Boolean = false,
     ) {
         val isComplete: Boolean
             get() = stoppedOnUnwritten && failure == null && damagedRanges.isEmpty()
@@ -288,6 +303,7 @@ class FlashDownloader(
         var retries = 0
         var consecutiveUnwritten = 0
         var stoppedOnUnwritten = false
+        var stoppedUnanswered = false
         val damaged = mutableListOf<IntRange>()
 
         if (resumeFrom > 0) {
@@ -362,9 +378,10 @@ class FlashDownloader(
                 // of the concatenation -- which has no specifiers -- and the
                 // transcript printed a literal "0x%08X". The line that says
                 // which block died was the one line not saying it.
+                stoppedUnanswered = true
                 client.transcript.note(
                     ("block 0x%08X returned nothing after $ATTEMPTS_PER_BLOCK attempts; " +
-                        "stopping with a partial image").format(address)
+                        "the device has stopped answering reads").format(address)
                 )
                 break
             }
@@ -432,7 +449,8 @@ class FlashDownloader(
             )
         }
         return Result(
-            out.toByteArray(), sectors, retries, stoppedOnUnwritten, failure, damaged
+            out.toByteArray(), sectors, retries, stoppedOnUnwritten, failure, damaged,
+            stoppedUnanswered = stoppedUnanswered,
         )
     }
 

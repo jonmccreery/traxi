@@ -4,6 +4,7 @@ import thru.taxi.traxi.bt.AclLink
 import thru.taxi.traxi.bt.BluetoothSppTransport
 import thru.taxi.traxi.bt.Bonding
 import thru.taxi.traxi.bt.CompanionPairing
+import thru.taxi.traxi.core.format.Bytes
 import thru.taxi.traxi.core.format.GpsRollover
 import thru.taxi.traxi.core.format.LogFormat
 import thru.taxi.traxi.core.format.MtkLogParser
@@ -80,6 +81,14 @@ data class DownloadState(
      * or a stopping rule.
      */
     val etaSeconds: Int? = null,
+    /**
+     * Radio links rebuilt to get past a device that stopped answering.
+     *
+     * Surfaced rather than hidden. A transfer that needed six link resets is a
+     * different event from one that needed none, and a recovery the user cannot
+     * see is indistinguishable from the app being mysteriously slow.
+     */
+    val linkResets: Int = 0,
 )
 
 /**
@@ -1040,11 +1049,13 @@ class SessionController(
                 resetRateMeter()
 
                 val target = dumps.newDumpFile()
-                val result = FlashDownloader(c).downloadIncremental(
-                    previous = previous,
-                    onProgress = ::applyDownloadProgress,
-                    shouldContinue = { !cancelRequested },
-                )
+                val result = downloadWithLinkRecovery { active ->
+                    FlashDownloader(active).downloadIncremental(
+                        previous = previous,
+                        onProgress = ::applyDownloadProgress,
+                        shouldContinue = { !cancelRequested },
+                    )
+                }
 
                 // Never keep an empty image. It is not resumable, it parses to
                 // a meaningless "0 fixes" summary presented as a result, and it
@@ -1086,6 +1097,9 @@ class SessionController(
                 noticeIfLinkDied()
             } finally {
                 _download.value = _download.value.copy(running = false)
+                // A link cycle stops telemetry against the client it discards;
+                // bring it back on whichever client the transfer ended with.
+                ensureTelemetryRunning()
                 onFinished()
             }
         }
@@ -1123,13 +1137,14 @@ class SessionController(
                 )
                 resetRateMeter()
 
-                val downloader = FlashDownloader(c)
-                val result = downloader.download(
-                    existing = existing,
-                    resumeFrom = resumeFrom,
-                    onProgress = ::applyDownloadProgress,
-                    shouldContinue = { !cancelRequested },
-                )
+                val result = downloadWithLinkRecovery { active ->
+                    FlashDownloader(active).download(
+                        existing = existing,
+                        resumeFrom = resumeFrom,
+                        onProgress = ::applyDownloadProgress,
+                        shouldContinue = { !cancelRequested },
+                    )
+                }
 
                 if (result.image.isEmpty()) {
                     // Over Bluetooth the first block is minutes long, so a
@@ -1170,6 +1185,9 @@ class SessionController(
                 noticeIfLinkDied()
             } finally {
                 _download.value = _download.value.copy(running = false)
+                // A link cycle stops telemetry against the client it discards;
+                // bring it back on whichever client the transfer ended with.
+                ensureTelemetryRunning()
                 onFinished()
             }
         }
@@ -1177,6 +1195,140 @@ class SessionController(
 
     fun cancelDownload() {
         cancelRequested = true
+    }
+
+    /**
+     * Rebuild the radio link mid-transfer, keeping the session otherwise intact.
+     *
+     * This is the cure for the §15 wedge, and it is only ever run against an
+     * **observed** one: three consecutive block attempts that each returned zero
+     * bytes. That distinction is the whole licence for doing it automatically.
+     * Twice before, this app acted on a *guess* about link state -- tearing down
+     * a merely-quiet connection, and deleting a bond because a query timed out
+     * -- and both were regressions. Reacting to a measured silence with a
+     * non-destructive remedy, during a transfer the user explicitly started, is
+     * a different kind of act.
+     *
+     * Bluetooth only. USB shows none of this and has nothing to reset.
+     *
+     * Returns the new client, or null if the link could not be rebuilt -- in
+     * which case the caller keeps the bytes it already has, which is the
+     * pre-existing behaviour and still the right one.
+     */
+    private suspend fun cycleLink(): PmtkClient? {
+        val address = connectedAddress ?: return null
+        val device = runCatching { pairing.deviceFor(address) }.getOrNull() ?: return null
+
+        transcript.note("cycling the radio link to clear a wedged read session")
+        // Stop telemetry against the client that is about to be discarded; it
+        // is restarted on the new one once the transfer ends.
+        stopTelemetry()
+        runCatching { transport?.close() }
+        transport = null
+        client = null
+
+        // The whole point: a *new* ACL is what clears the wedge, and a socket
+        // opened while the old link lingers would inherit it.
+        AclLink.awaitDown(context, device, note = transcript::note)
+
+        return try {
+            val t = BluetoothSppTransport(device)
+            t.open()
+            transport = t
+            val c = PmtkClient(t, transcript)
+            client = c
+            transcript.note("radio link rebuilt; resuming the transfer")
+            c
+        } catch (e: Exception) {
+            transcript.note("could not rebuild the radio link: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Whether a link cycle is worth attempting for the transport in use.
+     *
+     * A simulated or USB session that stops answering has a real problem, and
+     * reconnecting would only hide it.
+     */
+    private fun linkCycleApplies(): Boolean =
+        !isSimulated && transport?.description?.startsWith("bluetooth ") == true
+
+    /**
+     * Run a transfer, rebuilding the link each time the device stops answering.
+     *
+     * The resume machinery this leans on was built for a different reason --
+     * "resume, never restart", so that a dropped link could not cost 25 minutes
+     * -- and turns out to be exactly what is needed here. Each recovered
+     * segment picks up at the write frontier, so nothing is re-read and nothing
+     * is lost.
+     *
+     * Bounded twice over: a cap on cycles, and a hard requirement that every
+     * cycle *gain bytes*. A cycle that recovers nothing ends the transfer with
+     * whatever is already in hand, so this cannot spin.
+     */
+    private suspend fun downloadWithLinkRecovery(
+        firstPass: suspend (PmtkClient) -> FlashDownloader.Result,
+    ): FlashDownloader.Result {
+        val start = client ?: throw IllegalStateException("Not connected")
+        var result = firstPass(start)
+        var cycles = 0
+
+        while (
+            result.stoppedUnanswered &&
+            !cancelRequested &&
+            cycles < MAX_LINK_CYCLES &&
+            linkCycleApplies()
+        ) {
+            val before = result.image.size
+            val c = cycleLink() ?: break
+            cycles++
+            _download.value = _download.value.copy(linkResets = cycles)
+
+            // The frontier is block-aligned: only whole blocks are ever written
+            // to the image, so this is a legal resume offset by construction.
+            val continued = FlashDownloader(c).download(
+                existing = result.image,
+                resumeFrom = result.image.size,
+                onProgress = ::applyDownloadProgress,
+                shouldContinue = { !cancelRequested },
+            )
+
+            // Carry the earlier segments' damage and retries forward; they
+            // describe the same image and must not be forgotten by a later pass
+            // that happened to be clean.
+            result = continued.copy(
+                retries = result.retries + continued.retries,
+                damagedRanges = result.damagedRanges + continued.damagedRanges,
+            )
+
+            if (result.image.size <= before) {
+                transcript.note(
+                    "link cycle $cycles recovered no further bytes; " +
+                        "stopping with ${Bytes.describe(result.image.size)}"
+                )
+                break
+            }
+            transcript.note(
+                "link cycle $cycles recovered " +
+                    Bytes.describe(result.image.size - before)
+            )
+        }
+
+        if (result.stoppedUnanswered && cycles >= MAX_LINK_CYCLES) {
+            transcript.note(
+                "gave up after $MAX_LINK_CYCLES link cycles; the bytes so far are saved"
+            )
+        }
+        return result
+    }
+
+    /** Restart telemetry after a transfer, on whichever client survived it. */
+    private fun ensureTelemetryRunning() {
+        if (telemetryJob?.isActive == true) return
+        val c = client ?: return
+        val info = (_connection.value as? ConnectionState.Connected)?.info ?: return
+        startTelemetry(c, info.needsWeekRollover)
     }
 
     // ---------------- parse ----------------
@@ -1488,4 +1640,16 @@ class SessionController(
      * above the log interval so a healthy log has advanced by then.
      */
     private val FIRST_WRITE_PROBE_NANOS = 30_000_000_000L
+
+    /**
+     * Radio links a single transfer may rebuild before giving up.
+     *
+     * Sized for the worst case actually observed: on 2026-09-07 this logger
+     * managed one 64 KB block before it stopped answering, and a full 5.4 MB
+     * image is 84 blocks. A cycle costs ten to fifteen seconds against a block's
+     * two and a half minutes, so even one per block is a rounding error on a
+     * transfer that was already going to take hours -- and the requirement that
+     * every cycle gain bytes is what actually bounds this.
+     */
+    private val MAX_LINK_CYCLES = 60
 }

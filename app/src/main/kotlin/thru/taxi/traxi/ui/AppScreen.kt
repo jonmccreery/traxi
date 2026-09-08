@@ -940,6 +940,18 @@ private fun DumpsTab(
             Row2("Sectors done", download.sectorsRead.toString())
             if (download.resumedFrom > 0) Row2("Resumed from", Bytes.describe(download.resumedFrom))
             if (download.retries > 0) Row2("Retries", download.retries.toString())
+            // Surfaced, not hidden. A transfer that had to rebuild the radio
+            // link six times is a different event from one that did not, and a
+            // silent recovery just looks like the app being mysteriously slow.
+            if (download.linkResets > 0) {
+                Row2("Link rebuilds", download.linkResets.toString())
+                Text(
+                    "The logger stopped answering and the link was rebuilt to get " +
+                        "past it. Nothing is lost — each pass resumes at the frontier.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             OutlinedButton(
                 onClick = { container.session.cancelDownload() },
                 modifier = Modifier.fillMaxWidth(),

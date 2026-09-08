@@ -23,6 +23,14 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!--
+      A foreground service keeps the process running, but on this phone it does
+      not by itself exempt it from battery optimisation, which is what suspends
+      a long idle-connected session. The app never asks for this silently: the
+      Device tab shows whether the exemption is held and the user grants it.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <uses-feature
         android:name="android.hardware.bluetooth"
         android:required="true" />
@@ -79,6 +87,17 @@
 
         <service
             android:name=".service.DownloadService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!--
+          Holds the process up for the whole of a connected session, not just a
+          transfer. An idle-connected app is background work as far as Android
+          is concerned, and the cached-app freezer suspends it within minutes;
+          the Bluetooth link then stalls while staying nominally connected.
+        -->
+        <service
+            android:name=".service.LinkService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 

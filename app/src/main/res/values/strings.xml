@@ -5,5 +5,6 @@
     <string name="download_channel_name">Flash download</string>
     <string name="download_channel_description">Progress while reading the logger\'s memory</string>
     <string name="download_notification_title">Reading logger memory</string>
+    <string name="link_notification_title">Logger connected</string>
     <string name="cancel">Cancel</string>
 </resources>

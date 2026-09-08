@@ -388,10 +388,22 @@ class SessionController(
                     Bonding.Result.AlreadyBonded -> transcript.note("already bonded")
                 }
 
-                try {
-                    val t = BluetoothSppTransport(device)
-                    t.open()
-                    openWith(t, simulated = false)
+                // **Only the socket open may be blamed on a stale link key.**
+                //
+                // This used to wrap the interrogation too, and that cost a
+                // working pairing: on 2026-09-08 the logger accepted the
+                // RFCOMM connection and streamed NMEA normally while refusing
+                // to answer PMTK605 -- the wedged command path of §15 -- and
+                // the query timeout landed here, was read as a bad link key,
+                // and deleted a bond that was entirely healthy. Re-pairing then
+                // failed nine times because the device, not the key, was the
+                // problem, and recovering needed physical access to the logger.
+                //
+                // A live socket is proof the key was good. Past this point a
+                // failure means the device is not answering, which this remedy
+                // cannot fix and can only make worse.
+                val opened = try {
+                    BluetoothSppTransport(device).also { it.open() }
                 } catch (first: Exception) {
                     // A connect failure on a device Android believes is bonded
                     // is the signature of a stale link key: this logger uses
@@ -423,10 +435,12 @@ class SessionController(
                         else -> transcript.note("re-paired; retrying connect")
                     }
 
-                    val retry = BluetoothSppTransport(device)
-                    retry.open()
-                    openWith(retry, simulated = false)
+                    BluetoothSppTransport(device).also { it.open() }
                 }
+
+                // Outside the stale-key handler on purpose: whatever happens in
+                // here, the pairing stays untouched.
+                openWith(opened, simulated = false)
             } catch (e: Exception) {
                 disconnectQuietly()
                 _connection.value = ConnectionState.Failed(explainConnectFailure(e, address))
@@ -954,7 +968,22 @@ class SessionController(
         val looksLikeNoSpp = detail.contains("read failed", ignoreCase = true) ||
             detail.contains("socket might closed", ignoreCase = true)
 
-        return if (looksLikeNoSpp) {
+        // The socket opened and the device then ignored us. That is the logger's
+        // command path wedged (§15) -- not pairing, not range, not power. Saying
+        // so matters: the pairing advice below is actively wrong here, and
+        // following it costs a bond that has to be re-entered by hand.
+        val looksWedged = detail.contains("no matching response", ignoreCase = true) ||
+            detail.contains("no response", ignoreCase = true)
+
+        return if (looksWedged) {
+            "The logger accepted the connection but did not answer.\n\n" +
+                "It is powered on and in range — the link opened. Its command " +
+                "handling has stopped responding, which this logger does " +
+                "occasionally after a long session.\n\n" +
+                "Switch the logger off and on again, then connect. Your pairing " +
+                "is fine and does not need redoing. Recording is unaffected, and " +
+                "USB works regardless — it needs no pairing at all."
+        } else if (looksLikeNoSpp) {
             "Could not open a serial connection to $address.\n\n" +
                 "Either the logger is switched off or out of range, or this device " +
                 "is not the logger — most Bluetooth accessories do not offer the " +

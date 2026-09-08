@@ -72,6 +72,13 @@ data class DownloadState(
     val blockSizeBytes: Int = 0,
     /** Smoothed throughput, so a slow Bluetooth read visibly moves. */
     val bytesPerSecond: Double = 0.0,
+    /**
+     * Rough seconds until the transfer ends, or null when there is nothing
+     * honest to estimate from. Built on the write pointer, which is a hint and
+     * not a bound -- good enough for a time estimate, never for a percentage
+     * or a stopping rule.
+     */
+    val etaSeconds: Int? = null,
 )
 
 /**
@@ -212,9 +219,25 @@ class SessionController(
 
     // Download throughput meter. Rate is smoothed because chunks arrive in
     // bursts -- ~30 ms apart over USB, several seconds apart over Bluetooth.
-    private var rateLastBytes = 0
+    //
+    // Keyed on the in-flight block's fill, not on bytesDownloaded, because the
+    // latter is a file *position*, not a wire counter. The fetch-new wrap probe
+    // holds the position constant for a whole block, and the extend that
+    // follows restarts it below the previous dump's size -- both of which read
+    // as a dead or backwards link to a position-based meter, which is why fetch
+    // showed no speed at all. blockBytes counts up within every block and
+    // resets at each boundary or retry, so a drop below the last sample simply
+    // starts a new count.
+    private var rateLastBlockBytes = 0
     private var rateLastNanos = 0L
     private var rateEmaBps = 0.0
+
+    // Where the running download is expected to end, for the ETA. The pointer
+    // target is right for an unwrapped log (the read stops just past the write
+    // frontier) and for every fetch-new; a wrapped log has no unwritten sectors
+    // and runs to the end of flash, which is what the fallback covers.
+    private var etaPointerTargetBytes: Int? = null
+    private var etaFlashTargetBytes: Int? = null
 
     // Fix-arrival window for the Live heartbeat. A sliding count over wall time,
     // not an inter-arrival rate: RFCOMM delivers a whole second of sentences in
@@ -477,24 +500,48 @@ class SessionController(
      * actions, so without it the stream would sit in the transport's bounded
      * queue until it overflowed and was dropped.
      */
-    /** Arm the throughput meter at the byte count a download starts from. */
-    private fun resetRateMeter(startBytes: Int) {
-        rateLastBytes = startBytes
+    /** Arm the throughput meter and the ETA targets for a starting download. */
+    private fun resetRateMeter() {
+        rateLastBlockBytes = 0
         rateLastNanos = System.nanoTime()
         rateEmaBps = 0.0
+
+        val info = (_connection.value as? ConnectionState.Connected)?.info
+        val block = FlashDownloader.DEFAULT_BLOCK_SIZE
+        // The freshest pointer wins: the telemetry loop keeps probing it while
+        // idle, and the connect-time value goes stale as the logger records.
+        // Two extra blocks for the unwritten-sector stopping rule.
+        etaPointerTargetBytes = (lastProbedPointer ?: info?.writePointer)?.let {
+            (((it.toInt() + block - 1) / block) + 2) * block
+        }
+        etaFlashTargetBytes = info?.flash?.bytes?.toInt()
     }
 
     /** Fold one progress callback into [_download], including a smoothed rate. */
     private fun applyDownloadProgress(p: FlashDownloader.Progress) {
         val now = System.nanoTime()
         val dt = (now - rateLastNanos) / 1e9
-        val db = p.bytesDownloaded - rateLastBytes
-        if (dt > 0 && db >= 0) {
+        val db = if (p.blockBytes >= rateLastBlockBytes) {
+            p.blockBytes - rateLastBlockBytes
+        } else {
+            p.blockBytes
+        }
+        rateLastBlockBytes = p.blockBytes
+        if (dt > 0 && db > 0) {
             val inst = db / dt
             rateEmaBps = if (rateEmaBps == 0.0) inst else 0.4 * inst + 0.6 * rateEmaBps
-            rateLastBytes = p.bytesDownloaded
             rateLastNanos = now
         }
+
+        // A read that has passed the pointer target is the wrapped-log case and
+        // will run to the end of flash instead. If it passes that too -- or
+        // neither figure is known -- there is nothing left to estimate honestly.
+        val target = etaPointerTargetBytes?.takeIf { p.bytesDownloaded < it }
+            ?: etaFlashTargetBytes?.takeIf { p.bytesDownloaded < it }
+        val eta = if (target != null && rateEmaBps > 0) {
+            ((target - p.bytesDownloaded) / rateEmaBps).toInt()
+        } else null
+
         _download.value = _download.value.copy(
             bytesDownloaded = p.bytesDownloaded,
             sectorsRead = p.sectorsRead,
@@ -502,6 +549,7 @@ class SessionController(
             blockBytes = p.blockBytes,
             blockSizeBytes = p.blockSizeBytes,
             bytesPerSecond = rateEmaBps,
+            etaSeconds = eta,
         )
     }
 
@@ -801,7 +849,7 @@ class SessionController(
                     bytesDownloaded = previous.size,
                     resumedFrom = previous.size,
                 )
-                resetRateMeter(previous.size)
+                resetRateMeter()
 
                 val target = dumps.newDumpFile()
                 val result = FlashDownloader(c).downloadIncremental(
@@ -885,7 +933,7 @@ class SessionController(
                     bytesDownloaded = resumeFrom,
                     resumedFrom = resumeFrom,
                 )
-                resetRateMeter(resumeFrom)
+                resetRateMeter()
 
                 val downloader = FlashDownloader(c)
                 val result = downloader.download(

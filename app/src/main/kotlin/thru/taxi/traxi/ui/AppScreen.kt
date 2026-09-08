@@ -726,6 +726,14 @@ private fun dopQuality(hdop: Double): String = when {
 private fun fmt(v: Double?, places: Int): String =
     v?.let { "%.${places}f".format(it) } ?: "—"
 
+// Coarse on purpose: the underlying total is a hint, so seconds-level
+// precision would claim an accuracy the estimate does not have.
+private fun describeEta(seconds: Int): String = when {
+    seconds < 60 -> "1 min"
+    seconds < 3600 -> "${(seconds + 30) / 60} min"
+    else -> "%d h %d min".format(seconds / 3600, (seconds % 3600) / 60)
+}
+
 private fun utcStamp(millis: Long): String =
     SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
         .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
@@ -751,7 +759,9 @@ private fun DumpsTab(
             // No percentage against the whole flash: the device's own record
             // count and flash size are both wrong, so there is no honest total.
             // The block size, though, is known -- so the current sector gets a
-            // real bar, and the rate readout shows the link is flowing.
+            // real bar, and the rate readout shows the link is flowing. The
+            // time-left row is the one licensed use of the write-pointer hint:
+            // an estimate labelled as one, never a bound or a percent.
             Text(Bytes.describe(download.bytesDownloaded), style = MaterialTheme.typography.titleLarge)
             if (download.blockSizeBytes > 0) {
                 val frac = (download.blockBytes.toFloat() / download.blockSizeBytes)
@@ -767,6 +777,7 @@ private fun DumpsTab(
             if (download.bytesPerSecond > 0) {
                 Row2("Speed", "%.1f KB/s".format(download.bytesPerSecond / 1024))
             }
+            download.etaSeconds?.let { Row2("Time left", "~${describeEta(it)}") }
             Row2("Sectors done", download.sectorsRead.toString())
             if (download.resumedFrom > 0) Row2("Resumed from", Bytes.describe(download.resumedFrom))
             if (download.retries > 0) Row2("Retries", download.retries.toString())

@@ -17,6 +17,7 @@ import thru.taxi.traxi.session.ParseSummary
 import thru.taxi.traxi.ui.theme.MonoStyle
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -142,8 +143,12 @@ private fun ConnectionChip(state: ConnectionState, simulated: Boolean) {
 }
 
 @Composable
-private fun SectionCard(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Card(Modifier.fillMaxWidth()) {
+private fun SectionCard(
+    title: String,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Card(modifier.fillMaxWidth()) {
         Column(
             Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -890,7 +895,27 @@ private fun RecordingAuditRows(report: RecordingAudit.Report) {
 
 @Composable
 private fun ParseSummaryCard(summary: ParseSummary) {
-    SectionCard("Parsed · ${summary.fileName}") {
+    // Collapse is view state, not session state. The summary also feeds the
+    // erase gate's "Recorded first→last" display, so closing the card must not
+    // clear the parse itself -- a tap folds it to its title, a tap reopens it,
+    // and a fresh parse arrives expanded.
+    var collapsed by remember(summary) { mutableStateOf(false) }
+    SectionCard(
+        "Parsed · ${summary.fileName}",
+        Modifier.clickable { collapsed = !collapsed },
+    ) {
+        if (collapsed) {
+            // The one thing that must not fold away: fixes that were never
+            // recorded are lost data, and this card is where that is said.
+            if (summary.recording.hasFault) {
+                Text(
+                    "RECORDING WAS LOST — tap for details",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+            return@SectionCard
+        }
         Text("${summary.fixes} fixes", style = MaterialTheme.typography.titleLarge)
         Row2("Checksum failures", summary.checksumFailures.toString())
         Row2("Sectors", summary.sectors.toString())

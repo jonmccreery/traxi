@@ -687,7 +687,7 @@ class RoundTripTest {
         client.queryLogStatus()
         client.readLogBlock(0, 0x200)
 
-        val sent = transcript.snapshot().filter { it.startsWith(">>") }
+        val sent = transcript.snapshot().filter { it.contains(">>") }
         assertTrue(sent.isNotEmpty())
         for (line in sent) {
             assertTrue(

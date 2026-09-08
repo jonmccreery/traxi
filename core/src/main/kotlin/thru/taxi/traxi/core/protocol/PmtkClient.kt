@@ -297,6 +297,12 @@ class PmtkClient(
         var chunks = 0
         val hardDeadline = clock() + overallTimeoutMillis
 
+        // Arrival gap of each accepted chunk, for the pacing note below. The
+        // first entry includes the request round-trip and the device's flash
+        // read, so it is expected to run long.
+        val chunkGapMillis = mutableListOf<Long>()
+        var lastChunkAt = started
+
         while (filled < length && clock() < hardDeadline && shouldContinue()) {
             val idleRemaining = idleTimeoutMillis - (clock() - lastProgress)
             val budget = minOf(idleRemaining, hardDeadline - clock())
@@ -330,6 +336,8 @@ class PmtkClient(
             // some other block must not keep a stalled read alive.
             if (placed > 0) {
                 lastProgress = clock()
+                chunkGapMillis += lastProgress - lastChunkAt
+                lastChunkAt = lastProgress
                 chunks++
                 onChunk?.invoke(filled)
             }
@@ -347,6 +355,19 @@ class PmtkClient(
             }
         }
         if (runStart >= 0) gaps += (address + runStart)..(address + length - 1)
+
+        // One line of arrival pacing per block, because the *shape* of a
+        // transfer diagnoses things its average cannot. Over Bluetooth the
+        // chunks should tick along at the 9600-baud bridge's ~4-7 s each;
+        // a run of near-zero gaps is a buffered backlog being delivered in
+        // one lump (a link that stalled and recovered, or sniff-mode
+        // batching), and a single huge gap is the stall itself.
+        if (chunkGapMillis.isNotEmpty()) {
+            transcript.note(
+                "block 0x%08X arrival gaps ms: %s"
+                    .format(address, chunkGapMillis.joinToString(" "))
+            )
+        }
 
         return LogBlock(address, out, filled, gaps, clock() - started, chunks)
     }

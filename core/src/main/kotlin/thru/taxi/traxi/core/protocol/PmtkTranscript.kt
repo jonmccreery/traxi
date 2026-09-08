@@ -41,10 +41,15 @@ class RingTranscript(private val capacity: Int = 2000) : PmtkTranscript {
 
     private val lines = ArrayDeque<String>(capacity)
 
+    // Local wall-clock, millisecond precision. Wall-clock because the reader
+    // correlates lines with what they were doing in the field ("it dropped
+    // when the phone went in my pocket"); milliseconds because the questions
+    // this transcript answers are about pacing -- chunk gaps, retry spacing,
+    // link stalls -- which live below the second.
     @Synchronized
     private fun add(prefix: String, text: String) {
         if (lines.size >= capacity) lines.removeFirst()
-        lines.addLast("$prefix $text")
+        lines.addLast("${java.time.LocalTime.now().format(STAMP)} $prefix $text")
     }
 
     override fun tx(line: String) = add(">>", line)
@@ -56,4 +61,9 @@ class RingTranscript(private val capacity: Int = 2000) : PmtkTranscript {
 
     @Synchronized
     fun clear() = lines.clear()
+
+    private companion object {
+        val STAMP: java.time.format.DateTimeFormatter =
+            java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss.SSS")
+    }
 }

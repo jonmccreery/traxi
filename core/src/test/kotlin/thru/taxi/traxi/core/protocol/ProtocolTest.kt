@@ -251,9 +251,11 @@ class PmtkClientTest {
         client.queryFirmware()
 
         val lines = transcript.snapshot()
-        assertTrue(lines.any { it.startsWith(">>") && it.contains("PMTK605") },
+        // Lines open with a timestamp, so the direction marker is matched
+        // inside the line rather than at its start.
+        assertTrue(lines.any { it.contains(">>") && it.contains("PMTK605") },
             "expected a tx line, got $lines")
-        assertTrue(lines.any { it.startsWith("<<") && it.contains("PMTK705") },
+        assertTrue(lines.any { it.contains("<<") && it.contains("PMTK705") },
             "expected an rx line, got $lines")
     }
 

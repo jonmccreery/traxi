@@ -447,8 +447,16 @@ Standard CDC puts COMM at 0 and DATA at 1. Consequences:
 
 ```
 USB   61-64 KB/s      full read ~95 s of transfer
-BT    493 B/s         full read ~3 hours (internal 9600-baud UART bridge)
+BT    493 B/s         full read ~3 hours (see below — this is a residue,
+                      not the bridge's speed)
 ```
+
+**493 B/s is what is left after NMEA, not what the bridge can do.** Measured
+2026-09-07 from a timestamped transcript: the idle navigation stream alone is
+**415 B/s**, 43% of the ~960 B/s the internal 9600-baud UART carries. Add the
+log payload and `415 + 493 = 908 B/s`, **95% of the bridge**. A Bluetooth
+download therefore runs the UART pinned near capacity for its entire three
+hours, and the download's share is simply the remainder. See §15.
 
 ### Current logger configuration (changed during the session)
 
@@ -1078,3 +1086,181 @@ had been set to `50`, with no write in between.
   mistaken for the document not containing the command table at all.
 - BT747 status bitmask — `https://sourceforge.net/p/bt747/discussion/696105/thread/19a6ddd7/`
 - GPSBabel `mtk_logger.cc` — `https://github.com/GPSBabel/gpsbabel/blob/master/mtk_logger.cc`
+
+---
+
+## 15. The Bluetooth link — asking is what breaks it
+
+Found 2026-09-07, across a test ride and a bench session the same evening. The
+short version: **listening to this logger is free, and talking to it is not.**
+Every unexplained Bluetooth failure in the project so far has been a
+consequence of that, and none of them were the radio's fault.
+
+Read this before adding anything that queries the device on a timer.
+
+### What happened
+
+Two failures that looked unrelated and were the same thing seen from
+different distances.
+
+On the ride, the app froze after at most ten minutes: every counter stopped,
+the Live pane included, while the app still reported a healthy connection.
+Disconnecting and reconnecting resumed instantly. On the bench that evening,
+after the freeze was fixed, the link began tearing down every two to four
+minutes instead.
+
+The second failure was not a regression. It was the first one becoming
+visible.
+
+### Why: the app was the only thing keeping the link alive by being broken
+
+A foreground service covered downloads only, on the reasoning that a transfer
+is the long-running thing. An idle-connected session is equally long-running
+and had no protection at all, so between user actions the app was an ordinary
+background process — and this phone's cached-app freezer suspends those within
+about ten minutes of leaving the foreground.
+
+What that does to RFCOMM is quiet and total. The read loop stops being
+scheduled, the socket's receive buffer fills, flow control tells the logger to
+stop sending, and **the link stays up the whole time.** Nothing disconnects,
+so nothing is reported. Android's own ACL table, read afterwards from
+`dumpsys bluetooth_manager`, shows what the app could not:
+
+| Session | Duration | Teardown reason | Actual cause |
+|---|---|---|---|
+| 16:45–17:24 | **39 min** | CONNECTION_TIMEOUT | user power-cycled the logger |
+| 17:25–17:40 | **15 min** | CONNECTION_TIMEOUT | user power-cycled the logger |
+| 17:40–18:00 | **20 min** | TERMINATED_BY_LOCAL_HOST | phone-side close |
+| 18:15–18:51 | **36 min** | CONNECTION_TIMEOUT | end-of-ride power-off |
+
+The radio never dropped on its own, not once. A frozen app sends nothing, and
+a link nobody talks to survives for as long as you like. Fixing the freeze
+removed the accidental protection and exposed what was underneath.
+
+### Why: the write-pointer probe is a denial of service
+
+The recording indicator read `PMTK182,2,8` every 12 seconds. On the bench,
+17 probes drew 14 answers, and **all three unanswered probes were followed
+within a second by the link going down** — once with the logger itself
+terminating it (`REMOTE_USER_TERMINATED_CONNECTION`), 320 ms after the query,
+with NMEA flowing normally right up to it.
+
+It is progressive exhaustion, not a random collision with the NMEA stream.
+Probe latency climbs monotonically until the device stops answering:
+
+```
+132ms → 233ms → 425ms → 485ms → 459ms → 1088ms → 659ms → 1142ms → no reply → link down
+```
+
+A random collision gives flat latency with occasional misses. It does not give
+a 9x climb ending in death. Something is consumed per request and not fully
+released.
+
+No bandwidth is involved, and it is worth being precise about that because it
+is the wrong intuition. Idle NMEA uses 43% of the bridge; a probe exchange is
+about 40 bytes. There is ample headroom. The resource being exhausted is a
+buffer, a queue or a state-machine slot in the logger's Bluetooth firmware —
+not the wire.
+
+### How it was proved
+
+Three measurements, all from one timestamped transcript.
+
+1. **The correlation.** Every teardown lands within a second of a probe, and
+   the transcript's per-line millisecond stamps are what make that visible at
+   all. Before this session the transcript had no timestamps.
+2. **The latency climb**, above, which distinguishes exhaustion from a race.
+3. **The innocent explanation, ruled out.** If bytes were queueing in the link
+   rather than in the device, end-to-end lag would grow too. Each GGA carries
+   the receiver's own UTC, so comparing it against the receive stamp measures
+   that directly: lag stayed flat and non-monotonic, 162 ms early against
+   256 ms late. The command path degrades while the streaming path stays
+   healthy. Nothing is backing up in the link.
+
+The control, after the fix, on the same logger the same evening: **7 probes,
+7 answered, 21.7 minutes unbroken, latency flat at 80–724 ms with no trend.**
+The exhausted resource recovers given quiet.
+
+Evidence is committed, because none of this is reconstructible without it:
+
+```
+data/bt_ride_2026-09-07.bin                    the ride dump
+data/bt-acl-history-ride-2026-09-07.txt        Android's ACL table
+data/bt-probe-teardown-transcript-2026-09-07.log   the failure
+data/bt-probe-fix-verified-2026-09-07.log          the control
+```
+
+### The device was never at fault
+
+Worth stating plainly, because two evenings were spent suspecting it. The
+ride dump holds **782 fixes over 130.6 minutes against ~784 expected**, with
+exactly two lost — both at user power cycles, both confirmed by `0x07` markers
+in the flash. The logger recorded perfectly through every freeze and every
+teardown. No Bluetooth failure in this project has ever cost a fix.
+
+### What now prevents it
+
+1. **The transcript is mirrored to disk as it is written**
+   (`TranscriptFile`, attached as `RingTranscript.sink`). §12 was proved from
+   the device's own flash markers precisely because the in-memory transcript
+   died with the process, and this session repeated that mistake: an
+   `adb install` destroyed the ride's transcript before it could be read. An
+   in-memory diagnostic cannot survive the events it exists to diagnose. Two
+   startup banners with no orderly shutdown between them are now the signature
+   of a kill.
+2. **`LinkService` holds a `connectedDevice` foreground service for the whole
+   session**, not just transfers, and the Device tab says plainly when battery
+   optimisation is still allowed to suspend the app.
+3. **Probe cadence is a property of the transport**
+   (`Transport.writePointerProbeIntervalMillis`), exactly like
+   `blockReadIdleTimeoutMillis` and for the same reason: an unmeasured link is
+   assumed fragile rather than assumed free. Bluetooth 10 min, USB 12 s. One
+   early probe still runs on every link so the recording indicator confirms
+   promptly.
+4. **The read loop can no longer die silently.** It used to exit on a bare
+   `break`; the session went on reporting "Connected" over a stream that would
+   never produce another byte. Exits are now loud, and `LinkHealth` reports
+   silence measured in bytes off the wire — this logger streams NMEA whenever
+   powered, so no bytes at all is unambiguous, while a missing *fix* indoors
+   means nothing.
+5. **The recording indicator is driven by observation, not by a clock.** Its
+   staleness threshold was 30 s, sized for the 12-second cadence; at a
+   ten-minute cadence it decayed into shouting NOT RECORDING at a logger that
+   was recording. Only a sample that looked and found the pointer unmoved may
+   now raise that alarm, and a no-movement verdict is ignored unless it spans
+   more than the configured log interval. Not having looked lately renders as
+   RECORDING with the age of the fact stated.
+
+Nothing here tears a session down on its own. A quiet link recovers often
+enough that killing it automatically was already a regression once.
+
+### The rule
+
+**Every safety check in this app asks "does this mutate device state?" That
+question is not sufficient. It also has to ask "does this consume device
+attention?"**
+
+`queryWritePointer` passes every existing rail — *Connecting never writes*, the
+erase gate, the naming rule in `PmtkClient`. It changes nothing on the device.
+It also ends sessions, autonomously, on a timer, from code that models itself
+as a passive observer. A read-only query is not automatically a safe one, and
+on this hardware the read-only ones are the dangerous ones.
+
+So: **before adding anything that puts bytes on the wire unattended, assume it
+costs Bluetooth stability until measured.**
+
+### Still open
+
+- **`eraseBlockers()` reads the write pointer too**, on Dumps-tab composition.
+  Same blind spot, deliberately left alone for now; measured at ~3-minute
+  spacing during the verified session, which the device tolerated.
+- **Is the leak specific to `PMTK182,2,8`, or per-command?** If per-command, a
+  full three-hour Bluetooth download issues thousands of them and may not
+  survive — and §11 still lists that download as never completed. Climbing
+  per-block latency in the transcript would show it. The per-block
+  `arrival gaps ms:` line exists to make exactly this visible.
+- **The design this points at, agreed and deferred**: treat the logger as a
+  remote, resource-constrained embedded device — conserve the channel, mine
+  latency and other sideband as signal, and make **no unattended
+  interventions** on a fragile link. One probe at connect, then nothing until
+  a person asks. The 10-minute interval is a dose reduction, not that design.

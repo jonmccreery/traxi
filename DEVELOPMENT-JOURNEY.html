@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Traxi Sessions</title>
+<style>
+  :root {
+    --paper: #F6F7F4;
+    --ink: #212E28;
+    --muted: #5F6D65;
+    --line: #D7DDD5;
+    --accent: #2E6B52;
+    --accent-soft: #E4EEE8;
+    --danger: #A63A2E;
+    --card: #FFFFFF;
+    --code-bg: #EAEEE9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #121815;
+      --ink: #D9E0DA;
+      --muted: #8C988F;
+      --line: #29332D;
+      --accent: #7DBFA0;
+      --accent-soft: #1B2A23;
+      --danger: #D68273;
+      --card: #171F1B;
+      --code-bg: #1D2721;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, serif;
+    font-size: 17px;
+    line-height: 1.62;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 48rem; margin: 0 auto; padding: 3.5rem 1.4rem 5rem; }
+
+  .eyebrow, .label {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  h1 {
+    font-size: clamp(2.1rem, 6vw, 3rem);
+    line-height: 1.1;
+    margin: 0.4rem 0 0.8rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+  .lede { font-size: 1.08rem; color: var(--muted); max-width: 62ch; margin: 0 0 1.6rem; }
+
+  .stats {
+    display: flex; flex-wrap: wrap; gap: 0.6rem 2.2rem;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    padding: 0.9rem 0; margin: 0 0 2.4rem;
+  }
+  .stat b {
+    display: block;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 1.25rem; font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat span {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.72rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted);
+  }
+
+  h2 {
+    font-size: 1.55rem; font-weight: 600; letter-spacing: -0.01em;
+    margin: 3rem 0 0.4rem; text-wrap: balance;
+  }
+  h2 .part {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.72rem; font-weight: 600; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--accent);
+    display: block; margin-bottom: 0.35rem;
+  }
+  .when {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.8rem; color: var(--muted); margin: 0 0 1.4rem;
+  }
+  h3 {
+    font-size: 1.12rem; font-weight: 600;
+    margin: 2rem 0 0.6rem; text-wrap: balance;
+  }
+  h3 .n {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.8rem; color: var(--accent); margin-right: 0.5rem;
+    font-variant-numeric: tabular-nums;
+  }
+  p { margin: 0 0 1rem; }
+  ul { margin: 0 0 1rem; padding-left: 1.3rem; }
+  li { margin-bottom: 0.4rem; }
+  code {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.85em;
+    background: var(--code-bg);
+    padding: 0.1em 0.35em;
+    border-radius: 3px;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.85rem 1rem;
+    overflow-x: auto;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    margin: 1rem 0;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+
+  .tablewrap { overflow-x: auto; margin: 1.2rem 0; }
+  table {
+    border-collapse: collapse; width: 100%;
+    font-size: 0.88rem;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+  }
+  th {
+    text-align: left; font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600;
+    padding: 0.45rem 0.9rem 0.45rem 0; border-bottom: 1px solid var(--ink);
+    white-space: nowrap;
+  }
+  td { padding: 0.5rem 0.9rem 0.5rem 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td.mono, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.82rem; white-space: nowrap; }
+  .caption { font-size: 0.82rem; color: var(--muted); font-family: ui-sans-serif, system-ui, sans-serif; }
+
+  .incident, .rulecard {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.95rem 1.15rem;
+    margin: 1.1rem 0;
+  }
+  .incident { border-left: 4px solid var(--danger); }
+  .incident .tag, .rulecard .tag {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.68rem; font-weight: 700; letter-spacing: 0.13em; text-transform: uppercase;
+    color: var(--danger); display: block; margin-bottom: 0.35rem;
+  }
+  .incident p, .rulecard p { margin: 0 0 0.55rem; font-size: 0.97rem; }
+  .incident p:last-child, .rulecard p:last-child { margin-bottom: 0; }
+  .incident .fix::before {
+    content: "MITIGATION";
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.68rem; font-weight: 700; letter-spacing: 0.13em;
+    color: var(--accent); display: block; margin: 0.55rem 0 0.25rem;
+  }
+  .rulecard { border-left: 4px solid var(--accent); }
+  .rulecard .tag { color: var(--accent); }
+
+  blockquote {
+    margin: 1.3rem 0;
+    padding: 0.2rem 0 0.2rem 1.15rem;
+    border-left: 3px solid var(--accent);
+    font-style: italic;
+  }
+  blockquote .who {
+    display: block; font-style: normal;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.72rem; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--muted); margin-top: 0.35rem;
+  }
+
+  .commits { margin: 1rem 0 0; display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .commit {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.74rem;
+    background: var(--accent-soft);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.15rem 0.5rem;
+    white-space: nowrap;
+  }
+
+  .principles { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 0.9rem; margin: 1.2rem 0; }
+  .principles .rulecard { margin: 0; }
+
+  hr { border: none; border-top: 1px solid var(--line); margin: 2.8rem 0; }
+  footer { color: var(--muted); font-size: 0.85rem; font-family: ui-sans-serif, system-ui, sans-serif; margin-top: 3rem; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <span class="eyebrow">Engineering journey &middot; btdroid → Traxi</span>
+  <h1>The Traxi Sessions</h1>
+  <p class="lede">Four development sessions, roughly thirty-six hours, one Android app for a discontinued Qstarz BT-Q1000XT GPS logger — reconstructed 2026-09-07 from the exported transcripts (<code>session1.txt</code>–<code>session4.txt</code>), the git history (48 commits), and <code>ENGINEERING-RECORD.md</code>. The linear sequence, the design decisions, the times it went sideways, and how each was closed.</p>
+  <div class="stats">
+    <div class="stat"><b>48</b><span>commits</span></div>
+    <div class="stat"><b>20 → 145</b><span>tests</span></div>
+    <div class="stat"><b>126,613</b><span>golden fixes</span></div>
+    <div class="stat"><b>283 → 110 s</b><span>USB full read</span></div>
+    <div class="stat"><b>2</b><span>device recoveries</span></div>
+  </div>
+</header>
+
+<p>Two standing facts frame everything below, both stated by the user and both earned the hard way. <b>The device is the irreplaceable thing</b> — "the data -does- not matter. there are 15 copies&hellip; this device, as i've said 60 times, is the irreplacable piece." And <b>silent data loss is the worst outcome</b> — "silent lack of logging is the absolute worst possible outcome of a logging run. ----worst----".</p>
+
+<h3>The true order</h3>
+<p>The transcript file numbers do not match chronology. Session 4's flash evidence shows fix records resuming at <code>2026-09-06T22:47:44Z</code> (17:47 local, UTC−5) and its commits run 18:43–21:38; session 3's commits are the five newest in the log (22:05–23:12), and it opens by calling the project "stable&hellip; on the management and telemetry side" — features session 4 built. So:</p>
+<div class="tablewrap">
+<table>
+  <tr><th>Part</th><th>Transcript</th><th>When (local)</th><th>Theme</th></tr>
+  <tr><td>I</td><td class="mono">session1.txt</td><td class="mono">Sep 5 11:00 → Sep 6 ~10:30</td><td>Zero to hardware-verified; the USB corruption saga</td></tr>
+  <tr><td>II</td><td class="mono">session2.txt</td><td class="mono">Sep 6 morning → ~17:15</td><td>The one-shot USB fix, erase, the silent capture failure, v1</td></tr>
+  <tr><td>—</td><td class="caption">not exported</td><td class="mono">Sep 6 ~14:50–15:35</td><td>Parallel session: rename to Traxi (<code>b9744e1</code>), telemetry (<code>3a2286e</code>), op serialisation (<code>aafd862</code>)</td></tr>
+  <tr><td>—</td><td class="caption">off-session</td><td class="mono">Sep 6 afternoon</td><td>The user's solo recovery: SPI-level format, despair, power cycle</td></tr>
+  <tr><td>III</td><td class="mono">session4.txt</td><td class="mono">Sep 6 ~17:45–21:40</td><td>Recovery verified; the Bluetooth regression; ground truth</td></tr>
+  <tr><td>IV</td><td class="mono">session3.txt</td><td class="mono">Sep 6 ~21:45–23:15</td><td>The wrap probe, the backfire, the spiral, the last recovery</td></tr>
+</table>
+</div>
+
+<hr>
+
+<section>
+<h2><span class="part">Part I &middot; session1.txt</span>Zero to hardware-verified</h2>
+<p class="when">Sep 5, 11:00 → Sep 6 ~10:30 &middot; "when i'm on trail, my phone -is- my computer."</p>
+
+<h3><span class="n">1</span>Survey and corrections</h3>
+<p>The prep doc and the existing Python parser were run against the raw flash dumps, establishing the golden pair used by every test since: <b><code>cdt_v2.bin</code> (5,376,000 bytes) → 126,613 fixes, 0 checksum failures, 82 sectors, spanning 2025-03-16 → 2026-09-04</b>. Three prep-doc claims died on contact with raw bytes: the "sentinel table" (31 bad records) was a GPX <code>%.1f</code> rounding artifact — there was one; the format register never changed mid-log (the "segments" were power cycles); the spike count was 42, not 26, and 40 of them carried <code>VALID == 2</code>, so masking on VALID became the quality rule. Device format at this point: <code>FMT_REG 0x000A003F</code>, 42-byte records, firmware <code>AXN_1.30-B_1.3_C01</code>, all timestamps needing the +1024-week GPS rollover.</p>
+
+<h3><span class="n">2</span>The Kotlin parser, and the sentinel that wasn't 90.0</h3>
+<p><code>:core</code> was built as a pure-JVM module with a golden-file test asserting the exact fix count. Two failures immediately exposed that the sentinel latitude is <b><code>89.9999999999996</code></b> — raw double bits <code>40567FFFFFFFFFE4</code> — not <code>90.0</code>. An exact-equality mask would have compiled, reviewed cleanly, and silently masked nothing. <code>Fix.isSentinel</code> became a tolerance test. The GNSS technical document also landed here, overturning the "0.1&nbsp;m elevation quantization" claim (another GPX artifact) and measuring ~2&nbsp;m 1σ vertical accuracy across 103 stationary stops.</p>
+
+<h3><span class="n">3</span>The protocol layer, and a bug caught before hardware</h3>
+<p>The round-trip test caught <code>awaitSentence</code> returning on match and <b>discarding every sentence already parsed after it in the same read batch</b>. Over real RFCOMM — where a 64&nbsp;KB block arrives as 32 sentences of the form <code>$PMTK182,8,&lt;addr&gt;,&lt;4096 hex&gt;*XX</code> — that would have dropped most chunks of every block read. Fixed before hardware ever saw it.</p>
+
+<h3><span class="n">4</span>Bluetooth, four failures deep</h3>
+<p>The app parsed the real 5.4&nbsp;MB image on the phone to an exact golden match — then Bluetooth failed four different ways, each presenting as nearly the same opaque socket error:</p>
+<ul>
+  <li><b>Crash on pair</b> — <code>CompanionDeviceManager.associate()</code> throws <code>IllegalStateException</code> <i>synchronously</i>, bypassing its failure callback, when the manifest lacks <code>&lt;uses-feature android.software.companion_device_setup&gt;</code>.</li>
+  <li><b>Association ≠ bonding</b> — CDM association creates no link key; RFCOMM needs one. <code>Bonding.ensureBonded()</code> added.</li>
+  <li><b>A filter that dropped devices</b> — <code>setNamePattern(".*")</code> only tests devices whose names have resolved; replaced with an empty filter plus a "Likely loggers" UI split.</li>
+  <li><b>The PIN</b> — 1111 was rejected with a bare <code>AuthenticationFailed</code>; <b>0000 paired immediately</b>. The device uses legacy BT 2.0 PIN pairing, not SSP; <code>Bonding.KNOWN_PIN = "0000"</code> went into code and UI copy.</li>
+</ul>
+<p>A USB detour identified the hardware — <code>0e8d:3329</code>, native CDC-ACM, no bridge chip — and decoded two "device lies" as host-side failures: <code>$PMTK182,2,9</code> returns a <b>JEDEC RDID</b> (<code>1C 70 17</code> = EON, capacity 0x17 → 8&nbsp;MB), and status field 8 is a <b>write-pointer byte address</b> (<code>0x0051F3C2</code> = 5,370,818), not a record count. The laptop reference dump was set here: <b>5,505,024 bytes in 83.5&nbsp;s, zero retries, zero corruption</b>.</p>
+
+<h3><span class="n">5</span>First BT download: three transfer bugs at once</h3>
+<p>The first real download died after one block, exposing: a <b>fixed 10&nbsp;s block timeout</b> (only 20,480 of 65,536 bytes had arrived — replaced by an <i>idle</i> timeout that progress resets, 240&nbsp;s hard cap); <b>no stream reset between requests</b> (stale chunks from the abandoned block poisoned the next — <code>resetStream()</code> added); and <b><code>filled == 0</code> treated as end-of-flash</b> (wrong — erased sectors still answer, with 0xFF, which is byte-identical to a missing chunk; termination became "two consecutive unwritten blocks"). Regression tests use an injectable clock and assert &gt;30&nbsp;s of <i>simulated</i> time so they cannot degenerate.</p>
+
+<h3><span class="n">6</span>The stale link key</h3>
+<div class="incident">
+  <span class="tag">Sideways</span>
+  <p>After a device power cycle, connects failed with no PIN prompt. The user: "the one time we successfully connected from this device, i was prompted for a pin. this isn't happening now. why?" <code>dumpsys</code> showed <code>bredr_linkkey_known:T &hellip; bredr_authenticated:F bredr_encrypted:F</code> — the legacy device forgets its link key across a power cycle while Android keeps hers as <code>BOND_TYPE_PERSISTENT</code>, so <code>BOND_BONDED</code> lies and <code>ensureBonded()</code> short-circuits.</p>
+  <p class="fix">On connect failure while "bonded": <code>removeBond()</code> via reflection, delay, re-pair, retry. The PIN prompt returned and the download restarted.</p>
+</div>
+
+<h3><span class="n">7</span>493 B/s, a wrong fix, and a rule that held forever</h3>
+<p>The download ran at <b>~493&nbsp;B/s</b>. A reader-thread rewrite (theory: polling <code>available()</code> throttled it) measured identical — because the real cause is arithmetic: 493&nbsp;B/s of decoded payload is ~986 hex chars/s on the wire, i.e. a <b>9600-baud UART</b> — the internal bridge between the logger's Bluetooth module and GPS chip. A full read is ~3 hours and no host software can change it.</p>
+<div class="incident">
+  <span class="tag">Sideways</span>
+  <p>The user caught the rewrite regressing: "we've regressed. check the log. it failed this time instead of slowed." It had introduced a new failure mode <i>and</i> its failure path returned zero bytes where the previous run had kept a 64&nbsp;KB partial.</p>
+  <p class="fix">Reverted (<code>c13ebf5</code>), establishing the project-long rule: <b>never discard a partial download</b>. <code>FlashDownloader</code> records the failure and returns the bytes read; partials are saved unconditionally; <code>Result.isComplete</code> distinguishes outcomes.</p>
+</div>
+
+<h3><span class="n">8</span>Incremental download</h3>
+<p><code>planIncremental</code> made the slow link irrelevant: a <b>wrap probe</b> reads records at <code>PROBE_OFFSET = 512</code> — the oldest data, first overwritten in OVERLAP mode — and compares against the previous dump (records, not sector headers, which look alike across a wrap), falling back to a full read on mismatch. The final block is always re-read because its sector header was mid-write (count <code>0xFFFF</code>). First hardware run found the probe requesting <b>512 bytes, which the real device ignores and answers by dropping the RFCOMM link</b> — it had been sized against the permissive simulator. Second run: <b>10&nbsp;m&nbsp;32&nbsp;s, 4 blocks instead of 82</b>, byte-identical through the write pointer, 126,644 fixes (+31 real ones).</p>
+
+<h3><span class="n">9</span>The erase reversal</h3>
+<p>The user revealed the bedrock use case: "the -critical- feature on a thru hike&hellip; the bedrock goal was dump, erase, repeat until the end of the trail." Erase went from deliberately-out-of-scope to the app's reason to exist; the assistant named its own error — "my safety argument was correct, but I used it to justify not building the feature instead of building it carefully" — and §0.2 was written with a seven-clause gate: verified same-session dump; coverage past a <i>freshly read</i> write pointer; typed confirmation naming the exact fix count; never reachable from a download callback; disable → erase → re-enable with a long timeout; read back sector 0 to confirm 0xFF; never delete the pre-erase dump.</p>
+
+<h3><span class="n">10</span>The USB corruption saga</h3>
+<p>USB in the app was hand-rolled CDC-ACM (~150 lines, chosen over a JitPack dependency). First contact: writes accepted, <b>zero bytes back</b> — this device's <b>CDC interfaces are reversed</b> (if0 = DATA with the bulk endpoints, if1 = COMM), so the hardcoded <code>wIndex = 0</code> sent <code>SET_CONTROL_LINE_STATE</code> to the wrong interface and DTR was never asserted. The device is mute until it is. Fix: <code>wIndex = 1</code>.</p>
+<p>Then the corruption: roughly <b>1 block in 8 short on the phone, zero on the laptop</b> over the same cable. Instrumentation the user pushed for exposed the worse half: <code>readLogBlock</code> pre-filled its buffer with 0xFF, so lost chunks left <b>holes byte-identical to erased flash</b> (proven by a diff at <code>0x002C17FC</code>). Damage detection (<code>Result.damagedRanges</code>, "DOWNLOAD DAMAGED") made the loss loud before anything tried to fix it. Then five fixes failed or made it worse:</p>
+<div class="tablewrap">
+<table>
+  <tr><th>Attempt</th><th>Result</th></tr>
+  <tr><td>Floor the bulk read timeout at 250 ms</td><td>No change</td></tr>
+  <tr><td>Hand-rolled reader thread keeping a read posted</td><td>Whole-chunk gaps 5 → 0; corruption remained</td></tr>
+  <tr><td>Raise the transfer timeout to 10 s</td><td><b>Worse</b></td></tr>
+  <tr><td>Split requests into 8 KB for flow control</td><td><b>Worse</b>; reverted</td></tr>
+  <tr><td>Swap to usb-serial-for-android 3.8.1</td><td>Gaps 5 → 1; same corruption character</td></tr>
+</table>
+</div>
+<p>The one clean win was the <b>retry idle timeout</b>: chunks arrive ~33&nbsp;ms apart, so a 10&nbsp;s wait before retrying was 300× any legitimate gap — 58% of a 240&nbsp;s run was retry idle. At 2.5&nbsp;s: <b>152&nbsp;s, 0 unrecovered damage, 129,115 records</b>, first diff exactly at the old write pointer. The corruption was survived, not fixed — and the session closed with a 462-line handoff preserving the clue: malformed sentences <b>quantized at exactly 2,840 chars</b> (9×) and 6,961 (2×), against a healthy 4,119 (<code>$PMTK182,8,AAAAAAAA,</code> = 20 + 4,096 hex + <code>*XX</code>). Nine lines on the same byte count is a fixed buffer boundary, not packet loss; <code>6961 = 4119 + 2842</code> is one good sentence with a fragment welded on; and the loss was one off from <code>1280 = 20 × 64</code> — a whole number of max-size USB packets.</p>
+
+<div class="incident">
+  <span class="tag">Sideways</span>
+  <p><b>Abort drive.</b> The hand-rolled transport was defended through hours of failed fixes. The user: "you've been defending your hand rolled communications protocol that you argued for because of a single dependency&hellip; you're running into abort drive&hellip; let's just fix it."</p>
+  <p class="fix">The library swap — which didn't fix the corruption either. Survival across a rewrite <i>and</i> a swap became the diagnostic signal Part II ran on: the defect lived in the primitive, not the code around it.</p>
+</div>
+<div class="incident">
+  <span class="tag">Sideways</span>
+  <p><b>Blind taps and a battery scare.</b> Coordinate taps connected to the user's Denon amp (<code>C4:30:18:C9:61:76</code>), wandered into Android's USB settings, and nearly touched a share sheet listing contacts. A no-charge-LED scare produced a physically impossible wattmeter reading, and a proposal to drain the cell for a conclusive test — vetoed: "i'm not going to waste potentially the last power this thing ever gets on a test. that would be crazy." Fixed by reseating the battery.</p>
+  <p class="fix">Automation halted each time; "screenshot or dump UI state before tapping" became a standing rule. The meta-lesson went into the handoff: separate signal from interpretation — <i>"Signal keeps. Frames rot."</i></p>
+</div>
+
+<div class="commits">
+  <span class="commit">6093e1b parser</span><span class="commit">3f7fc9b protocol</span><span class="commit">b2e542e app</span><span class="commit">382a6bf PIN 0000</span><span class="commit">161d60b BT verified</span><span class="commit">c13ebf5 keep partials</span><span class="commit">7eb6e0b incremental</span><span class="commit">a5e9662 USB CDC-ACM</span><span class="commit">023e9b3 retry timeout</span><span class="commit">c525787 handoff</span>
+</div>
+</section>
+
+<hr>
+
+<section>
+<h2><span class="part">Part II &middot; session2.txt</span>The one-shot fix, erase, and the silent capture failure</h2>
+<p class="when">Sep 6, morning → ~17:15 &middot; "let's get back into the transport bug&hellip; this one's got my interest piqued :)"</p>
+
+<h3><span class="n">1</span>The mic-drop fix</h3>
+<p>Instead of testing hypotheses on hardware, the session <b>decompiled the dependency</b> — <code>unzip</code> the cached AAR, <code>javap -p -c CommonUsbSerialPort.class</code> — and read the mechanism in thirty lines of bytecode:</p>
+<pre><code>if (timeout != 0) nread = mConnection.bulkTransfer(ep, dest, len, timeout);
+else { mUsbRequest.queue(ByteBuffer.wrap(dest, 0, len), len);
+       mConnection.requestWait(); nread = buf.position(); }</code></pre>
+<p><code>bulkTransfer</code> returns −1 on timeout and <b>discards the bytes already received into that URB</b> — the caller can't even learn how many there were. The app passed <code>readTimeout = 200</code>, so every read took the lossy path. Fix: <b><code>readTimeout = 0</code></b>, selecting the <code>UsbRequest</code> path, which has no timeout to expire and nothing to discard; plus <code>readBufferSize</code> 64 → 4096. First run: <b>0 retries, 0 malformed lines, 0 gaps, slowest block 1,317&nbsp;ms (was 10,782), ~110&nbsp;s wall</b>, byte-identical across the 5,479,850-byte common prefix. "decompiling the library to find it with immediate problem resolution as a result is a mic drop."</p>
+<p>Two footnotes with teeth: <code>readTimeout = 0</code> would have worked in the hand-rolled version too, but an infinite <code>bulkTransfer</code> parks a thread in an uninterruptible native ioctl — <code>UsbRequest</code> is cancellable via <code>port.close()</code>. <b>The library did not supply the fix; it supplied a read path the fix could be applied to.</b> And the new delivery histogram showed the firmware emits ~512-byte units split <code>1 + 511</code>, every delivery ≤ 537 bytes — so the earlier "no short packet terminates the read" theory was struck through as wrong.</p>
+
+<h3><span class="n">2</span>The post-mortem (§4.1)</h3>
+<p>Why did the bug survive a rewrite <i>and</i> a library swap? <code>bulkTransfer</code> <b>is</b> the discard-on-timeout API, and it was the only read primitive any version used. The original was worst: <code>awaitSentence</code> handed a <i>shrinking</i> deadline down as the URB timeout — 500&nbsp;ms, 200, 50, 5, floored at <b>1&nbsp;ms</b> — a positive feedback loop (lose bytes → block runs long → shorter timeouts → more discards) that explains the bimodal block times and ~1-in-8 clustering. The reader thread enlarged the loss quantum to 16&nbsp;KB; the library swap shrank it to 64 bytes. Every attempt moved the <i>quantum</i> of the discard; none removed the discard. The old instrumentation had the answer all along: <code>reads=46250 timeouts=90 (0.2%)</code> — <b>90 timeouts were 90 discard events</b>, read as noise. The lesson, verbatim: <b>"When one symptom survives several well-reasoned fixes, stop tuning parameters and go read the primitive."</b></p>
+
+<h3><span class="n">3</span>Erase, built carefully</h3>
+<p><code>Pmtk.WRITE_ERASE_FLASH = "PMTK182,6,1"</code> reversed the "deliberately absent" decision. A pure <code>EraseGate</code> implements all seven §0.2 clauses; <code>FlashEraser</code> runs disable → erase → verify → restore; the erase ack has a 90&nbsp;s budget and <b>no retries</b> (a timeout probably means the erase is still running, and a re-send could interrupt it); verification reads back a full block where a <i>short read counts as failure</i> (missing bytes read as 0xFF — the exact value being verified); the typed confirmation is the exact fix count (129186), deliberately not <code>rememberSaveable</code>. Erase evidence exists only when a download completed <i>and</i> that exact file parsed cleanly, invalidated by any new download or disconnect. Hardcoded capacity text the user caught ("it'll always be incorrect") became <code>continuousLoggingDays()</code> derived from live flash ID, interval, and record size. A self-introduced bug — the erase card's <code>LaunchedEffect</code> injecting a status query mid-block-read — was caught in transcript review and fixed with a busy guard.</p>
+
+<h3><span class="n">4</span>The silent capture failure (§12)</h3>
+<p>The user noticed the GPS light not blinking: "did we disable logging along the way?" The latent bug surfaced first — every config write is a three-step sequence, because the device refuses config changes while recording:</p>
+<pre><code>c.writeLoggingEnabled(false)          // 1. stop
+c.writeConfig(TIME_INTERVAL, "50")    // 2. change the setting
+c.writeLoggingEnabled(true)           // 3. start</code></pre>
+<p>— with <b>no <code>finally</code></b>. If step 2 threw, step 3 never ran; the deliberate disable survived power cycles as saved configuration, and the user was told only that a <i>setting change</i> had failed.</p>
+<div class="incident">
+  <span class="tag">Sideways</span>
+  <p><b>"The app didn't do it."</b> Claimed on an in-memory transcript the assistant's own two APK installs had destroyed. The user: "it's unexpected state change that could lead to real world, irevocable, silent failure of data capture&hellip; i want to be -extremely- careful in the analysis of why this happened."</p>
+  <p class="fix">Withdrawn ("That was wrong of me and I withdraw it"), and the forensics moved to the flash — which the process cannot destroy. The device writes a type-<code>0x07</code> marker on every logging start/stop; <code>MtkLogParser.StatusChange</code> recovers them. Finding: one new marker, <code>DISABLE after 2026-09-06T16:16:10Z</code> at <code>0x0053CBCA</code>, unanswered. Across 417 status changes in 18 months, the double-DISABLE fingerprint appears <b>0 times in 17 months, 3 times starting 2026-09-05</b> — the day the app began writing config. ~1h40m of real time unrecorded, through a power cycle and a re-pair, looking completely normal.</p>
+</div>
+<p>A wrong invariant was caught by the golden file itself: "a healthy history never ends disabled" fails on <code>cdt_v2.bin</code> (power-off writes a trailing DISABLE, answered at next power-on); narrowed to "no <i>unanswered</i> stop." Mitigations: <code>withLoggingPaused</code> restores logging in a <code>finally</code> — one place, in the tested module, with an <code>onRestoreFailed</code> <i>callback</i> (it must reach the caller when the body also threw); a decoded <code>LogStatus</code> (bit <code>0x0002</code> = logging, cross-checked against GPSBabel's <code>log_status &amp; 2</code>) with <b>NOT RECORDING</b> in error colour and a Resume control; a USB-detach watcher; <code>RecordingAudit</code> reporting unanswered stops from any dump, forever; and the alarm-hygiene rule — <b>silence is the good news</b>, <code>explanation()</code> returns null on healthy dumps, encoded in core. v1 closed: main fast-forwarded, tag <code>v1</code>, the handoff renamed to <code>ENGINEERING-RECORD.md</code> with §12 written.</p>
+
+<h3><span class="n">5</span>The bug "resurfaces" — and the device exonerates the app</h3>
+<p>A parallel session (the Traxi rename, telemetry, <code>launchExclusive</code> serialisation) reported the disable bug twice more. Reopening the root cause found a genuinely gnarly hole in the v1 fix: <b><code>finally</code> runs on cancellation, but suspending calls inside it throw <code>CancellationException</code> before sending a byte.</b> The restore called <code>withContext(Dispatchers.IO)</code> — on a cancelled coroutine that throws immediately: disable out, enable never sent (<code>PROBE sent: [PMTK182,5]</code>). The v1 fix had closed the exception path and left the cancellation path open; the simulator masked it because its <code>write</code> never suspends. ("whoooooaaa!!! that is a -gnarly- failure mode.") Fixed with <code>withContext(NonCancellable)</code> and a regression test using a transport wrapper that actually suspends, verified to fail on the old code (<code>cb193c7</code>).</p>
+<p>The controlled experiment cut deeper: <code>$PMTK182,4</code> from <b>raw Python over <code>/dev/ttyACM0</code></b>, no app attached — the device acks <code>PMTK001,182,4,3</code> (success), writes ENABLE and DISABLE markers itself, and the pointer stays frozen. <b>The device accepts the command, acknowledges it as successful, and turns itself back off.</b> The v1 attribution was retracted: "I picked the explanation that matched the bug I'd just found&hellip; exactly the reasoning error I warned about in §4.1, and I made it anyway."</p>
+
+<h3><span class="n">6</span>Recovery, act one</h3>
+<p>Research found the leaked <b>MTK GPS Logger Library User Manual 1.2</b> (Andy Lee, 2006, "MTK CONFIDENTIAL," via rigacci.org), documenting <code>NEED_FORMAT_BIT</code> and the engineering commands 9–12.</p>
+<div class="incident">
+  <span class="tag">Sideways</span>
+  <p><b>The ENABLE_LOG misstep.</b> Undocumented <code>$PMTK182,10</code> sent on the prediction "worst case rejected or a no-op." Wrong on both: <b>no acknowledgement at all, status <code>0x0100</code> → <code>0x0504</code>, write pointer moved to <code>0x00000002</code></b> — on hardware that cannot be replaced, in a command family that includes <code>WRITE_LOG &lt;addr&gt; &lt;data&gt;</code>.</p>
+  <p class="fix">Sector 0 verified byte-identical (nothing lost). Decoded via BT747's bitmask table (<code>0x0400</code> = need_format, <code>0x0100</code> = enabled, <code>0x0004</code> = stop-when-full), the misstep had <i>revealed</i> the true state — the log area was genuinely unformatted. "I mispredicted the command, and it happened to produce the diagnosis anyway. That's luck, not judgement." Commands 9–12 documented as engineering tooling, never to be used.</p>
+</div>
+<p><code>$PMTK182,6,1</code> (FORMAT LOG ALL) ran — SPI busy ~22&nbsp;s, <code>need_format</code> cleared, 18 months of multiply-copied track erased. <b>Logging still refused to hold.</b> A format also silently resets configuration (RCD METHOD → STP, BY_SEC → 1.0&nbsp;s, FMT_REG → <code>0x0002002F</code>); OVP was restored via <code>$PMTK182,1,6,1</code> — still refusing. Tension peaked ("what!@!!!!!!!! did you just tell me that my logger, that used to log, is great for everything except logging now!!!!!!") until the untested step: <b>a power cycle after the format</b> — the firmware keeps pre-format state in RAM and must boot onto the clean log area. "oh. my. fucking. god&hellip; that worked!!!!!" Two more truths: <b>the LED means GPS fix, not recording</b> (steady blink, 3D DGPS fix, zero bytes written — "that LED has misled both of us all day"), and the user's priority correction into persistent memory: the device outranks the data.</p>
+
+<h3><span class="n">7</span>Between sessions: the solo recovery</h3>
+<div class="incident">
+  <span class="tag">Off-session</span>
+  <p>After session II the device stopped holding its enable again. The fingerprint: an enable that <b>takes and then reverts</b> — <code>START_LOG</code> acked, the auto_log bit <code>0x0002</code> clearing itself within the second, "ENABLE-&gt;DIABLE every time for hours" — and an ordinary power cycle did not clear it. The user, alone: an <b>SPI-level flash format</b> from the EON datasheet (the exact <code>spi_</code>-prefixed command was never captured — flagged in §13 as "the single most valuable missing line"), then "a full despair and mourning period," then a just-in-case retry <i>after a power cycle</i> — which held.</p>
+  <p class="fix">The flash journal corroborates it verbatim: paired <code>LOGSTAT 258/256</code> markers at offsets <code>0x0300</code>–<code>0x04B0</code>, the device's own record of each round, ending in the one enable that stuck. Between the format and the next boot a recovered device is indistinguishable from a dead one: <b>"Do not declare death between steps 1 and 2."</b></p>
+</div>
+
+<div class="commits">
+  <span class="commit">eadbb81 readTimeout=0</span><span class="commit">da1645d resolution</span><span class="commit">f0d2231 §4.1</span><span class="commit">94492c1 erase</span><span class="commit">45c676e derived numbers</span><span class="commit">4096466 withLoggingPaused</span><span class="commit">b63301e RecordingAudit</span><span class="commit">bcc4502 silence</span><span class="commit">91f2d35 v1</span><span class="commit">cb193c7 NonCancellable</span>
+</div>
+</section>
+
+<hr>
+
+<section>
+<h2><span class="part">Part III &middot; session4.txt</span>Verification, the Bluetooth regression, ground truth</h2>
+<p class="when">Sep 6, ~17:45 → 21:40 &middot; "this device used ot log but has not since&hellip; i need you help me get it back."</p>
+
+<h3><span class="n">1</span>Recovery verified, read-only first</h3>
+<p>Block 0 dumped from the laptop and decoded with the app's own parser: <b>fix records resumed at <code>2026-09-06T22:47:44Z</code></b> (raw timestamps read 2007-01-21; the +1024-week rollover lands them), 65 fixes, 0 checksum failures, positions coherent at ~41.884N 87.804W. Status 258 (<code>0x102</code>), SPI RDY, failed-sector register empty, pointer advancing live. The post-format flash opens with <b>49 marker records</b> — the journal of the recovery fight — including <b>2 unanswered stops</b>, so <code>RecordingAudit</code> will report them on every dump until the next erase: "the recovery session's scar, not new loss." Config restored through <code>withLoggingPaused</code> (FMT_REG → <code>0x000A1C3F</code>, interval 5.0&nbsp;s), verified by pointer arithmetic: <b>+144 bytes in 15&nbsp;s = exactly 3 × 48-byte records at 5&nbsp;s</b>. The user's earlier "failure to download anything" was also resolved: the 17:35 dump legitimately parsed to 0 fixes because the flash then held only recovery markers — the pipeline was healthy; there was nothing to find.</p>
+
+<h3><span class="n">2</span>§13 corrected by the person who lived it</h3>
+<div class="incident">
+  <span class="tag">Sideways</span>
+  <p>The assistant summarized the recovery as "just needed a reboot." The user: "ohhhhh&hellip;.. oh buddy&hellip; you have to understand that i have a ee background and the -first- thing i tried was power cycling. of course. checked for magic smoke. you're off by an order."</p>
+  <p class="fix">A 27-line inline correction in §13 — the take-then-revert fingerprint, the SPI-level format, the mourning period — and the MTK manual PDF committed to <code>docs/</code> with provenance, page pointers (command table p.7/22), and the extraction trap: <code>pdftotext -layout</code> is what makes it readable; a Python stream extraction produced garbage briefly mistaken for the table not existing.</p>
+</div>
+
+<h3><span class="n">3</span>The Bluetooth regression, root-caused in git</h3>
+<p>"download over bluetooth fails now." The link was healthy — every config query succeeded — but the 64&nbsp;KB block read came back short: 18,432 bytes, then 2,048, then nothing. The arithmetic convicts the timeout: a 2048-byte payload chunk is a 4,121-byte sentence on the wire; at 493&nbsp;B/s that is <b>~8.4&nbsp;s per chunk</b>, against <code>FlashDownloader.BLOCK_IDLE_TIMEOUT = 2_500</code> — the USB-tuned constant from <code>023e9b3</code>. Bluetooth had been verified against the earlier 10&nbsp;s default; the later commit was "correct for USB and quietly fatal for Bluetooth."</p>
+<p>The fix (<code>d346a7e</code>): the idle timeout became <b>a property of the transport</b> — <code>Transport.blockReadIdleTimeoutMillis</code>, default 10&nbsp;s (slow-link-safe: "fast transports opt down"), <code>UsbSerialTransport</code> overriding to 2.5&nbsp;s, the constant deleted. Guarded by a regression test (a <code>GappyTransport</code> inserting a 4&nbsp;s gap every 5th read, with a stepped clock) falsified by reintroducing the bug — and <b>held uncommitted until hardware proved it</b>: a full 3-block BT download, <code>block 0x00000000 65536/65536 bytes, 32 chunks, 161979 ms</code> (~2.7&nbsp;min/block), clean stop on two unwritten blocks, 306 fixes. Mid-flow the assistant noticed the phone was in an active call and backed off entirely ("No taps landed; I backed off as soon as I saw it").</p>
+
+<h3><span class="n">4</span>Flow, not just totals</h3>
+<p>"i'd like to know that things are flowing rather than received." Built bottom-up (<code>ba09b54</code>): an <code>onChunk</code> callback in <code>readLogBlock</code>; <code>Progress.blockBytes/blockSizeBytes</code>; a per-sector bar with KB and rate — no percent-of-flash, because the device's totals are untrustworthy, but the 64&nbsp;KB block is "a denominator we can stand behind" — and a Live-tab heartbeat (pulse, "last update Xs ago", rate).</p>
+<div class="incident">
+  <span class="tag">Sideways</span>
+  <p><b>584 sentences per second.</b> The first rate used an EMA of inter-arrival gaps; RFCOMM delivers a second's worth of sentences in one burst, so sub-millisecond intra-burst gaps inflated the rate ~80× (real: ~7/s). Also a "-0.0&nbsp;s ago" flicker when a sentence lands just after the UI samples its clock.</p>
+  <p class="fix">A sliding wall-clock window for the rate; a clamp for the age. Verified on hardware: "Sector 1 · 18/64 KB · Speed 3.9 KB/s", bar climbing live.</p>
+</div>
+<p>Then two cleanups (<code>c449fad</code>, <code>6b6a524</code>): the Live tab counts <b>fixes, not sentences</b> — only a GGA with a position and fix quality &gt; 0, so a receiver alive-but-fixless correctly reads stale — and <b>cancel became immediate</b>: first polled per-chunk (breaking three tests whose limiters counted polls as blocks; fixed to count block boundaries), then — after hardware showed an ~8&nbsp;s residual, because the BT transport blocks its whole idle timeout during gaps — pushed into <code>awaitSentence</code> with <code>READ_SLICE_MILLIS = 400</code> read slicing. The partial block is discarded; resume re-reads it cleanly. Final verification was blocked by a <b>wedged SPP slot</b> from repeated reinstall/reconnect cycles, and the session <i>stopped</i> rather than keep hammering the irreplaceable device — an honest gap declared, cancel confirmed effectively instant after the user's power cycle.</p>
+
+<h3><span class="n">5</span>Ground truth over the status bit</h3>
+<p>A reproducible bug: after any Bluetooth disconnect/reconnect the app showed NOT RECORDING; the Config pane "restored" it. Traced read-only first: neither connect nor disconnect writes to the device, so an explicit disconnect provably cannot stop the recorder — the indicator was a <b>connect-time snapshot</b> (<code>DeviceInfo.logStatus</code> set once in <code>openWith</code>, refreshed only by <code>refreshConfig()</code>, which is why config actions "fixed" it). The device's status bit simply misreports after reconnect.</p>
+<p>The user named the real requirement: "what i need most is a way to know if tracks are being logged&hellip; my only way is to dump a log and see id the counters increased." The fix inverted the epistemology (<code>95be843</code>): the telemetry loop polls the <b>write pointer</b> (<code>PMTK182,2,8</code>) every 12&nbsp;s; the Device tab shows "checking…" → <b>RECORDING</b> with a live "N&nbsp;B written to flash since connecting" counter → NOT RECORDING only after 30&nbsp;s of a frozen pointer. Hardware-verified (96 → 192 → 240&nbsp;B climbing). The flaky bit was demoted to a secondary "Reported" row. Caveat recorded: distance/speed-triggered modes would legitimately read NOT RECORDING when stationary. "This is the live write pointer, not a guess."</p>
+
+<div class="commits">
+  <span class="commit">3ac7232 sizes</span><span class="commit">4b5bb00 §13 + manual</span><span class="commit">d346a7e transport timeout</span><span class="commit">ba09b54 flow</span><span class="commit">6b6a524 cancel</span><span class="commit">c449fad fixes</span><span class="commit">95be843 write pointer</span>
+</div>
+</section>
+
+<hr>
+
+<section>
+<h2><span class="part">Part IV &middot; session3.txt</span>The wrap probe, the backfire, the spiral, the last recovery</h2>
+<p class="when">Sep 6, ~21:45 → 23:15 &middot; "i'm comfortable calling this mtk device project stable&hellip;" — and then not.</p>
+
+<h3><span class="n">1</span>The v2 roadmap, recalled and deferred</h3>
+<p>From §13 of the record: the trail loop as one button (dump → verify → export → erase → confirm), the burn-rate forecast ("dump by &lt;date&gt;", built on the trustworthy write pointer, not the ~2× inflated record count), the recording watchdog, and a download that checkpoints blocks so a 3-hour BT read survives a link drop. Constraints: the watchdog goes first (it attacks the §12 failure class), and the trail loop must not ship before erase runs on real hardware. None were built — "whoops&hellip; i just found a bug we need to address first."</p>
+
+<h3><span class="n">2</span>Fetch-new's frozen bar</h3>
+<p>The wrap probe in <code>planIncremental</code> (FlashDownloader.kt:147) still called <code>readLogBlock(0, blockSize)</code> bare — no <code>onChunk</code>, no <code>shouldContinue</code>, no link-sized idle timeout. Over Bluetooth the probe <i>is</i> the first ~2 minutes of every fetch-new, so the flow opened with a frozen bar and a cancel that silently waited the whole block out. Fixed with full parity (<code>e8790d0</code>); during the probe <code>bytesDownloaded</code> holds constant and only the per-sector bar moves — nothing new is being fetched ("same honesty rule"). Cancel messages were rewritten too — "Cancelled — nothing had been fetched; &lt;source&gt; is untouched" instead of "the logger did not respond" — because "blaming the logger for a stop the user asked for is a lie." Also noted, unresolved: <code>git remote -v</code> returns nothing. <b>One copy of the code, on the laptop that stays home.</b></p>
+
+<h3><span class="n">3</span>Growth misread as wrap — and the bug that didn't fire</h3>
+<div class="incident">
+  <span class="tag">Sideways</span>
+  <p>"umm&hellip; i hit a retry&hellip; and the download failed." The chain: fetch-new ran from a dump whose last real byte was <code>0x73BF</code> (sector 0 count still <code>0xFFFF</code>, mid-write); the probe found a difference at <code>0x73C0</code> and declared "the log has wrapped or been erased," forcing a full download — during which the BT link genuinely decayed and died (26,624 → 2,048 → 0 bytes), after which the write-pointer poller hammered the dead-but-open socket every 3&nbsp;s: <b>99 failed retries and counting</b>, no ACL broadcast because Android still considered it connected.</p>
+  <p>The deeper find was the bug that <i>didn't</i> fire: had the probe matched, the old last-block extend rule would have copied the stale mid-write block forward, silently dropped every record since 21:39, and reported "Added 64 KB of new tracking" — eligible as erase evidence. "Tonight the wrong wrap verdict accidentally protected you by forcing the full path."</p>
+  <p class="fix">Three fixes in <code>f0e105d</code>: a <b>three-case byte comparison</b> (a byte that was 0xFF in the previous dump proves growth; only real bytes convict — changed to data = wrapped, changed to 0xFF = erased); <b>extend from the write frontier</b> (re-read from the block containing the last real byte); and a byte-exact test reconstruction of that night's dump shape. Plus a dead-link detector — the part that backfired.</p>
+</div>
+
+<h3><span class="n">4</span>The backfire</h3>
+<div class="incident">
+  <span class="tag">Sideways</span>
+  <p>"that last update kills bluetooth connection&hellip; but sometimes&hellip; looks like a race condition&hellip;" The phone transcript separated two drops: one a genuine ACL radio disconnect; the other <b>the new detector</b> (<code>DEAD_LINK_SILENT_PROBES = 2</code>, ~30&nbsp;s of silence), killing a link that had merely gone quiet after connect-time queries this device answers unreliably timed out. Before the detector that stall was invisible and self-healing; after it, a recoverable stall became a hard disconnect on a fragile reconnect path. "I made a flaky-but-recoverable link into a flapping one."</p>
+  <p class="fix">Reverted (<code>10ff393</code>) with one condition that fixes both the zombie poller and the teardown: <b>probe only a link that is talking</b> (<code>bytesSincePump &gt; 0</code>), wait a full interval before the first probe, never tear down on silence, trust <code>ACTION_ACL_DISCONNECTED</code> as the real signal. The lesson entered persistent memory: <b>surface, don't auto-remediate</b>. Alongside: 51 lines of standing explainer text removed ("alarms, not disclaimers" — RECORDING WAS LOST and checksum warnings stayed), and the download notification made to leave with the download — cancel the collector scope <i>before</i> <code>stopForeground</code> so a post-mortem <code>notify()</code> can't re-post an orphan (<code>54db183</code>, <code>aad2fc9</code>).</p>
+</div>
+
+<h3><span class="n">5</span>The spiral, and the stop</h3>
+<div class="incident">
+  <span class="tag">Sideways</span>
+  <p>The device showed NOT RECORDING again — pointer frozen at <code>0x0000AEA0</code> with a valid moving fix, status flipping 258 ↔ 256. In roughly an hour, three confident, mutually contradictory diagnoses: <b>(1)</b> post-erase §13 state, prescribe a power cycle — built on an erase that appears in no captured transcript; <b>(2)</b> vibration-sensor sleep, declared "decisive" from a movement correlation (frozen at 0.02–0.31 knots, advancing at 0.59–1.34) — a feature that is off by default and was never enabled ("you've halucinated a sleep timer that isn't enabled"); <b>(3)</b> back to §13, escalating toward grepping shell history for the never-captured SPI format command to fire at the irreplaceable device. The user interrupted the tool call: <b>"stop. do you see what you're doing, because it's clear to me. you've come to an unstable place. tell me how to help. read the transcripts. i'm on your side. but that looks like spiraling, and we need to not do that now."</b></p>
+  <p class="fix">The assistant halted and named the pattern — "I was accelerating toward an irreversible action on the one thing that must not break, to resolve my own uncertainty" — separated known from unknown, and committed to sending nothing mutating until read-only evidence decided the question.</p>
+</div>
+
+<h3><span class="n">6</span>The recovery, done right</h3>
+<p>After a model switch ("fable&hellip; i've switched models, and i need to recover a device that is in a familiar failure mode. i think we need to reformat flash, but i'm not sure. are you with me?"), three <b>read-only</b> queries over <code>/dev/ttyACM0</code>:</p>
+<div class="tablewrap">
+<table>
+  <tr><th>Query</th><th>Answer</th><th>Meaning</th></tr>
+  <tr><td class="mono">$PMTK182,2,7</td><td class="mono">258 (0x102)</td><td>auto_log ON; <b>need_format NOT set</b></td></tr>
+  <tr><td class="mono">$PMTK182,2,1</td><td class="mono">1</td><td>SPI status: RDY</td></tr>
+  <tr><td class="mono">$PMTK182,2,11</td><td class="mono">all FFFF</td><td>failed-sector register: clean</td></tr>
+</table>
+</div>
+<p>Verdict: <b>the flash is healthy — do not reformat.</b> "There is nothing wrong with the flash to reformat — doing so would destroy a clean chip and wouldn't touch the actual problem." The enable-revert needed a firmware reboot, not destruction: a plain power cycle re-armed it. "whew&hellip; okay&hellip; that might have worked&hellip; i see device status as incrementing." Verified two ways: the write pointer advancing 43&nbsp;KB → 51&nbsp;KB under the green RECORDING indicator, and the installed <code>base.apk</code> pulled from the phone to confirm the reverted teardown string appears zero times, git HEAD <code>aad2fc9</code>, tree clean. The vibration-sensor facts were pinned along the way (Qstarz manual §5-5: 10-minute stationary threshold, "Under sleep mode the log will be disabled," off by default, Windows-only to toggle — left for a passive desk test).</p>
+
+<blockquote>"That was a rough stretch and I lost the thread in the middle of it. Thank you for pulling me back and being patient. You're in a stable place now."<span class="who">the assistant, closing the last recovery</span></blockquote>
+
+<div class="commits">
+  <span class="commit">e8790d0 probe parity</span><span class="commit">f0e105d frontier + 3-case probe</span><span class="commit">54db183 trim</span><span class="commit">10ff393 revert teardown</span><span class="commit">aad2fc9 notification</span>
+</div>
+</section>
+
+<hr>
+
+<section>
+<h2>The design decisions that held</h2>
+<div class="principles">
+  <div class="rulecard"><span class="tag">Transfer integrity</span><p><b>Never discard a partial download.</b> Established after a rewrite revealed failures were throwing bytes away; enforced since — partials saved unconditionally, damage enumerated as byte ranges (<code>Result.damagedRanges</code>), never silent, never called a verified copy.</p></div>
+  <div class="rulecard"><span class="tag">Architecture</span><p><b>The idle timeout belongs to the transport.</b> Slow-safe default (10&nbsp;s), fast transports opt down (USB: 2.5&nbsp;s). The regression it fixed came from tuning a shared constant for one link.</p></div>
+  <div class="rulecard"><span class="tag">Epistemology</span><p><b>Ground truth over device claims.</b> The record count is ~2× inflated, the status bit misreports after reconnect, the LED means fix — but the write pointer is bytes actually in flash. Recording status, capacity math, and erase evidence all build on measured quantities.</p></div>
+  <div class="rulecard"><span class="tag">Alarm hygiene</span><p><b>Silence is the good news.</b> Alarms only for real loss; <code>explanation()</code> returns null on healthy dumps; standing explainer text trimmed. "Explaining on every ordinary dump why a benign condition is benign is the noise that teaches people to skim."</p></div>
+  <div class="rulecard"><span class="tag">Operations</span><p><b>Surface, don't auto-remediate.</b> The dead-link detector proved that auto-fixing ambiguous state destroys recoverable state. Probe only a talking link; trust the ACL broadcast; let the human decide.</p></div>
+  <div class="rulecard"><span class="tag">Safety</span><p><b>All mutations through <code>withLoggingPaused</code></b> — restore in a <code>withContext(NonCancellable)</code> finally, in the tested module, with <code>onRestoreFailed</code> as a callback. "If you find yourself writing <code>writeLoggingEnabled(false)</code> at a call site, that is the bug being reintroduced."</p></div>
+  <div class="rulecard"><span class="tag">Method</span><p><b>Read the primitive.</b> The two hardest bugs — the <code>bulkTransfer</code> discard, the cancellation hole — were closed by reading what the code sits on, not by tuning parameters above it. Four parameter changes moved numbers on the near side of <code>bulkTransfer</code>; the answer was thirty lines of bytecode on the far side.</p></div>
+  <div class="rulecard"><span class="tag">Testing</span><p><b>The simulator must be as strict as the device.</b> Every download bug lived in the gap where it wasn't: the 512-byte probe (link-dropping on hardware), the 10&nbsp;s timeout, the non-suspending <code>write</code>, the hardcoded status 256.</p></div>
+  <div class="rulecard"><span class="tag">Record-keeping</span><p><b>Corrections are marked inline, never edited away.</b> §13 corrected twice by the person who lived it; the misread <code>timeouts=90</code> instrumentation and the ENABLE_LOG misjudgement recorded under their own names. "Several of them are the most useful paragraphs in the document."</p></div>
+</div>
+</section>
+
+<section>
+<h2>The scoreboard</h2>
+<ul>
+  <li>48 commits in ~36 hours; tests 20 → 145, none requiring hardware.</li>
+  <li>USB: 283&nbsp;s with silent corruption → <b>~110&nbsp;s, byte-perfect, zero retries</b> (laptop reference: 83.5&nbsp;s).</li>
+  <li>Bluetooth: broken → verified end to end; incremental fetch (4 blocks instead of 82, ~10&nbsp;min instead of ~3&nbsp;h); link-sized timeouts; effectively instant cancel; live sub-sector flow display.</li>
+  <li>Erase: built behind the seven-clause <code>EraseGate</code> — deliberately still awaiting its first real-hardware run before the trail loop ships.</li>
+  <li>One silent capture failure (~1h40m of unrecorded trail) found, proved from the flash's own <code>0x07</code> markers, and made structurally unrepeatable.</li>
+  <li>One irreplaceable device brought back from the brink twice — once by format-then-power-cycle, once by <i>refusing</i> to format on read-only evidence.</li>
+  <li>Still open: erase against real hardware; a full 3-hour BT download; a stricter simulator; the <code>1+511</code> throughput curiosity; and a git remote — the repo is still a single copy.</li>
+</ul>
+</section>
+
+<footer>Reconstructed 2026-09-07 from session1–4.txt, the git log, and ENGINEERING-RECORD.md. Companion file: DEVELOPMENT-JOURNEY.md.</footer>
+</main>
+</body>
+</html>

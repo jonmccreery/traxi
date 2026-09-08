@@ -1,0 +1,1211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Traxi Engineering Record</title>
+<style>
+  :root {
+    --paper: #F6F7F4;
+    --ink: #212E28;
+    --muted: #5F6D65;
+    --line: #D7DDD5;
+    --accent: #2E6B52;
+    --accent-soft: #E4EEE8;
+    --card: #FFFFFF;
+    --code-bg: #EAEEE9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #121815;
+      --ink: #D9E0DA;
+      --muted: #8C988F;
+      --line: #29332D;
+      --accent: #7DBFA0;
+      --accent-soft: #1B2A23;
+      --card: #171F1B;
+      --code-bg: #1D2721;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, serif;
+    font-size: 17px;
+    line-height: 1.62;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 48rem; margin: 0 auto; padding: 3rem 1.4rem 5rem; }
+  h1 {
+    font-size: clamp(1.9rem, 5vw, 2.6rem);
+    line-height: 1.12;
+    margin: 0 0 1.2rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+  h2 {
+    font-size: 1.45rem; font-weight: 600; letter-spacing: -0.01em;
+    margin: 2.8rem 0 0.7rem; text-wrap: balance;
+    padding-top: 0.4rem;
+  }
+  h3 { font-size: 1.12rem; font-weight: 600; margin: 1.9rem 0 0.6rem; text-wrap: balance; }
+  h4 {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.78rem; font-weight: 700; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--muted);
+    margin: 1.6rem 0 0.6rem;
+  }
+  p { margin: 0 0 1rem; }
+  ul, ol { margin: 0 0 1rem; padding-left: 1.3rem; }
+  li { margin-bottom: 0.4rem; }
+  code {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.85em;
+    background: var(--code-bg);
+    padding: 0.1em 0.35em;
+    border-radius: 3px;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.85rem 1rem;
+    overflow-x: auto;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    margin: 1rem 0;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .tablewrap { overflow-x: auto; margin: 1.2rem 0; }
+  table {
+    border-collapse: collapse; width: 100%;
+    font-size: 0.88rem;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+  }
+  th {
+    text-align: left; font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600;
+    padding: 0.45rem 0.9rem 0.45rem 0; border-bottom: 1px solid var(--ink);
+  }
+  td { padding: 0.5rem 0.9rem 0.5rem 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  blockquote {
+    margin: 1.3rem 0;
+    padding: 0.9rem 1.15rem;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--accent);
+    border-radius: 6px;
+  }
+  blockquote > :first-child { margin-top: 0; }
+  blockquote > :last-child, blockquote p:last-child { margin-bottom: 0; }
+  blockquote h2 { margin-top: 0; font-size: 1.2rem; }
+  blockquote blockquote { border-left-color: var(--muted); margin: 1rem 0; }
+  del { color: var(--muted); text-decoration: line-through; }
+  hr { border: none; border-top: 1px solid var(--line); margin: 2.6rem 0; }
+  a { color: var(--accent); overflow-wrap: anywhere; }
+  strong { font-weight: 700; }
+</style>
+</head>
+<body>
+<main>
+<h1>Traxi: engineering record through v1</h1>
+<p>Started as a handoff for one unsolved USB corruption problem and grew into the
+project's record, because the two hardest bugs here were both found the same
+way — by reading evidence rather than reasoning about the code — and the
+evidence is worth keeping.</p>
+<p>Everything here is measured, not inferred, unless explicitly marked as a
+hypothesis. Corrections made after the fact are marked inline rather than
+edited away; several of them are the most useful paragraphs in the document.</p>
+<p><strong>v1 closed 2026-09-06.</strong> USB transport fixed, erase built and gated, and a
+silent capture failure found and closed — see §12, which is the one section to
+read if you read nothing else.</p>
+<p><strong>Renamed 2026-09-06, immediately after v1 closed.</strong> The project was <code>btdroid</code>
+in <code>ai.moonlite.btdroid</code> for its whole development; it is now <strong>Traxi</strong> in
+<code>thru.taxi.traxi</code>. Everything before this point in the git history says
+<code>btdroid</code>, and commit hashes quoted in this document are from that era — they
+are still valid, the name around them changed. The namespace also moved off
+<code>ai.moonlite</code>, which was never right: this is a personal project, not company
+work. See §14 for what the rename touched and the one thing it deliberately
+destroyed.</p>
+<blockquote>
+<h2>RESOLVED 2026-09-06 11:00 — commit <code>eadbb81</code></h2>
+<p><strong>Cause:</strong> <code>CommonUsbSerialPort.read</code> branches on its timeout argument.</p>
+<p><code>java
+if (timeout != 0) nread = mConnection.bulkTransfer(ep, dest, len, timeout);
+else { mUsbRequest.queue(ByteBuffer.wrap(dest, 0, len), len);
+       mConnection.requestWait(); nread = buf.position(); }</code></p>
+<p><code>bulkTransfer</code> returns <code>-1</code> on timeout and <strong>discards the bytes already
+received into that URB</strong> — the caller cannot even learn how many there were.
+We passed <code>readTimeout = 200</code>, so every read took that path.</p>
+<p><strong>Fix:</strong> <code>readTimeout = 0</code>, which selects the <code>UsbRequest</code> path. It has no
+timeout to expire and so has nothing to discard. Also raised <code>readBufferSize</code>
+off the library's one-max-packet default.</p>
+<p><strong>Result, full 86-block read:</strong> 0 retries, 0 malformed chunk lines, 0
+unrecovered gaps, slowest block 1317 ms (was 10,782 ms), 95 s of block time.
+Byte-identical to <code>data/usb_final.bin</code> across the entire 5,479,850-byte common
+prefix. Capture and transcript at <code>data/usb_clean_2026-09-06.{bin,log}</code>.</p>
+<p><strong>If the logger has stopped recording, go straight to §13</strong> — it has the
+recovery sequence, and the power cycle in step 2 is the part that is easy to
+miss. <strong>If you read one thing here, read §12</strong> — the silent capture failure, which
+is the only bug in this project that can cost data that never existed. After
+that, §4.1 — why the same defect survived a
+full hand-rolled implementation, a reader-thread rewrite and a library swap,
+and what that should have told us three attempts earlier.</p>
+<p>Sections 1–5 and 10 below are kept as the record of how it was found. <strong>§6
+(device facts), §7 (environment), §8 (code map) and §9 (traps) are still
+current and still worth reading.</strong> Corrections from the resolving session are
+marked inline.</p>
+</blockquote>
+<hr />
+<h2>1. The problem, stated precisely</h2>
+<p>Reading the logger's flash over USB from the phone, roughly <strong>1 block in 8
+comes back short</strong>, missing whole 2048-byte chunks. The downloader retries and
+almost always succeeds, so the final image is usually correct — but:</p>
+<ul>
+<li>retries cost time (152 s instead of ~95 s for a full read);</li>
+<li>if all three attempts on a block fail, the image has a <strong>hole filled with
+  <code>0xFF</code>, which is byte-identical to erased flash</strong>. The app detects and
+  reports this (<code>Result.damagedRanges</code>) and refuses to call such a dump
+  complete, but the underlying loss is real.</li>
+</ul>
+<p><strong>The same device over the same cable from the laptop shows zero corruption</strong>
+(83.5 s, 0 retries, byte-perfect). So this is host-side, on Android.</p>
+<h3>Why it matters beyond tidiness</h3>
+<p>Prep doc §0.2: erase is the bedrock feature — dump, verify, erase, repeat is
+the only workflow that covers a thru-hike. A damaged dump must never be the
+"verified copy" that licenses erasing the device. Today the damage is detected,
+so this is safe; but a transport that loses data is a bad foundation for a
+feature whose failure mode is losing a week of trail.</p>
+<hr />
+<h2>2. The single best clue</h2>
+<p><strong>Corrupted lines are not randomly sized.</strong> From one instrumented run
+(02:13:27, 86 blocks):</p>
+<pre><code>malformed line lengths, excluding the 42-char log prefix:
+   9 x exactly 2840 chars
+   2 x exactly 6961 chars
+   3 x short NMEA fragments (22, 28, 94)
+</code></pre>
+<p>A healthy chunk sentence is <code>$PMTK182,8,AAAAAAAA,</code> (20) + 4096 hex + <code>*XX</code> (3)
+= <strong>4119 chars</strong>, plus CRLF = 4121 bytes on the wire.</p>
+<p>Nine lines at <em>precisely</em> 2840 is not packet loss — random corruption does not
+land on the same byte count nine times. <strong>That is a fixed buffer boundary
+somewhere in the stack.</strong></p>
+<p>And <code>6961 = 4119 + 2842</code>: an over-long line is one good sentence with a
+~2840 fragment welded onto it. Same quantum, twice. Note the over-long line
+contains <strong>no second <code>$</code></strong>, so it is not two intact sentences concatenated —
+the second sentence's header was lost too.</p>
+<p>Also observed: a truncated line ends <code>...C606*5A</code>, i.e. structurally valid with
+a checksum terminator. So framing survives and bytes vanish from the <strong>middle
+of the hex payload</strong>.</p>
+<p>Arithmetic worth chasing: <code>4121 - 2840 = 1281</code>, and <code>1280 = 20 x 64</code> (the
+endpoint max packet size). One byte off from a clean 20-packet loss.</p>
+<blockquote>
+<p><strong>Resolved.</strong> The clue was sound and the reasoning from it was right: a fixed
+quantum meant a buffer boundary, not packet loss. It was a whole number of
+packets discarded by a timing-out <code>bulkTransfer</code>. The stray one byte is the
+42-char log-prefix assumption being off by one, not a real remainder — do not
+read significance into it.</p>
+</blockquote>
+<hr />
+<h2>3. Ranked hypotheses for next session</h2>
+<blockquote>
+<p><strong>Outcome:</strong> H1 was wrong and cost nothing to disprove — <code>step()</code> already
+copies. H2 was the right instinct and the right first move; reading the
+library's <code>read()</code> from the AAR found the mechanism <em>without a device run</em>.
+H3 was nearly correct: the cure was not to bypass <code>SerialInputOutputManager</code>
+but to change the one argument that decides which read path it uses. H4 and
+H5 were never needed.</p>
+<p><strong>The lesson worth carrying is in §4.1.</strong> In short: the answer was thirty
+lines of the dependency's bytecode, after a whole session of parameter changes
+on the near side of the interface.</p>
+</blockquote>
+<h3>H1 — the library reuses its read buffer (start here, one line to test)</h3>
+<blockquote>
+<p><strong>Disproved, no device needed.</strong> <code>SerialInputOutputManager.step()</code> does
+<code>System.arraycopy</code> into a fresh <code>new byte[len]</code> before calling <code>onNewData</code>.</p>
+</blockquote>
+<p><code>UsbSerialTransport.onNewData(data: ByteArray)</code> currently does:</p>
+<pre><code class="language-kotlin">override fun onNewData(data: ByteArray) {
+    if (!incoming.offer(data)) note(...)   // &lt;-- stores the reference
+}
+</code></pre>
+<p>If <code>SerialInputOutputManager</code> passes its <strong>internal</strong> buffer rather than a
+fresh copy, then queued entries get overwritten by subsequent reads. That
+produces exactly the observed signature: corruption of a <strong>fixed size</strong>, in the
+middle of payloads, with framing intact.</p>
+<p>Test: <code>incoming.offer(data.copyOf())</code>. One line. Run and compare malformed
+counts.</p>
+<p>Caveat that keeps this from being certain: the earlier hand-rolled reader
+thread <em>did</em> copy (<code>buffer.copyOf(n)</code>) and still corrupted — but its failure
+mode was whole-chunk loss, which is not the same signature. Worth eliminating
+first regardless because it is nearly free.</p>
+<h3>H2 — find the 2840 constant</h3>
+<p>Pull the library source for 3.8.1 and grep for buffer sizes:
+<code>SerialInputOutputManager.DEFAULT_READ_BUFFER_SIZE</code>, <code>readBufferSize</code>,
+<code>CdcAcmSerialPort.read</code> paths. Then instrument <code>onNewData</code> to log
+<code>data.size</code> for a whole run and look at the distribution:</p>
+<pre><code class="language-kotlin">override fun onNewData(data: ByteArray) {
+    sizes.merge(data.size, 1, Int::plus)   // dump the histogram periodically
+</code></pre>
+<p>If there is a dominant delivery size and the losses are a whole number of them,
+that names the mechanism instead of guessing at it.</p>
+<h3>H3 — bypass SerialInputOutputManager</h3>
+<p>Use <code>port.read(buf, timeout)</code> in a dedicated thread instead of the IO manager.
+<code>UsbSerialPort.read</code> uses <code>UsbRequest</code> internally for some drivers and has
+different buffer handling. This is a contained experiment — the <code>Transport</code>
+interface does not change.</p>
+<h3>H4 — the phone's USB stack under concurrent load</h3>
+<p>The phone is also running wireless ADB, the foreground service, and Compose
+recomposition during the download. The laptop was doing nothing else.
+Test: run a download with the screen off and ADB over USB <em>disconnected</em>
+(start it, then unplug ADB), and compare retry counts. Cheap, and would
+separate "Android USB is fine" from "Android USB is fine when idle".</p>
+<h3>H5 — device-side overrun (partially tested, inconclusive)</h3>
+<p>Requesting 8 KB per <code>PMTK182,7</code> instead of 64 KB was tried and made things
+<strong>worse</strong>, so the simple version of this is ruled out. But request <em>pacing</em>
+(a short delay between requests, rather than smaller requests) was never tried.</p>
+<hr />
+<h2>4. What has already been tried, and what it bought</h2>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Attempt</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Floor the bulk read timeout at 250 ms</td>
+<td>No change. Wrong mechanism: losses were whole chunks, not truncated transfers. <strong>But see §4.1 — <code>git log -S</code> finds no such change ever committed, so it is unclear what this was measured against</strong></td>
+</tr>
+<tr>
+<td>Hand-rolled reader thread keeping a read posted</td>
+<td>Whole-chunk loss went 5 gaps → 0; retries and malformed lines remained</td>
+</tr>
+<tr>
+<td>Raise transfer timeout to 10 s</td>
+<td><strong>Worse.</strong> A larger buffer waiting longer accumulates more data before the timeout discards it</td>
+</tr>
+<tr>
+<td>Split requests into 8 KB for flow control</td>
+<td><strong>Worse.</strong> Reverted</td>
+</tr>
+<tr>
+<td>Swap to <code>usb-serial-for-android</code> 3.8.1</td>
+<td>Unrecovered gaps 5 → 1. Retries and the fixed-size corruption persist</td>
+</tr>
+<tr>
+<td>Shorten block idle timeout 10 s → 2.5 s</td>
+<td>240 s → 152 s, damage recovered rather than kept. Does not touch the corruption</td>
+</tr>
+<tr>
+<td><strong><code>readTimeout</code> 200 → 0, <code>readBufferSize</code> 64 → 4096</strong></td>
+<td><strong>Fixed it.</strong> 0 retries, 0 malformed, 0 gaps, 95 s</td>
+</tr>
+</tbody>
+</table></div>
+<p>The 10 s row above is not just a failed attempt — it is direct evidence for the
+real mechanism, and was already correctly interpreted at the time ("a larger
+buffer waiting longer accumulates more data before the timeout discards it").
+The sentence names the bug. What was missing was that the timeout could be
+turned <em>off</em> rather than tuned.</p>
+<p><strong>Lesson from the session:</strong> every change made without a measured mechanism
+either did nothing or made it worse. The two that helped came from
+instrumentation. Measure first.</p>
+<hr />
+<h2>4.1 Why the hand-rolled transport had the same disease</h2>
+<p>Written after the fix, from the reverted code in <code>a5e9662</code>, <code>348972a</code> and
+<code>20a4b93</code>. This is the more useful cautionary tale, because the bug survived a
+complete rewrite of the transport and a change of library — which is precisely
+the signature of a defect in the <em>primitive</em> rather than in the code around it.</p>
+<h3>It was never escapable</h3>
+<p><code>UsbDeviceConnection.bulkTransfer</code> <strong>is</strong> the discard-on-timeout API, and it is
+the only read primitive the hand-rolled transport ever used. Android's non-lossy
+path — <code>UsbRequest.queue()</code> + <code>connection.requestWait()</code> — appears nowhere in
+those three commits. There was no argument you could pass to get correctness.</p>
+<h3>The first version had a feedback loop</h3>
+<p><code>a5e9662</code> called it straight from <code>read()</code>:</p>
+<pre><code class="language-kotlin">val n = conn.bulkTransfer(ep, dest, 0, dest.size, timeoutMillis.toInt().coerceAtLeast(1))
+</code></pre>
+<p>and <code>PmtkClient.awaitSentence</code> hands <code>read()</code> a <strong>shrinking</strong> budget:</p>
+<pre><code class="language-kotlin">val remaining = deadline - clock()
+val n = transport.read(readBuffer, remaining)
+</code></pre>
+<p>So as a block neared its deadline the URB timeout decayed — 500 ms, 200, 50, 5,
+floored at <strong>1 ms</strong> — and every expiry binned whatever that URB had collected.</p>
+<p>That is a positive feedback loop. Lose bytes → the block takes longer → the
+deadline is nearer → timeouts get shorter → more URBs are discarded per second →
+lose more bytes. It accounts for two things measured at the time but never
+connected: block times were bimodal (~1 s or blown out to 10 s, with nothing in
+between), and failures clustered at roughly 1 in 8 rather than spreading evenly.
+A block that began losing data was likely to keep losing it.</p>
+<h3>The reader thread fixed a real bug, just not this one</h3>
+<p><code>20a4b93</code> was correctly diagnosed and genuinely worked: decoupling reads from
+parsing closed the unposted-endpoint gap, and whole-chunk loss went 5 → 0. It
+kept the lossy primitive, though, and enlarged the wound:</p>
+<pre><code class="language-kotlin">private const val READ_TIMEOUT = 500
+private const val READ_BUFFER_BYTES = 16 * 1024
+val n = conn.bulkTransfer(ep, buffer, 0, buffer.size, READ_TIMEOUT)
+</code></pre>
+<p>A fixed 500 ms stopped the decay, but a 16 KB buffer meant each expiry could
+discard up to 16 KB — the largest loss quantum of any version. The
+instrumentation counted them and nobody read them as losses:</p>
+<pre><code>reads=46250  timeouts=90 (0.2%)  slow&gt;250ms=266  avg=267 bytes/read
+</code></pre>
+<p><strong>Those 90 timeouts were 90 discard events.</strong> They were in the transcript the
+whole time, labelled as timeouts.</p>
+<h3>The library swap moved the quantum, not the bug</h3>
+<p><code>9fac12b</code> set <code>readTimeout = 200</code>, so <code>SerialInputOutputManager</code> called the same
+<code>bulkTransfer</code>. What improved was incidental: SIOM sizes its buffer at one max
+packet, so the loss quantum collapsed from 16 KB to 64 bytes and unrecovered
+gaps went 5 → 1. Same weapon, smaller wounds.</p>
+<p>That is the through-line for the entire table in §4. Timeout floor, buffer size,
+request splitting, longer timeout — every one of them moved the <em>quantum</em> of the
+discard. None of them removed the discard.</p>
+<h3>What the library was actually worth</h3>
+<p>Not the drivers, and not the fix. <code>READ_TIMEOUT = 0</code> would have worked in the
+hand-rolled version too, since <code>bulkTransfer</code> documents 0 as infinite. But an
+infinite <code>bulkTransfer</code> parks a thread in a native ioctl that <code>Thread.interrupt</code>
+cannot abort, and <code>close()</code> did exactly that:</p>
+<pre><code class="language-kotlin">running = false
+reader?.interrupt()
+</code></pre>
+<p>On disconnect, that hangs. <code>UsbRequest</code> is cancellable — <code>port.close()</code> calls
+<code>mUsbRequest.cancel()</code>, which is what makes <code>readTimeout = 0</code> safe to ship.
+<strong>The library did not supply the fix; it supplied a read path the fix could be
+applied to.</strong></p>
+<h3>The lesson to carry</h3>
+<p>Measure first is right but insufficient — this session measured constantly. The
+sharper rule:</p>
+<blockquote>
+<p><strong>When one symptom survives several well-reasoned fixes, stop tuning
+parameters and go read the primitive.</strong></p>
+</blockquote>
+<p>Four attempts moved numbers around on the near side of <code>bulkTransfer</code>. The
+answer was thirty lines of bytecode on the far side, reachable in minutes:</p>
+<pre><code class="language-bash">unzip -o ~/.gradle/caches/modules-2/files-2.1/com.github.mik3y/\
+usb-serial-for-android/3.8.1/*/usb-serial-for-android-3.8.1.aar classes.jar
+unzip -o classes.jar &amp;&amp; javap -p -c com/hoho/android/usbserial/driver/CommonUsbSerialPort.class
+</code></pre>
+<p>No device, no run, no guessing. When a dependency's behaviour is the suspect,
+decompile the dependency.</p>
+<hr />
+<h2>5. All measurements to date</h2>
+<h3>Laptop, Python, direct to <code>/dev/ttyACM0</code> — the reference</h3>
+<pre><code>5,505,024 bytes in 83.5 s   64.4 KB/s   0 retries   0 corruption
+</code></pre>
+<p>Script: <code>$CLAUDE_JOB_DIR/tmp/fulldump.py</code> (see §7 to recreate).</p>
+<h3>Phone runs</h3>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Run</th>
+<th>Transport</th>
+<th>Wall</th>
+<th>Retries</th>
+<th>Malformed</th>
+<th>Unrecovered gaps</th>
+<th>Damaged</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>00:55</td>
+<td>hand-rolled, synchronous</td>
+<td>283 s</td>
+<td>~14</td>
+<td>—</td>
+<td>yes</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>01:23</td>
+<td>+ timeout floor</td>
+<td>274 s</td>
+<td>—</td>
+<td>26</td>
+<td>5 (12,288 B)</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>01:38</td>
+<td>+ reader thread</td>
+<td>~188 s</td>
+<td>—</td>
+<td>10</td>
+<td>0</td>
+<td>no</td>
+</tr>
+<tr>
+<td>01:56</td>
+<td>+ 8 KB requests</td>
+<td>aborted</td>
+<td>rising</td>
+<td>—</td>
+<td>—</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>02:13</td>
+<td>library, 64 KB</td>
+<td>240 s</td>
+<td>11</td>
+<td>14</td>
+<td>1 (2,048 B)</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><strong>02:22</strong></td>
+<td><strong>library + 2.5 s idle</strong></td>
+<td><strong>152 s</strong></td>
+<td><strong>10</strong></td>
+<td>—</td>
+<td><strong>0</strong></td>
+<td><strong>no</strong></td>
+</tr>
+<tr>
+<td><strong>11:00</strong></td>
+<td><strong>+ <code>readTimeout = 0</code></strong></td>
+<td><strong>~110 s</strong></td>
+<td><strong>0</strong></td>
+<td><strong>0</strong></td>
+<td><strong>0</strong></td>
+<td><strong>no</strong></td>
+</tr>
+</tbody>
+</table></div>
+<h3>Per-block timing, run 02:13 (86 blocks)</h3>
+<pre><code>min 772 ms   median 1072 ms   p90 1210 ms   max 10782 ms
+total block time 101 s   against 240 s wall clock
+</code></pre>
+<p><strong>The link is fast.</strong> 1072 ms per 64 KB = 61 KB/s, matching the laptop. The
+139 s difference was retry wait, and only <em>one</em> block appeared slow because the
+timing note logs the final attempt only — a real reporting blind spot to keep
+in mind.</p>
+<h3>Read accounting, run 01:38 (hand-rolled reader thread)</h3>
+<pre><code>reads=46250  timeouts=90 (0.2%)  slow&gt;250ms=266  avg=267 bytes/read
+</code></pre>
+<p><code>avg 267 bytes/read</code> against an 8 KB buffer is itself notable — transfers were
+completing far short of the buffer.</p>
+<h3>Final verification, run 02:22</h3>
+<pre><code>5,636,096 bytes   0 checksum failures   129,115 records   84 sectors
+span 2025-03-16T07:01:52Z -&gt; 2026-09-06T07:24:56Z
+format change @ 0x00535FDA -&gt; 0x000A1C3F
+first byte differing from the previously verified capture: 0x0053602A
+  (exactly the write pointer at that capture, so all differences are new data)
+</code></pre>
+<hr />
+<h2>6. Device facts you should not have to rediscover</h2>
+<h3>Identity</h3>
+<pre><code>Qstarz BT-Q1000XT     USB 0e8d:3329     MediaTek, native CDC-ACM, no bridge chip
+firmware AXN_1.30-B_1.3_C01   model id 0008
+flash: EON 8 MB, JEDEC 1C 70 17 (from $PMTK182,3,9 — it is an RDID, not a size)
+</code></pre>
+<h3>USB descriptor layout — <strong>reversed from the normal CDC arrangement</strong></h3>
+<pre><code>if0  class=0x0A (CDC DATA)   ep 0x81 IN bulk, 0x01 OUT bulk, max packet 64
+if1  class=0x02 (CDC COMM)   ep 0x82 IN interrupt
+</code></pre>
+<p>Standard CDC puts COMM at 0 and DATA at 1. Consequences:</p>
+<ul>
+<li>CDC control requests (<code>SET_LINE_CODING</code> 0x20, <code>SET_CONTROL_LINE_STATE</code> 0x22)
+  must use <strong><code>wIndex = 1</code></strong>. Hardcoding 0 sends them to the data interface,
+  which refuses them. That cost an hour: the link opened, writes were accepted,
+  and nothing ever came back.</li>
+<li><strong>The device is mute until DTR is asserted.</strong></li>
+</ul>
+<h3>Response shape</h3>
+<ul>
+<li><code>PMTK182,7,&lt;addr&gt;,&lt;len&gt;</code> is answered as <code>PMTK182,8,&lt;addr&gt;,&lt;hex&gt;</code> in
+  <strong>2048-byte payload chunks</strong> — 4119-char sentences, 4121 bytes with CRLF.</li>
+<li><del>2048 is an exact multiple of the 64-byte packet size, so <strong>a large bulk read
+  has no short packet to terminate it</strong>. This is why big read buffers behave
+  badly here.</del></li>
+</ul>
+<blockquote>
+<p><strong>Wrong, and it steered a whole session away from the fix.</strong> Big read
+buffers behaved badly because a timing-out <code>bulkTransfer</code> discarded them,
+not for want of a short packet. Short packets arrive constantly. The
+measured delivery histogram on a clean run:</p>
+<p><code>usb reads=42000 avg=268 sizes: 1x19472 511x19465 537x2288 25x245 20x139</code></p>
+<p>The device emits in ~512-byte units split as <code>1 + 511</code> — the two counts are
+exactly paired from the first sample on — and each ends short. Deliveries
+never exceed 537 bytes even behind a 4096-byte buffer, so transfers are
+bounded by the firmware's write granularity. <strong>Raising <code>readBufferSize</code>
+above 4096 would gain nothing.</strong>
+- Read length must be even. Odd lengths are silently ignored.
+- A 512-byte read request is ignored <em>and drops the link</em>. Only full-block
+  reads have ever been reliable.</p>
+</blockquote>
+<h3>Speeds</h3>
+<pre><code>USB   61-64 KB/s      full read ~95 s of transfer
+BT    493 B/s         full read ~3 hours (internal 9600-baud UART bridge)
+</code></pre>
+<h3>Current logger configuration (changed during the session)</h3>
+<pre><code>log format  0x000A1C3F   (UTC,VALID,LAT,LON,HEIGHT,SPEED,HDOP,VDOP,NSAT,RCR,DISTANCE)
+interval    5.0 s        (was 20.0 s)
+record size 48 bytes     (was 42)
+</code></pre>
+<p>Two consequences: the flash now contains <strong>two record formats</strong> with a
+type-<code>0x02</code> format-change marker at <code>0x00535FDA</code> (the parser handles this), and
+flash burn is ~5.5x faster — roughly <strong>5 days</strong> of capacity from the current
+write pointer rather than 31.</p>
+<h3>Bluetooth, for reference</h3>
+<pre><code>Qstarz 1000XT   00:1C:88:22:15:98   SPP 0x1101, RFCOMM channel 1
+LegacyPairing: yes     PIN: 0000  (1111 is rejected)
+</code></pre>
+<p>The link key goes stale across a device power cycle while Android keeps hers,
+so <code>bondState</code> reads <code>BOND_BONDED</code> and nothing prompts for a PIN. The app
+detects a connect failure on a bonded device, clears the bond and re-pairs.</p>
+<hr />
+<h2>7. Getting the environment running</h2>
+<h3>Toolchain (installed this session, not in the repo)</h3>
+<pre><code class="language-bash">export ANDROID_HOME=$HOME/android-sdk        # SDK 35, build-tools 35.0.0
+GRADLE=~/tools/gradle-8.11.1/bin/gradle
+ADB=/opt/android-sdk/platform-tools/adb
+</code></pre>
+<pre><code class="language-bash">cd /home/taxi/traxi
+$GRADLE :core:test              # 69 tests, no device needed
+$GRADLE :app:assembleDebug
+</code></pre>
+<h3>Phone</h3>
+<pre><code>Samsung SM-G990U1, Android 16 / API 36
+package: thru.taxi.traxi.debug
+</code></pre>
+<p>Wireless ADB is essential — the USB port is needed for the logger:</p>
+<pre><code class="language-bash"># with the phone on USB first:
+$ADB tcpip 5555
+$ADB connect &lt;phone-ip&gt;:5555      # was 192.168.86.36:5555
+# then unplug and use the port for the logger
+</code></pre>
+<p>WiFi network <code>Maple East</code>, password in NetworkManager
+(<code>nmcli device wifi show-password</code>). Get the phone's IP with
+<code>$ADB shell ip -f inet addr show wlan0</code>.</p>
+<h3>Laptop-side access to the logger</h3>
+<p><code>/dev/ttyACM0</code> is <code>root:uucp 660</code>. The user is in <code>uucp</code> in <code>/etc/group</code> but
+sessions predate it, so either re-login or:</p>
+<pre><code class="language-bash">sudo chown taxi /dev/ttyACM0     # resets on replug
+</code></pre>
+<h3>Driving the app (1080x2340 screen)</h3>
+<p><code>uiautomator</code> is far cheaper than screenshots for reading state:</p>
+<pre><code class="language-bash">state() { $ADB shell uiautomator dump /sdcard/ui.xml &gt;/dev/null 2&gt;&amp;1
+          $ADB shell cat /sdcard/ui.xml | grep -oE 'text=&quot;[^&quot;]*&quot;' | sed 's/text=&quot;//;s/&quot;$//'; }
+</code></pre>
+<p>Tap targets, verified this session:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Target</th>
+<th>Coordinates</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Connect over USB</td>
+<td><code>539 676</code></td>
+</tr>
+<tr>
+<td>Download flash (Dumps tab)</td>
+<td><code>539 676</code></td>
+</tr>
+<tr>
+<td>Fetch new (first saved dump)</td>
+<td><code>199 1292</code></td>
+</tr>
+<tr>
+<td>Device / Dumps / Config / Log tabs</td>
+<td><code>127</code> / <code>401</code> / <code>578</code> / <code>951</code> at <code>2118</code></td>
+</tr>
+<tr>
+<td>Share (Log tab)</td>
+<td><code>163 644</code></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>Always screenshot or <code>state()</code> before tapping.</strong> Layout shifts when cards
+appear — a parse-summary card once pushed the dump list down and a blind tap
+landed on the wrong control. Worse, a stale share sheet was once in front,
+where blind taps could have sent a file to a contact.</p>
+<h3>Getting the transcript off the phone</h3>
+<p>The Share button writes the file <em>before</em> opening the chooser, so:</p>
+<pre><code class="language-bash">$ADB shell input tap 951 2118          # Log tab
+$ADB shell input tap 163 644           # Share (writes cache/exports/)
+$ADB shell input keyevent KEYCODE_BACK # dismiss chooser, sends nothing
+$ADB exec-out run-as thru.taxi.traxi.debug \
+    cat cache/exports/traxi-transcript.txt &gt; transcript.txt
+</code></pre>
+<h3>Analysing a transcript</h3>
+<pre><code class="language-bash">T=transcript.txt
+grep -c 'dropped malformed' &quot;$T&quot;                  # corrupted sentences
+grep -cE 'attempt [0-9]+ of' &quot;$T&quot;                 # retries
+grep 'missing 0x' &quot;$T&quot;                            # unrecovered gaps
+grep 'usb reads=' &quot;$T&quot; | tail -3                  # read accounting
+grep 'dropped malformed' &quot;$T&quot; | awk '{print length($0)-42}' | sort -n | uniq -c
+
+# per-block timing distribution
+grep -oE 'block 0x[0-9A-F]{8} [0-9]+/65536 bytes, [0-9]+ chunks, [0-9]+ ms' &quot;$T&quot; \
+ | awk '{gsub(&quot;ms&quot;,&quot;&quot;,$7); print $7}' | sort -n | awk '
+  {a[NR]=$1;s+=$1} END{printf &quot;n=%d min=%d med=%d p90=%d max=%d total=%.0fs\n&quot;,
+  NR,a[1],a[int(NR/2)],a[int(NR*0.9)],a[NR],s/1000}'
+</code></pre>
+<h3>Live monitoring during a run</h3>
+<p>Poll every 15 s; retries are the failure signal and appear in the UI:</p>
+<pre><code class="language-bash">$ADB shell dumpsys activity services thru.taxi.traxi.debug | grep -c DownloadService
+# and state() | awk '/^Downloading$/{f=1;next} /^Stop/{f=0} f'
+</code></pre>
+<hr />
+<h2>8. Code map</h2>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Path</th>
+<th>What to know</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>app/.../usb/UsbSerialTransport.kt</code></td>
+<td>The suspect. Library-based; <code>onNewData</code> → queue → <code>read()</code></td>
+</tr>
+<tr>
+<td><code>app/.../usb/UsbPermission.kt</code></td>
+<td>One-time per-device permission; implicitly granted via the attach intent</td>
+</tr>
+<tr>
+<td><code>core/.../protocol/PmtkClient.kt</code></td>
+<td><code>readLogBlock</code> (gap/timing instrumentation lives here), <code>awaitSentence</code>, bulk payloads elided from the transcript</td>
+</tr>
+<tr>
+<td><code>core/.../protocol/FlashDownloader.kt</code></td>
+<td>Block loop, <code>ATTEMPTS_PER_BLOCK = 3</code>, <code>BLOCK_IDLE_TIMEOUT = 2500</code>, <code>Result.damagedRanges</code></td>
+</tr>
+<tr>
+<td><code>core/.../protocol/Nmea.kt</code></td>
+<td><code>NmeaLineAssembler</code> — where a corrupted sentence becomes a dropped chunk</td>
+</tr>
+<tr>
+<td><code>core/.../transport/FileReplayTransport.kt</code></td>
+<td><code>SimulatedLoggerTransport</code> — <strong>more permissive than the device</strong>, see §9</td>
+</tr>
+<tr>
+<td><code>app/.../session/SessionController.kt</code></td>
+<td><code>connectUsb</code>, download orchestration, damage reporting</td>
+</tr>
+</tbody>
+</table></div>
+<p>The <code>Transport</code> interface has held unchanged through five transport rewrites.
+Everything above it — <code>PmtkClient</code>, <code>FlashDownloader</code>, incremental fetch — is
+covered by 69 tests and has never needed to change for a transport problem.</p>
+<hr />
+<h2>9. Traps</h2>
+<p><strong>The simulator is more forgiving than the device.</strong> <code>SimulatedLoggerTransport</code>
+accepts any read length, answers instantly, and never drops the link. <em>Every</em>
+download bug this project has had lived in that gap: the 10 s block timeout, the
+stale-chunk contamination, the 512-byte wrap probe. Consider tightening it to
+reject sub-block reads and to pace deliveries, so this class of bug fails on the
+desktop instead of at trail speed.</p>
+<p><strong>Per-block timing logs only the final attempt.</strong> A block that took three tries
+shows one fast time. This hid 110 s of retry cost across a 240 s run. If you add
+timing, log per attempt.</p>
+<p><strong><code>0xFF</code> is ambiguous.</strong> A missing chunk and erased flash are byte-identical.
+Never treat a short block as end-of-flash; erased sectors still <em>answer</em>, with
+<code>0xFF</code> data. <code>Result.damagedRanges</code> exists so this can never be silent again.</p>
+<p><strong>Never stop a download at the write pointer.</strong> In <code>OVERLAP</code> mode a wrapped log
+keeps its oldest records <em>past</em> the pointer. Termination is two consecutive
+unwritten blocks, which is correct in both states.</p>
+<p><strong>Everything the device says about itself is suspect</strong> — with two exceptions
+discovered late: the flash-size query returns a decodable JEDEC RDID, and field
+8 is a byte address rather than the record count mtkbabel labels it. Its
+<em>record count</em> (247,133 vs 126,613 actual) is genuinely wrong.</p>
+<p><strong>Don't reinstall the app over a live Bluetooth connection.</strong> Force-stop
+orphans the socket, and the logger serves one SPP client, so the next connect
+fails confusingly.</p>
+<hr />
+<h2>10. Suggested plan</h2>
+<ol>
+<li><strong>H1</strong>: <code>data.copyOf()</code> in <code>onNewData</code>. One line, run, compare malformed
+   count. Nearly free and matches the signature.</li>
+<li><strong>H2</strong>: instrument <code>onNewData</code> sizes; find the constant behind 2840.</li>
+<li><strong>H4</strong>: run with ADB detached and screen off — separates "Android USB" from
+   "Android USB under load". No code change.</li>
+<li><strong>H3</strong>: swap <code>SerialInputOutputManager</code> for <code>port.read()</code> on a thread.</li>
+<li>If all fail: capture on the laptop with <code>usbmon</code> while the <em>phone</em> drives
+   the device — not possible directly, but a USB analyser or a passive tap
+   would show whether the bytes leave the device.</li>
+</ol>
+<p><strong>Definition of done:</strong> a full read with <strong>zero retries and zero malformed
+lines</strong>, in roughly 95 s, verified byte-identical against
+<code>data/usb_final.bin</code> on the common prefix.</p>
+<blockquote>
+<p><strong>Met on the 11:00 run.</strong> 0 retries, 0 malformed chunk lines, 95 s of block
+time, identical across the whole 5,479,850-byte common prefix.</p>
+<p>The transcript still reports one malformed line, <code>0,27,15,18,,,,,,1.44,1.16,
+0.86*04</code>. It is transcript line 3, before any block read: the tail of a
+<code>$GPGSA</code> already in flight when DTR was asserted. Expect it on every connect;
+it is the live NMEA stream, not a chunk. If a future run needs a truly clean
+count, filter to <code>PMTK182,8</code> sentences.</p>
+<p><strong>Not chased, and deliberately so:</strong> the <code>1 + 511</code> split doubles the number of
+transfers (42,000 where ~21,000 would do), and per-block throughput is
+53 KB/s against the laptop's 64 KB/s. It is firmware-side write granularity,
+every unit legitimately ends in a short packet, and no host-side change can
+merge them. Correctness is unaffected.</p>
+</blockquote>
+<hr />
+<h2>11. What is already finished and should not be re-litigated</h2>
+<ul>
+<li><strong>Parser</strong>: 126,613-fix golden file, 0 checksum failures, mixed-format
+  handling, GPS week rollover (+1024 weeks), sentinel and quality masking.</li>
+<li><strong>Bluetooth</strong>: pairing, bonding with stale-key recovery, PMTK, full and
+  incremental download — proven byte-for-byte against hardware.</li>
+<li><strong>Incremental fetch</strong>: wrap-probe safety argument, verified on hardware
+  (4 blocks instead of 82; new data reconciled to the exact byte).</li>
+<li><strong>USB</strong>: clean. 0 retries, 0 corruption, ~110 s, verified byte-identical on
+  the common prefix. Do not tune transport parameters again without a measured
+  mechanism — that was the failure mode of the whole first session.</li>
+<li><strong>Erase</strong>: built, gated and tested — commit <code>94492c1</code>. All seven of prep doc
+  §0.2's clauses are implemented in <code>core/.../protocol/EraseGate.kt</code> (the
+  decision) and <code>FlashEraser.kt</code> (the sequence).</li>
+<li><strong>Recording audit</strong>: any dump reports whether the logger silently stopped —
+  see §12, which is the most important thing this project learned.</li>
+<li><strong>110 tests</strong>, none requiring hardware.</li>
+</ul>
+<p>v1 closed 2026-09-06 with the transport fixed, erase built, and the silent
+capture failure in §12 found and closed.</p>
+<p><strong>Still outstanding, in rough order:</strong></p>
+<ol>
+<li><strong>Erase against real hardware.</strong> Verified against the simulator and the
+   on-phone UI only. The one path no test can cover is the real device's
+   response to <code>PMTK182,6,1</code> — how long it actually takes, and whether the 90 s
+   <code>PmtkClient.ERASE_TIMEOUT_MILLIS</code> is right. Do it with a dump already
+   exported off the phone; that is the run where a mistake is real.</li>
+<li><strong>A full Bluetooth download.</strong> ~3 hours at 493 B/s against a nearly-full
+   chip, which is the point — the flash is deliberately being left full so the
+   long path gets exercised for real. Watch for the idle timeout and the
+   foreground service surviving a screen-off overnight run.</li>
+<li><strong>Tighten the simulator</strong> (§9). It still accepts sub-block reads and answers
+   instantly, and every download bug this project has had lived in that gap.</li>
+<li>The <code>1 + 511</code> throughput curiosity in §10, which is optional.</li>
+</ol>
+<hr />
+<h2>12. The silent capture failure — read this before touching config writes</h2>
+<p>Found 2026-09-06, and the most consequential bug in the project's history.
+Nothing else here can cost a user data that never existed in the first place.</p>
+<h3>What happened</h3>
+<p>The logger stopped recording at <code>2026-09-06T16:16:10Z</code> and stayed stopped for
+about 1h40m, through a power cycle and a re-pair, while looking completely
+normal. The user noticed only because an LED was not blinking.</p>
+<h3>Why</h3>
+<p>The device refuses configuration changes while recording, so every config write
+is a three-step sequence:</p>
+<pre><code class="language-kotlin">c.writeLoggingEnabled(false)                 // 1. stop
+c.writeConfig(TIME_INTERVAL, &quot;50&quot;)           // 2. change the setting
+c.writeLoggingEnabled(true)                  // 3. start
+</code></pre>
+<p>Step 2 threw. In Kotlin an exception exits the function, so <strong>step 3 never
+ran</strong>. The disable was deliberate and succeeded; nothing ever undid it. Because
+on/off is saved configuration rather than live state, it survived power cycles
+indefinitely.</p>
+<p>The user was told only that their <em>setting change</em> had failed.</p>
+<h3>How it was proved</h3>
+<p>Not from the app — <code>RingTranscript</code> is in memory and dies with the process, and
+two APK installs destroyed exactly the window that mattered. <strong>The device keeps
+its own record.</strong> It writes a <code>0x07</code> marker on every logging start and stop,
+inline between timestamped fixes.</p>
+<p>The fingerprint is a <code>DISABLE</code> immediately followed by another <code>DISABLE</code> — a
+stop nothing answered:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Period</th>
+<th>Unanswered stops</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2025-03-16 → 2026-09-04 (17 months)</td>
+<td><strong>0</strong></td>
+</tr>
+<tr>
+<td>2026-09-05, when the app began writing config</td>
+<td><strong>3</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>A trailing <code>DISABLE</code> is <strong>not</strong> a fault: powering the device off writes one and
+the matching start arrives at the next power-on. An early version of this
+analysis got that wrong and its own test caught it.</p>
+<h3>What now prevents it</h3>
+<ol>
+<li><code>PmtkClient.withLoggingPaused</code> restores logging in a <code>finally</code>. <strong>One place,
+   in the tested module</strong> — config writes and the eraser both route through it.</li>
+<li>A test that fails on the old code: it makes step 2 throw and asserts step 3
+   still ran.</li>
+<li>If the restore itself fails, an <code>onRestoreFailed</code> callback fires — a callback
+   and not a return value, because it must reach the caller when the body also
+   threw, which is when a <code>return</code> never runs.</li>
+<li>The Device tab shows <strong>NOT RECORDING</strong> in error colour, decoded from
+   <code>PMTK182,2,7</code> bit <code>0x02</code>, with a Resume control.</li>
+<li><code>ACTION_USB_DEVICE_DETACHED</code> is watched, so the app stops believing it is
+   connected to a device that has been unplugged.</li>
+<li><code>RecordingAudit</code> reports unanswered stops from any dump, forever.</li>
+</ol>
+<h3>The rule</h3>
+<p><strong>A clean parse says nothing about recording.</strong> Explaining on every ordinary
+dump why a benign condition is benign is the noise that teaches people to skim,
+and skimming is how the serious case gets missed. Silence is the good news.</p>
+<p>Any future code that disables logging must go through <code>withLoggingPaused</code>. If
+you find yourself writing <code>writeLoggingEnabled(false)</code> at a call site, that is
+the bug being reintroduced.</p>
+<hr />
+<h2>13. v2 — the field-testing superpowers</h2>
+<p>Agreed 2026-09-06, at the point where v1 was closed and field testing was about
+to start. All four are wanted; the order below is the order they were proposed,
+not a settled sequence. Two constraints cut across them, recorded here so they
+are not rediscovered:</p>
+<ul>
+<li><strong>The watchdog has the strongest claim on going first.</strong> It is the only one of
+  the four that attacks the §12 failure class directly, and §12 is the only
+  class of bug here that can cost data that never existed.</li>
+<li><strong>The trail loop must not ship before erase has run against real hardware</strong>
+  (§11, outstanding item 1). Wrapping an unverified erase inside a one-button
+  flow is how a deliberate step becomes an incidental one.</li>
+</ul>
+<h3>13.1 The trail loop as one button</h3>
+<p>Dump → verify → export off-phone → erase → confirm, as a single guarded flow
+over the existing <code>EraseGate</code> clauses rather than five manual steps.</p>
+<p>The case for it is the duty cycle, not the convenience: at the current 5 s
+interval the flash holds roughly 5 days, so a long trail means running this
+loop ~25 times — tired, in a tent, on a low battery. That is the condition
+under which a manual multi-step workflow loses a step.</p>
+<p><strong>Precondition:</strong> the real-hardware erase run. Until <code>PMTK182,6,1</code> has been
+timed against the device, <code>PmtkClient.ERASE_TIMEOUT_MILLIS = 90 s</code> is a guess,
+and §9's warning stands — the simulator is more forgiving than the device.</p>
+<h3>13.2 Burn-rate forecast</h3>
+<p>Turn the write pointer, log interval and record size into a real calendar date:
+"dump by &lt;date&gt;". Currently the user has to hold 5 days / 5 s / 48 bytes in
+their head.</p>
+<p>Derivable and honest from what the device reports: field 8 of the status
+response is a <strong>byte address</strong> and is trustworthy. Its <em>record count</em> is not —
+247,133 against 126,613 actual (§9). Build on field 8; ignore the count.</p>
+<h3>13.3 Recording watchdog</h3>
+<p>A periodic status poll plus a notification when <code>PMTK182,2,7</code> bit <code>0x02</code> says
+NOT RECORDING.</p>
+<p>§12 cost 1h40m of trail that was never recorded, and it was caught only because
+a human happened to notice an unlit LED. The Device tab already decodes and
+displays the bit — the gap is that something has to be looking. This turns "I
+happened to look" into "the phone told me."</p>
+<p>Subject to §12's rule: alarm on real loss, stay silent otherwise. A watchdog
+that reports good news is a watchdog that trains you to swipe it away.</p>
+<h3>13.4 Download that survives the trail</h3>
+<p>Checkpoint completed blocks to disk so a dropped link resumes rather than
+restarts.</p>
+<p>Relevant to §11 outstanding item 2: a full Bluetooth read is ~3 hours at
+493 B/s against a nearly-full chip. Three hours is long enough that a link drop
+is a question of when, and a restart-from-zero costs the whole run.</p>
+<hr />
+<h2>14. The rename to Traxi</h2>
+<p>Done 2026-09-06, in the window between v1 closing and field testing starting.
+The timing was the point: <code>applicationId</code> cannot be changed without discarding
+the app's on-phone state, and that was cheap on this day and expensive on every
+day after it.</p>
+<p><code>btdroid</code> was a placeholder — a name chosen in no time at all so there would be
+a directory to work in. Traxi is the author's trail name (<em>taxi</em>, carried 14
+years) with the track in it. The namespace <code>ai.moonlite</code> was also wrong and is
+gone: this is personal work, not company work.</p>
+<h3>What changed</h3>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>To</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ai.moonlite.btdroid</code></td>
+<td><code>thru.taxi.traxi</code> (Kotlin package, <code>namespace</code>, <strong>and <code>applicationId</code></strong>)</td>
+</tr>
+<tr>
+<td><code>rootProject.name = "btdroid"</code></td>
+<td><code>"traxi"</code></td>
+</tr>
+<tr>
+<td><code>app_name</code> = <code>btdroid</code></td>
+<td><code>Traxi</code></td>
+</tr>
+<tr>
+<td><code>BtdroidApplication</code></td>
+<td><code>TraxiApplication</code></td>
+</tr>
+<tr>
+<td><code>BtdroidTheme</code> / <code>Theme.Btdroid</code></td>
+<td><code>TraxiTheme</code> / <code>Theme.Traxi</code></td>
+</tr>
+<tr>
+<td><code>-Dbtdroid.dataDir</code></td>
+<td><code>-Dtraxi.dataDir</code> (undocumented test override, set nowhere)</td>
+</tr>
+<tr>
+<td>GPX <code>creator="btdroid"</code></td>
+<td><code>creator="Traxi"</code></td>
+</tr>
+<tr>
+<td><code>btdroid-transcript.txt</code></td>
+<td><code>traxi-transcript.txt</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>Verified by <code>:core:test</code> (all green) and <code>:app:assembleDebug</code>. The four
+deprecation warnings in the app build predate the rename.</p>
+<h3>What the rename destroyed, deliberately</h3>
+<p><strong><code>applicationId</code> is install identity, not a label.</strong> Changing it means Android
+installs a different app rather than renaming one. Everything keyed to the
+package was abandoned in the old sandbox:</p>
+<ul>
+<li><code>filesDir/dumps</code> — every dump previously downloaded to the phone</li>
+<li>DataStore preferences, including saved logger config</li>
+<li>the per-package USB device permission grant</li>
+<li>the Companion Device Manager association</li>
+</ul>
+<p>The Bluetooth bond survived: it lives in the phone's Bluetooth stack, keyed to
+the logger's MAC, not to the app.</p>
+<p>This was safe <strong>only because of when it was done</strong>. Every capture that matters
+was already on the laptop in <code>data/</code> — including <code>cdt_v2.bin</code>, which the
+<code>.gitignore</code> marks as the only copy of its trip — and the logger's flash was
+still deliberately full, so the device itself remained the source of truth. The
+phone held nothing that was not reproducible.</p>
+<blockquote>
+<p><strong>If <code>applicationId</code> is ever changed again, it is not a rename — it is a data
+migration.</strong> Export every dump off the phone first and confirm the exports,
+exactly as §11's erase run requires. On trail, where the phone's dumps are the
+verified copies that license erasing the device, this operation would be a way
+to lose a week of trail to a cosmetic change.</p>
+</blockquote>
+<h3>What was kept</h3>
+<p><code>namespace</code> and <code>applicationId</code> were changed together here, but they are
+independent in AGP — compile-time identity and install identity. A future
+rebrand that only wants to look different can move <code>namespace</code> and leave
+<code>applicationId</code> alone, and cost nothing.</p>
+<hr />
+<h2>13. The logger stopped logging — device facts learned the hard way</h2>
+<p>2026-09-06, after v1. The device refused to record for several hours while
+looking healthy. Most of a session went into it. What follows is the part worth
+keeping.</p>
+<h3>The recovery sequence</h3>
+<pre><code>1. $PMTK182,6,1        FORMAT LOG ALL      (~22 s; SPI goes unresponsive, then RDY)
+2. POWER-CYCLE THE DEVICE                  &lt;-- load-bearing
+3. $PMTK182,4          START_LOG           re-arm; a restart comes up disarmed
+4. restore config                          the format resets it (see below)
+</code></pre>
+<p><strong>Step 2 is the one that matters and the one we lost hours not knowing.</strong> A
+format alone clears <code>need_format</code> and gives a clean flash, but the running
+firmware keeps its pre-format state: <code>START_LOG</code> goes on acking and the engine
+goes on dropping it within the second. It has to boot with a clean log area
+underneath it.</p>
+<blockquote>
+<p><strong>Corrected 2026-09-06, from the account of the person who did the
+recovery.</strong> The sequence above compresses hours into four tidy lines and
+loses the two facts a future reader will need most.</p>
+<p><strong>The fingerprint is an enable that takes and then reverts, not one that is
+refused.</strong> The device streamed NMEA normally the whole time and acked
+<code>START_LOG</code>; the auto_log bit (<code>0x0002</code>) then cleared itself again — ENABLE →
+DISABLE, every attempt, for hours, and an ordinary power cycle did not clear
+it. The flash journal corroborates this verbatim: the post-recovery image
+holds run after run of paired <code>LOGSTAT 258 / 256</code> markers with nothing
+between them (offsets <code>0x0300</code>–<code>0x04B0</code>), the device's own record of each
+round of that fight. The last marker on the chip is the one enable that
+finally held.</p>
+<p><strong>The format that mattered was at the SPI level, not <code>$PMTK182,6,1</code>.</strong> It
+took reading the flash datasheet and formatting with an <code>spi_</code>-prefixed
+command. <em>(The exact command string is not captured here — it should be
+pulled from shell history and pasted in; this is the single most valuable
+missing line in this section.)</em></p>
+<p><strong>After the format the device still looks dead until it is power-cycled.</strong>
+Enables went on reverting after the SPI format, the recovery was reasonably
+judged a failure, and there was a full mourning period before a
+just-in-case retry — after a power cycle — worked. Between the format and
+the next boot, a recovered device is indistinguishable from an unrecovered
+one. Do not declare death between steps 1 and 2.</p>
+</blockquote>
+<p><strong>A format resets configuration.</strong> Observed, not documented:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>After a format</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RCD METHOD</code></td>
+<td><strong>2 = STP</strong> (was OVP) — restore with <code>$PMTK182,1,6,1</code></td>
+</tr>
+<tr>
+<td><code>BY_SEC</code></td>
+<td>10 = 1.0 s</td>
+</tr>
+<tr>
+<td><code>FMT_REG</code></td>
+<td><code>0x0002002F</code> — not the manual's stated <code>0x0000000D</code></td>
+</tr>
+</tbody>
+</table></div>
+<h3>The LOG STATUS bitmask, decoded</h3>
+<p><code>PMTK182,2,7</code> returns a decimal bitmask. Bit meanings are from the BT747
+project; the 0-based indexing is confirmed against this device's own behaviour,
+and independently by GPSBabel, which tests <code>log_status &amp; 2</code> for "enabled".</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Bit</th>
+<th>Value</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>0x0002</code></td>
+<td>auto_log by criteria ON/OFF</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>0x0004</code></td>
+<td>stop_when_full (STOP vs OVERWRITE)</td>
+</tr>
+<tr>
+<td>8</td>
+<td><code>0x0100</code></td>
+<td>device is in enable status</td>
+</tr>
+<tr>
+<td>9</td>
+<td><code>0x0200</code></td>
+<td>device is in disable status</td>
+</tr>
+<tr>
+<td>10</td>
+<td><code>0x0400</code></td>
+<td><strong>need_format</strong></td>
+</tr>
+<tr>
+<td>11</td>
+<td><code>0x0800</code></td>
+<td>memory_full</td>
+</tr>
+</tbody>
+</table></div>
+<p>Observed on this device: <code>0x0102</code> recording, <code>0x0100</code> powered but not
+recording, <code>0x0104</code> after a format (STOP mode), <code>0x0504</code> with <code>need_format</code>
+asserted.</p>
+<h3>Query fields Traxi does not implement</h3>
+<p><code>Pmtk.ConfigField</code> knows 2–9. The device also answers:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Query</th>
+<th>Returns</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>$PMTK182,2,1</code></td>
+<td><strong>SPI STATUS</strong> — 1 RDY, 2 BSY, 3 FULL</td>
+</tr>
+<tr>
+<td>10</td>
+<td><code>$PMTK182,2,10</code></td>
+<td>RCD RCNT (record count; ~2x inflated on this firmware)</td>
+</tr>
+<tr>
+<td>11</td>
+<td><code>$PMTK182,2,11</code></td>
+<td><strong>RCD FSECTOR</strong> — failed-sector register, 16 slots, <code>FFFF</code> = empty</td>
+</tr>
+<tr>
+<td>12</td>
+<td><code>$PMTK182,2,12</code></td>
+<td>logger library version (<code>139</code> = 1.39)</td>
+</tr>
+</tbody>
+</table></div>
+<p>Traxi could not have reported <code>need_format</code> or a failing flash, because it never
+asks. Fields 1 and 11 are the two worth adding.</p>
+<h3>Commands 9–12 are engineering tooling. Do not use them.</h3>
+<p>The manual lists <code>INIT_LOG</code> (9), <code>ENABLE_LOG</code> (10), <code>DISABLE_LOG</code> (11) and
+<code>WRITE_LOG &lt;addr&gt; &lt;data&gt;</code> (12) with <strong>no description of what any of them do</strong>.</p>
+<p><code>$PMTK182,10</code> was sent on the reasoning that 4/5 drive the auto-log function
+while 10/11 drive the logger itself, and that its worst case was "rejected or a
+no-op". Both were guesses. It returned no acknowledgement at all, asserted
+<code>need_format</code>, and moved <code>RCD ADDR</code> to <code>0x00000002</code>. A power cycle and a format
+cleared it and nothing was lost, but the prediction was wrong in a way that
+could have been much worse on hardware that cannot be replaced.</p>
+<p><code>WRITE_LOG</code> writes arbitrary bytes to an arbitrary flash address. That is the
+company these commands keep. The manual also warns of the adjacent PARTIAL
+format that it is "designed for the engineering test only", and elsewhere: <em>"DO
+NOT issue commands except the QUERY_LOG_STATUS, STATUS ($PMTK182,2,1)"</em>.</p>
+<h3>The LED means fix, not recording</h3>
+<p>Verified over hours: steady blink, 3D DGPS fix on 7–8 satellites, HDOP 1.14,
+and <strong>zero bytes written</strong>. There is no local indicator of whether the device is
+recording. The app is the only honest signal, which is what §12's indicator is
+for.</p>
+<h3>Recovery confirmed 2026-09-06 ~23:00Z — the device is logging again</h3>
+<p>Verified from the laptop with read-only queries and one full-block read,
+then decoded with the app's own parser (<code>MtkLogParser</code> + <code>Quality.filter</code>
+against the dumped block, all green):</p>
+<ul>
+<li><code>LOG STATUS = 258 (0x102)</code>, SPI RDY, failed-sector register empty, method
+  back to OVP. Write pointer advancing in real time.</li>
+<li><strong>Fix records resumed at <code>2026-09-06T22:47:44Z</code></strong> (raw timestamps read
+  2007-01-21; the +1024-week rollover lands them correctly). 65 fixes in the
+  first block, 0 checksum failures, all 65 kept by the quality filter,
+  positions coherent at ~41.884N 87.804W on a 10 s cadence.</li>
+<li>The post-format flash opens with <strong>49 marker records</strong> — the journal of the
+  whole recovery session. Two of them are unanswered stops, so
+  <code>RecordingAudit</code> <strong>will report <code>unansweredStops = 2</code> on every future dump of
+  this flash</strong>. That is the recovery session's scar, not new loss. It ages out
+  only when the flash is next erased.</li>
+<li>The journal also bears on the unexplained <code>BY_SEC 100 vs 50</code> below: it holds
+  one <code>PERIOD 50</code> marker followed later by two <code>PERIOD 100</code> markers with
+  stop/start churn between — so 100 <em>was</em> written to the device twice after
+  the 50; the mystery is by whom, not whether.</li>
+</ul>
+<p>Config then restored per step 4, over <code>/dev/ttyACM0</code>, with the stop → write →
+unconditional restart discipline of <code>withLoggingPaused</code> and each step
+acknowledged: <code>FMT_REG</code> back to <code>0x000A1C3F</code>, interval back to 5.0 s. Verified
+after: status 258, and the pointer moved <strong>+144 bytes in 15 s = exactly 3 × 48-
+byte records at 5 s</strong> — the arithmetic confirms the 11-field format took.</p>
+<h3>What is still not explained</h3>
+<p>The device logged for 18 months, then stopped at <code>2026-09-06T16:16:10Z</code>,
+fifteen minutes after a 5.6 MB USB download, around an unplug of a session the
+app never closed cleanly. <code>need_format</code> turning out to be genuinely asserted
+fits the manual's account of losing power mid-sector-init while logging. That is
+consistent, not proven.</p>
+<p>Also unexplained: after recovery the device reported <code>BY_SEC</code> as <code>100</code> when it
+had been set to <code>50</code>, with no write in between.</p>
+<h3>Sources</h3>
+<ul>
+<li>MTK GPS Logger Library User Manual 1.2 — <code>https://www.rigacci.org/wiki/lib/exe/fetch.php/doc/appunti/hardware/gps/mtk_logger_library_user_manual_1.2_tsi.pdf</code></li>
+</ul>
+<p><strong>A local copy is committed at <code>docs/mtk-gps-logger-library-user-manual-1.2.pdf</code>
+  — treat the URL as fragile.</strong> It is a leaked vendor document (MT3301, GPS
+  Team, Andy Lee, released 2006-11-29, marked "MTK CONFIDENTIAL / NO
+  DISCLOSURE") hosted on a personal wiki, linked from
+  <code>https://www.rigacci.org/wiki/doku.php/doc/appunti/hardware/gps_logger_i_blue_747</code>.
+  Where things are in it: the full command table (FORMAT LOG = <code>PMTK182,6</code>
+  with 1: ALL / 2: PARTIAL, plus INIT_LOG 9, ENABLE_LOG 10, DISABLE_LOG 11,
+  WRITE_LOG 12) is on page 7 of 22; FORMAT LOG behaviour — "FORMAT ALL can
+  reset the internal buffer to become all 0xFF" and the NEED_FORMAT_BIT
+  explanation — is in Application Notes §(5), around page 9.</p>
+<p>Extraction trap: <code>pdftotext -layout</code> is what makes this file readable.
+  A Python stream extraction produced garbage on it, which was briefly
+  mistaken for the document not containing the command table at all.
+- BT747 status bitmask — <code>https://sourceforge.net/p/bt747/discussion/696105/thread/19a6ddd7/</code>
+- GPSBabel <code>mtk_logger.cc</code> — <code>https://github.com/GPSBabel/gpsbabel/blob/master/mtk_logger.cc</code></p>
+</main>
+</body>
+</html>

@@ -34,6 +34,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import thru.taxi.traxi.session.LinkHealth
 import thru.taxi.traxi.session.LiveActivity
 import thru.taxi.traxi.session.RecordingActivity
 import java.text.SimpleDateFormat
@@ -67,6 +68,7 @@ fun AppScreen(
     val message by session.message.collectAsState()
     val telemetry by session.telemetry.collectAsState()
     val liveActivity by session.liveActivity.collectAsState()
+    val linkHealth by session.linkHealth.collectAsState()
 
     var tab by rememberSaveable { mutableStateOf(Tab.DEVICE) }
     val snackbar = remember { SnackbarHostState() }
@@ -113,7 +115,7 @@ fun AppScreen(
 
             when (tab) {
                 Tab.DEVICE -> DeviceTab(container, connection, onPairDevice)
-                Tab.LIVE -> LiveTab(connection, telemetry, liveActivity)
+                Tab.LIVE -> LiveTab(connection, telemetry, liveActivity, linkHealth)
                 Tab.DUMPS -> DumpsTab(container, connection, download, summary)
                 Tab.CONFIG -> ConfigTab(container, connection)
                 Tab.LOG -> LogTab(container)
@@ -179,6 +181,66 @@ private fun Row2(label: String, value: String, mono: Boolean = true) {
     }
 }
 
+/**
+ * Speaks only when the phone is still allowed to suspend this app.
+ *
+ * A foreground service keeps the process alive but does not, on this phone,
+ * exempt it from battery optimisation -- and it was the optimiser that ended
+ * every Bluetooth session on the 7 September ride at the ten-minute mark, by
+ * suspending the read loop while leaving the radio link up. Silent when the
+ * exemption is held, like every other warning in this app.
+ */
+@Composable
+private fun BatteryExemptionCard() {
+    val context = LocalContext.current
+    // Polled rather than observed: the grant happens in a system screen, so the
+    // card has to notice a change made outside the app. Two seconds is
+    // imperceptible on return and costs nothing.
+    var exempt by remember { mutableStateOf(isIgnoringBatteryOptimizations(context)) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            exempt = isIgnoringBatteryOptimizations(context)
+            delay(2000)
+        }
+    }
+    if (exempt) return
+
+    SectionCard("Android may suspend this app") {
+        Text(
+            "Battery optimisation is still on for traxi. With it on, the phone " +
+                "suspends the app a few minutes after the screen goes off, which " +
+                "stalls the Bluetooth link without disconnecting it — the link looks " +
+                "alive while nothing arrives.",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Text(
+            "The logger keeps recording either way; this only affects what the phone " +
+                "can see and download.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Button(
+            onClick = {
+                runCatching {
+                    context.startActivity(
+                        android.content.Intent(
+                            android.provider.Settings
+                                .ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            android.net.Uri.parse("package:${context.packageName}"),
+                        )
+                    )
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Allow traxi to run in the background") }
+    }
+}
+
+private fun isIgnoringBatteryOptimizations(context: android.content.Context): Boolean =
+    runCatching {
+        context.getSystemService(android.os.PowerManager::class.java)
+            .isIgnoringBatteryOptimizations(context.packageName)
+    }.getOrDefault(true)
+
 @Composable
 private fun PermissionCard(onRequest: () -> Unit) {
     Card(
@@ -220,6 +282,7 @@ private fun DeviceTab(
     when (connection) {
         is ConnectionState.Connected -> {
             DeviceInfoCard(connection.info, session.isSimulated, recording)
+            BatteryExemptionCard()
             OutlinedButton(
                 onClick = { session.disconnect() },
                 modifier = Modifier.fillMaxWidth(),
@@ -495,6 +558,7 @@ private fun LiveTab(
     connection: ConnectionState,
     telemetry: Telemetry?,
     activity: LiveActivity,
+    linkHealth: LinkHealth,
 ) {
     if (connection !is ConnectionState.Connected) {
         SectionCard("Not connected") {
@@ -507,6 +571,11 @@ private fun LiveTab(
         return
     }
 
+    // Before anything about fixes: is the link delivering bytes at all? A
+    // stalled stream used to be invisible -- every counter simply stopped, and
+    // the app went on claiming a healthy connection.
+    LinkHealthCard(linkHealth)
+
     // The heartbeat leads: whether data is flowing is the first thing to know,
     // ahead of what the data says. It also guards the section 12 failure -- a
     // stalled stream is visible here rather than looking like a frozen fix.
@@ -517,6 +586,64 @@ private fun LiveTab(
     FixCard(telemetry)
     if (telemetry.hasPosition) PositionCard(telemetry)
     if (telemetry.satellites.isNotEmpty()) SkyCard(telemetry)
+}
+
+/**
+ * Says when the link has gone quiet, and refuses to imply it has not.
+ *
+ * Silence here is measured in *bytes*, not fixes. The logger streams NMEA
+ * continuously whenever it is powered and connected, so no bytes at all means
+ * the link has stopped working -- unlike a missing fix, which indoors means
+ * only that the sky is not visible.
+ *
+ * Nothing on this card acts on its own. It reports, and offers the reconnect
+ * that is known to fix a stall; tearing the session down automatically is a
+ * mistake this app has already made once.
+ */
+@Composable
+private fun LinkHealthCard(health: LinkHealth) {
+    var now by remember { mutableStateOf(System.nanoTime()) }
+    LaunchedEffect(Unit) {
+        while (true) { now = System.nanoTime(); delay(500) }
+    }
+
+    val ended = health.streamEnded
+    if (ended != null) {
+        SectionCard("Stream ended") {
+            Text(
+                ended,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+            )
+            Text(
+                "The link is no longer delivering data. The logger keeps recording on " +
+                    "its own regardless — nothing is being lost on the device. " +
+                    "Disconnect and connect again to resume.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        return
+    }
+
+    if (health.lastBytesAtNanos == 0L) return
+    val silentSec = ((now - health.lastBytesAtNanos) / 1e9).coerceAtLeast(0.0)
+    // The stream is continuous, so a few seconds of nothing is already odd;
+    // ten is unambiguous while staying clear of ordinary RFCOMM burstiness.
+    if (silentSec < 10) return
+
+    SectionCard("Link silent") {
+        Text(
+            "%.0f s since the last byte".format(silentSec),
+            style = MaterialTheme.typography.titleLarge,
+            color = MaterialTheme.colorScheme.error,
+        )
+        Text(
+            "The connection is still open but nothing is arriving. The logger is " +
+                "still recording — this is the phone's side of the link. If it does " +
+                "not recover, disconnect and connect again.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
 }
 
 @Composable
@@ -1242,12 +1369,21 @@ private fun LogTab(container: AppContainer) {
                 "trailhead this is the only diagnostic available, so it can be shared.",
             style = MaterialTheme.typography.bodySmall,
         )
+        Text(
+            "Mirrored to a file as it is written, so it survives a crash, a reboot or " +
+                "an update — the view below shows this run, the shared file holds the " +
+                "history (${Bytes.describe(container.transcriptFile.sizeBytes())}).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton({
                 scope.launch {
+                    // The file, not the in-memory ring: the whole point is to
+                    // hand over what happened before the app last died.
                     val file = container.dumpRepository.writeShareable(
                         "traxi-transcript.txt",
-                        lines.joinToString("\n"),
+                        container.transcriptFile.readAll(),
                     )
                     val uri = androidx.core.content.FileProvider.getUriForFile(
                         context, "${context.packageName}.files", file,
@@ -1264,7 +1400,11 @@ private fun LogTab(container: AppContainer) {
                     )
                 }
             }) { Text("Share") }
-            TextButton({ container.session.transcript.clear(); lines = emptyList() }) {
+            TextButton({
+                container.session.transcript.clear()
+                container.transcriptFile.clear()
+                lines = emptyList()
+            }) {
                 Text("Clear")
             }
         }

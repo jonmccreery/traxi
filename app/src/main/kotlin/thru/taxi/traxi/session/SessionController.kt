@@ -111,6 +111,35 @@ data class RecordingActivity(
     val confirmedEver: Boolean = false,
 )
 
+/**
+ * Whether bytes are arriving, as distinct from whether a link exists.
+ *
+ * These are not the same thing, and a ride proved it: the radio link stayed up
+ * for 39 minutes while the app sat frozen on a stream that had stopped
+ * delivering. Android reported no disconnect because there was none, so the
+ * ACL-disconnect broadcast -- the app's only teardown signal -- could not fire,
+ * and every counter in the UI simply stopped with no explanation offered.
+ *
+ * This is the missing signal, and it is deliberately only a *signal*. Nothing
+ * here tears a session down: a quiet link recovers on its own often enough that
+ * killing it automatically was a regression once already. The job is to make
+ * the state visible, and let the person holding the phone decide.
+ */
+data class LinkHealth(
+    /** When the transport last returned bytes; 0 before the first read. */
+    val lastBytesAtNanos: Long = 0L,
+    /** Total reads that returned nothing since the last delivery. */
+    val silentReads: Int = 0,
+    /**
+     * Set when the read loop has stopped for good, with the reason.
+     *
+     * The loop used to exit on a bare `break` -- no message, no state change,
+     * nothing in the transcript. The session stayed "Connected" over a stream
+     * that would never produce another byte.
+     */
+    val streamEnded: String? = null,
+)
+
 /** Result of parsing a dump file, for display. */
 data class ParseSummary(
     val fileName: String,
@@ -211,6 +240,9 @@ class SessionController(
 
     private val _recording = MutableStateFlow(RecordingActivity())
     val recording: StateFlow<RecordingActivity> = _recording.asStateFlow()
+
+    private val _linkHealth = MutableStateFlow(LinkHealth())
+    val linkHealth: StateFlow<LinkHealth> = _linkHealth.asStateFlow()
 
     // Write-pointer probe baseline. The pointer only ever grows while logging,
     // so a later sample above an earlier one is proof a fix was written.
@@ -487,6 +519,23 @@ class SessionController(
         lastProbedPointer = pointer
         _recording.value = RecordingActivity()
 
+        // Tell Android this session is user-visible work. Without it the app is
+        // an ordinary background process between actions, and the cached-app
+        // freezer suspends the read loop within minutes -- which stalls the
+        // stream while leaving the radio link up, the exact failure that made a
+        // whole ride's telemetry disappear. See [LinkService].
+        //
+        // A failure here is never fatal to the session, but it must not be
+        // silent either: it means the protection against that freeze is not in
+        // place, and the next stall would look like the same mystery again.
+        runCatching { thru.taxi.traxi.service.LinkService.start(context) }
+            .onFailure {
+                transcript.note(
+                    "WARNING: could not start the foreground link service (${it.message}). " +
+                        "Android may suspend this app and stall the link."
+                )
+            }
+
         startTelemetry(c, firmware.needsWeekRollover)
     }
 
@@ -553,6 +602,44 @@ class SessionController(
         )
     }
 
+    /**
+     * Fold one telemetry read into [_linkHealth].
+     *
+     * Bytes, not fixes. The Live heartbeat already reports fixes, but a fix
+     * needs a receiver with a sky view, so its absence is ambiguous -- indoors
+     * it means nothing is wrong. Bytes are unambiguous: this logger streams
+     * NMEA continuously whenever it is powered and connected, so a link that
+     * delivers no bytes at all is a link that has stopped working, wherever it
+     * is.
+     */
+    private fun noteReadResult(bytes: Int) {
+        val cur = _linkHealth.value
+        _linkHealth.value = if (bytes > 0) {
+            cur.copy(lastBytesAtNanos = System.nanoTime(), silentReads = 0)
+        } else {
+            // Seed the clock on the first read so a stream that never delivers
+            // anything still shows an honest, climbing silence.
+            cur.copy(
+                lastBytesAtNanos = if (cur.lastBytesAtNanos == 0L) System.nanoTime()
+                    else cur.lastBytesAtNanos,
+                silentReads = cur.silentReads + 1,
+            )
+        }
+    }
+
+    /**
+     * Record that the read loop has stopped, loudly.
+     *
+     * Deliberately does *not* disconnect. A dead read loop and a dead link are
+     * different things, and this app has already learned once what tearing down
+     * a recoverable connection costs. Say so, and leave the decision to the
+     * person holding the phone.
+     */
+    private fun endStream(reason: String) {
+        transcript.note("STREAM ENDED: $reason")
+        _linkHealth.value = _linkHealth.value.copy(streamEnded = reason)
+    }
+
     /** Record that a position fix just arrived, for the Live heartbeat. */
     private fun noteFixArrived() {
         val now = System.nanoTime()
@@ -593,6 +680,7 @@ class SessionController(
         )
         synchronized(fixTimestamps) { fixTimestamps.clear() }
         _liveActivity.value = LiveActivity()
+        _linkHealth.value = LinkHealth()
         c.onSentence = { sentence ->
             if (assembler.accept(sentence)) _telemetry.value = assembler.current
             // A fix is one GGA epoch (~1 Hz) that actually resolved a position.
@@ -619,12 +707,20 @@ class SessionController(
                 val read = try {
                     readLock.withLock { c.pump(TELEMETRY_READ_MILLIS) }
                 } catch (e: Exception) {
-                    // The transport going away is the ordinary way this ends.
-                    // It is not worth a message: whatever closed the link has
-                    // already reported it.
-                    -1
+                    transcript.note("telemetry read threw: ${e.message ?: e.toString()}")
+                    endStream("the read loop stopped: ${e.message ?: e.toString()}")
+                    break
                 }
-                if (read < 0) break
+                // A negative read means the stream is finished, not merely
+                // quiet. This used to be a bare `break`: the loop vanished
+                // without a word and the session went on reporting "Connected"
+                // over a stream that would never produce another byte. Whatever
+                // else is wrong, the app must never again go silent about it.
+                if (read < 0) {
+                    endStream("the logger's data stream ended")
+                    break
+                }
+                noteReadResult(read)
                 if (read > 0) bytesSincePump += read
 
                 // Periodically confirm fixes are actually landing in flash by
@@ -671,6 +767,7 @@ class SessionController(
         _telemetry.value = null
         _liveActivity.value = LiveActivity()
         _recording.value = RecordingActivity()
+        _linkHealth.value = LinkHealth()
         recordingBaseline = null
         lastProbedPointer = null
     }
@@ -781,6 +878,10 @@ class SessionController(
     private fun disconnectQuietly() {
         stopWatchingLink()
         stopTelemetry()
+        // The session is over, so the foreground notification must go with it.
+        // LinkService also retires itself when the connection flow leaves
+        // Connected; this covers the paths that close the transport first.
+        runCatching { thru.taxi.traxi.service.LinkService.stop(context) }
         connectedAddress = null
         runCatching { transport?.close() }
         transport = null

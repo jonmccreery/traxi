@@ -68,6 +68,13 @@ class UsbSerialTransport(
     // of the slow-link default. See [Transport.blockReadIdleTimeoutMillis].
     override val blockReadIdleTimeoutMillis: Long get() = 2_500
 
+    // USB talks to the chip directly, with none of the Bluetooth module's UART
+    // bridge in the way, and shows none of the wedging that makes this query
+    // expensive over RFCOMM. Probe often here: it is the ground truth for
+    // whether the logger is actually recording.
+    // See [Transport.writePointerProbeIntervalMillis].
+    override val writePointerProbeIntervalMillis: Long get() = 12_000
+
     override val isOpen: Boolean
         get() = port != null
 

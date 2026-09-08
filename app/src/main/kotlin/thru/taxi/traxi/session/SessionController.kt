@@ -701,6 +701,13 @@ class SessionController(
             // still be echoing. Wait a full interval before the first probe.
             var lastProbeNanos = System.nanoTime()
             var bytesSincePump = 0
+            // How often this link tolerates being asked. Over Bluetooth the
+            // query is destabilising, so the steady rate is rare; the first
+            // probe still comes quickly, because a recording indicator that
+            // takes ten minutes to say anything is not an indicator.
+            val steadyProbeNanos =
+                (transport?.writePointerProbeIntervalMillis ?: 600_000L) * 1_000_000
+            var probeIntervalNanos = minOf(FIRST_WRITE_PROBE_NANOS, steadyProbeNanos)
             while (isActive) {
                 // A read while another operation holds the lock would take
                 // bytes belonging to that operation.
@@ -741,15 +748,29 @@ class SessionController(
                 // link still surfaces -- through the ACL-disconnect broadcast
                 // (watchLink), which is the real signal, not a guess from silence.
                 val now = System.nanoTime()
-                if (now - lastProbeNanos >= WRITE_PROBE_INTERVAL_NANOS && bytesSincePump > 0) {
+                if (now - lastProbeNanos >= probeIntervalNanos && bytesSincePump > 0) {
                     lastProbeNanos = now
                     bytesSincePump = 0
+                    // After the first, settle to whatever this link tolerates.
+                    probeIntervalNanos = steadyProbeNanos
                     val ptr = try {
                         readLock.withLock { c.queryWritePointer() }
                     } catch (e: Exception) {
                         null
                     }
-                    if (ptr != null) noteWritePointer(ptr, System.nanoTime())
+                    if (ptr != null) {
+                        noteWritePointer(ptr, System.nanoTime())
+                    } else {
+                        // An unanswered probe is how a Bluetooth link dies on
+                        // this hardware: the query wedges the logger's radio
+                        // firmware and the disconnect follows within a second.
+                        // Recording it makes that sequence legible in the
+                        // transcript instead of looking like a random drop.
+                        transcript.note(
+                            "write-pointer probe went unanswered; this logger's " +
+                                "Bluetooth link often drops immediately after one"
+                        )
+                    }
                 }
 
                 // Release the lock briefly between reads so an operation
@@ -1391,10 +1412,14 @@ class SessionController(
     private val FIX_RATE_WINDOW_NANOS = 4_000_000_000L
 
     /**
-     * How often to sample the write pointer for the recording indicator. Short
-     * enough that a stopped log is caught within a couple of samples, long
-     * enough not to flood the slow Bluetooth link; comfortably above the log
-     * interval so a healthy log advances between samples.
+     * How long after connecting to take the first write-pointer sample.
+     *
+     * The steady rate is the link's own business -- see
+     * [Transport.writePointerProbeIntervalMillis], which is rare over Bluetooth
+     * because the query destabilises this logger's radio. The *first* sample is
+     * different: it is what turns the recording indicator from "unknown" into a
+     * confirmed fact, and one probe's risk is worth paying once. Comfortably
+     * above the log interval so a healthy log has advanced by then.
      */
-    private val WRITE_PROBE_INTERVAL_NANOS = 12_000_000_000L
+    private val FIRST_WRITE_PROBE_NANOS = 30_000_000_000L
 }

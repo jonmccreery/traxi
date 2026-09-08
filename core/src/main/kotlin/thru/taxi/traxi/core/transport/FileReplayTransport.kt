@@ -119,6 +119,11 @@ class SimulatedLoggerTransport(
 
     override val isOpen: Boolean get() = open
 
+    // No radio to destabilise, so the simulator probes at the lively rate --
+    // otherwise a demo of the recording indicator would sit unconfirmed for ten
+    // minutes. See [Transport.writePointerProbeIntervalMillis].
+    override val writePointerProbeIntervalMillis: Long get() = 12_000
+
     override suspend fun open() {
         open = true
         outStart = 0

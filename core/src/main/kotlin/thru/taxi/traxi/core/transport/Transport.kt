@@ -35,6 +35,25 @@ interface Transport : AutoCloseable {
      */
     val blockReadIdleTimeoutMillis: Long get() = 10_000
 
+    /**
+     * How often the session may re-read the write pointer to confirm recording.
+     *
+     * A property of the link for the same reason as the timeout above, but for
+     * a harsher reason: over Bluetooth this query is not free, and not always
+     * survivable. Measured on the BT-Q1000XT, 17 probes over three minutes drew
+     * 14 answers, and **every unanswered probe was followed within a second by
+     * the link going down** -- once with the logger itself terminating the
+     * connection. Idle NMEA streams for hours untouched; it is talking to this
+     * device that destabilises it, which is why a frozen app on the 7 September
+     * ride held a link for 39 minutes while a healthy one loses it every two.
+     *
+     * So the default is rare, and the fast transports opt down, exactly as with
+     * the idle timeout: an unmeasured link is assumed fragile rather than
+     * assumed free. USB has no such problem -- it talks to the chip directly,
+     * with none of the Bluetooth module's UART bridge in the way.
+     */
+    val writePointerProbeIntervalMillis: Long get() = 600_000
+
     val isOpen: Boolean
 
     suspend fun open()

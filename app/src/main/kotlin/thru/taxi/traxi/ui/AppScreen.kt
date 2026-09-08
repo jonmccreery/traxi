@@ -46,12 +46,20 @@ private enum class Tab(val label: String) {
 }
 
 /**
- * How long the write pointer may sit still before the recording indicator calls
- * it stopped. Above two probe intervals (~24 s) so a healthy log, which advances
- * every probe, is never flagged; low enough that a real stop shows within ~half
- * a minute.
+ * Age of a reading, in words.
+ *
+ * The recording indicator states how old its fact is rather than implying it is
+ * live. Over Bluetooth the write pointer is sampled rarely -- asking this logger
+ * too often takes the link down -- so "checked 6 minutes ago" is the honest
+ * shape of the answer, and pretending to a live feed is what the previous
+ * clock-decayed rule got wrong.
  */
-private const val RECORDING_STALE_NANOS = 30_000_000_000L
+private fun describeAgo(seconds: Double): String = when {
+    seconds < 45 -> "just now"
+    seconds < 90 -> "a minute ago"
+    seconds < 3600 -> "${(seconds / 60).toInt()} minutes ago"
+    else -> "over an hour ago"
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -479,14 +487,24 @@ private fun DeviceInfoCard(info: DeviceInfo, simulated: Boolean, recording: Reco
             var now by remember { mutableStateOf(System.nanoTime()) }
             LaunchedEffect(Unit) { while (true) { now = System.nanoTime(); delay(1_000) } }
 
-            val confirmed = recording.lastAdvanceAtNanos != 0L &&
-                (now - recording.lastAdvanceAtNanos) < RECORDING_STALE_NANOS
+            // Driven by what the last sample saw, never by how long ago it was
+            // taken. Over Bluetooth the pointer is now read rarely, because
+            // asking destabilises the link, so a clock-driven rule spends most
+            // of its life stale -- and decayed into shouting NOT RECORDING at a
+            // logger that was recording perfectly. A false alarm here is worse
+            // than no alarm: it is the one reading the user is asked to trust.
+            val looked = recording.lastProbeAtNanos != 0L
+            // A no-movement verdict only means something across a window longer
+            // than the log interval; below that, a healthy logger has genuinely
+            // written nothing yet.
+            val conclusive = recording.lastProbeGapNanos >
+                (info.timeIntervalSeconds * 1.5 * 1e9).toLong()
+            val checkedAgo = (now - recording.lastProbeAtNanos) / 1e9
             when {
-                // Need at least two samples (or one advance) before judging.
-                recording.probes < 2 && !confirmed ->
+                !looked || (!recording.lastProbeAdvanced && !conclusive) ->
                     Row2("Recording", "checking…")
 
-                confirmed -> {
+                recording.lastProbeAdvanced -> {
                     Text(
                         "RECORDING",
                         style = MaterialTheme.typography.titleMedium,
@@ -496,6 +514,14 @@ private fun DeviceInfoCard(info: DeviceInfo, simulated: Boolean, recording: Reco
                         "${Bytes.describe(recording.bytesSinceConnect)} written to flash " +
                             "since connecting. This is the live write pointer, not a guess.",
                         style = MaterialTheme.typography.bodySmall,
+                    )
+                    // The age of the fact, stated rather than implied. The
+                    // reading is a checked observation, not a live feed, and
+                    // pretending otherwise is what the old rule did wrong.
+                    Text(
+                        "Last checked ${describeAgo(checkedAgo)}.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
 
@@ -507,9 +533,10 @@ private fun DeviceInfoCard(info: DeviceInfo, simulated: Boolean, recording: Reco
                     )
                     Text(
                         if (recording.confirmedEver) {
-                            "No fixes have been written to flash for " +
-                                "%.0f s. Recording appears to have stopped.".format(
-                                    (now - recording.lastAdvanceAtNanos) / 1e9)
+                            "The write pointer had not moved when checked " +
+                                "${describeAgo(checkedAgo)}, after " +
+                                "%.0f s of watching. Recording appears to have stopped."
+                                    .format(recording.lastProbeGapNanos / 1e9)
                         } else {
                             "No fixes have been written to flash since connecting. " +
                                 "The logger is not recording — resume it before setting off."

@@ -109,6 +109,25 @@ data class RecordingActivity(
     /** How many times the pointer has been sampled since connecting. */
     val probes: Int = 0,
     val confirmedEver: Boolean = false,
+    /** When the pointer was last actually read, as distinct from last moved. */
+    val lastProbeAtNanos: Long = 0L,
+    /**
+     * Whether the most recent read found the pointer had moved.
+     *
+     * The indicator is driven by this rather than by a clock, because over
+     * Bluetooth the app now probes rarely -- and "we have not looked lately"
+     * must never be allowed to render as "it is not recording". Only a sample
+     * that looked and found nothing may raise that alarm.
+     */
+    val lastProbeAdvanced: Boolean = false,
+    /**
+     * How long the pointer was observed over, for the most recent sample.
+     *
+     * A no-movement verdict is only meaningful across a window longer than the
+     * configured log interval: a logger writing every 60 s has genuinely not
+     * moved 30 s after connecting, and is perfectly healthy.
+     */
+    val lastProbeGapNanos: Long = 0L,
 )
 
 /**
@@ -248,6 +267,9 @@ class SessionController(
     // so a later sample above an earlier one is proof a fix was written.
     private var recordingBaseline: Long? = null
     private var lastProbedPointer: Long? = null
+
+    /** When the current session connected, the first sample's starting edge. */
+    private var connectedAtNanos: Long = 0L
 
     // Download throughput meter. Rate is smoothed because chunks arrive in
     // bursts -- ~30 ms apart over USB, several seconds apart over Bluetooth.
@@ -517,6 +539,7 @@ class SessionController(
         // sample can already show whether fixes have been written since.
         recordingBaseline = pointer
         lastProbedPointer = pointer
+        connectedAtNanos = System.nanoTime()
         _recording.value = RecordingActivity()
 
         // Tell Android this session is user-visible work. Without it the app is
@@ -666,11 +689,17 @@ class SessionController(
         val advanced = prev != null && ptr > prev
         lastProbedPointer = ptr
         val cur = _recording.value
+        // The window this sample judges over runs from the previous look --
+        // connect time for the first one, which openWith seeds.
+        val since = if (cur.lastProbeAtNanos != 0L) cur.lastProbeAtNanos else connectedAtNanos
         _recording.value = cur.copy(
             bytesSinceConnect = (ptr - base).coerceAtLeast(0),
             lastAdvanceAtNanos = if (advanced) now else cur.lastAdvanceAtNanos,
             probes = cur.probes + 1,
             confirmedEver = cur.confirmedEver || advanced,
+            lastProbeAtNanos = now,
+            lastProbeAdvanced = advanced,
+            lastProbeGapNanos = if (since != 0L) now - since else 0L,
         )
     }
 

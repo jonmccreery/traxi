@@ -50,9 +50,19 @@ interface Transport : AutoCloseable {
      * So the default is rare, and the fast transports opt down, exactly as with
      * the idle timeout: an unmeasured link is assumed fragile rather than
      * assumed free. USB has no such problem -- it talks to the chip directly,
-     * with none of the Bluetooth module's UART bridge in the way.
+     * with none of the Bluetooth module's UART bridge in the way. Measured
+     * 2026-09-08 straight at the chip over CDC-ACM: 24 of 25 probes at the
+     * Bluetooth-killing 12 s cadence, 10-16 ms each, no degradation across five
+     * minutes. The command is not the problem; the radio path is.
+     *
+     * Ten minutes was the first safe-by-a-wide-margin guess. A minute is the
+     * deliberate step back toward usefulness -- a recording indicator that
+     * refreshes twice an hour barely indicates anything -- taken now that a
+     * wedge is survivable rather than fatal: the link rebuilds itself and a
+     * transfer resumes from the frontier. If it destabilises, this is the
+     * number to move.
      */
-    val writePointerProbeIntervalMillis: Long get() = 600_000
+    val writePointerProbeIntervalMillis: Long get() = 60_000
 
     val isOpen: Boolean
 

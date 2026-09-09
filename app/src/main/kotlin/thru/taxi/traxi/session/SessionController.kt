@@ -623,6 +623,17 @@ class SessionController(
     /** Fold one progress callback into [_download], including a smoothed rate. */
     private fun applyDownloadProgress(p: FlashDownloader.Progress) {
         val now = System.nanoTime()
+
+        // A transfer holds the read lock for its whole duration, so the
+        // telemetry loop -- the only other thing that reports bytes arriving --
+        // is starved until it finishes. Without this, a perfectly healthy
+        // multi-hour download would leave the link-silence clock running from
+        // before it started and the Live tab would report a dead link while
+        // data poured in. These chunks *are* the evidence the link is alive.
+        _linkHealth.value = _linkHealth.value.copy(
+            lastBytesAtNanos = now,
+            silentReads = 0,
+        )
         val dt = (now - rateLastNanos) / 1e9
         val db = if (p.blockBytes >= rateLastBlockBytes) {
             p.blockBytes - rateLastBlockBytes

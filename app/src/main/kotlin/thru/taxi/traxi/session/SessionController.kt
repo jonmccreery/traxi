@@ -299,6 +299,18 @@ class SessionController(
     /** Chunk arrivals seen since the meter was armed; gates the estimate. */
     private var rateSamples = 0
 
+    // Whole-run progress, which is what the time estimate is actually built on.
+    // The EMA above answers "is the link flowing right now" and is deliberately
+    // twitchy; it is the wrong statistic for predicting a finish, for two
+    // reasons. It only ever measures chunk-to-chunk *within* a block, so it
+    // never sees the request round trip and flash read between blocks -- real
+    // seconds that always inflate it. And RFCOMM hands over a backlog in a
+    // clump at each block start, so it spikes exactly where a fresh sector
+    // begins. Elapsed time against file position has neither problem: every
+    // cost is inside it, including retries and rebuilt links.
+    private var etaStartNanos = 0L
+    private var etaStartBytes = 0
+
     // Where the running download is expected to end, for the ETA. The pointer
     // target is right for an unwrapped log (the read stops just past the write
     // frontier) and for every fetch-new; a wrapped log has no unwritten sectors
@@ -612,6 +624,8 @@ class SessionController(
         rateLastNanos = System.nanoTime()
         rateEmaBps = 0.0
         rateSamples = 0
+        etaStartNanos = 0L
+        etaStartBytes = 0
 
         val info = (_connection.value as? ConnectionState.Connected)?.info
         val block = FlashDownloader.DEFAULT_BLOCK_SIZE
@@ -659,6 +673,8 @@ class SessionController(
             // of measuring against a starting gun.
             rateLastNanos = now
             rateSamples = 1
+            etaStartNanos = now
+            etaStartBytes = p.bytesDownloaded
         } else if (dt > 0 && db > 0) {
             val inst = db / dt
             rateEmaBps = if (rateEmaBps == 0.0) inst else 0.4 * inst + 0.6 * rateEmaBps
@@ -671,12 +687,23 @@ class SessionController(
         // neither figure is known -- there is nothing left to estimate honestly.
         val target = etaPointerTargetBytes?.takeIf { p.bytesDownloaded < it }
             ?: etaFlashTargetBytes?.takeIf { p.bytesDownloaded < it }
-        // Withhold the estimate until the rate has seen a few intervals. One
-        // sample over a bursty RFCOMM link is not a throughput, and a wrong
-        // number shown confidently is worse than no number at all -- it is the
-        // figure someone decides whether to wait on.
-        val eta = if (target != null && rateEmaBps > 0 && rateSamples >= MIN_RATE_SAMPLES) {
-            ((target - p.bytesDownloaded) / rateEmaBps).toInt()
+        // Built on whole-run progress, not the twitchy EMA, so a burst at a
+        // sector boundary cannot talk the estimate down and the between-block
+        // overhead is counted rather than ignored. It settles as the run goes
+        // on instead of swinging with every sector.
+        //
+        // Zero advance is a real state, not a divide-by-zero to dodge: during
+        // the wrap probe the file position is deliberately pinned, and there is
+        // genuinely nothing to estimate from until the extend begins.
+        val elapsed = (now - etaStartNanos) / 1e9
+        val advanced = p.bytesDownloaded - etaStartBytes
+        val progressBps = if (elapsed > 0 && advanced > 0) advanced / elapsed else 0.0
+        // Still withheld until a few arrivals have been seen: one interval over
+        // a bursty link is not a throughput, and a wrong number shown
+        // confidently is worse than none -- it is the figure someone decides
+        // whether to wait on.
+        val eta = if (target != null && progressBps > 0 && rateSamples >= MIN_RATE_SAMPLES) {
+            ((target - p.bytesDownloaded) / progressBps).toInt()
         } else null
 
         _download.value = _download.value.copy(

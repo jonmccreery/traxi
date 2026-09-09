@@ -1383,3 +1383,87 @@ is proposed.
   stays open until a full Bluetooth download actually completes.
 - **`eraseBlockers()` still probes the write pointer** on Dumps-tab
   composition — the same unattended-intervention blind spot, untouched.
+
+### 15.2 The slide switch beats the firmware, and the status word will lie about it
+
+Found 2026-09-08. The device has a three-position slide switch — **OFF / NAV /
+LOG** — and NAV means *fix but deliberately do not record*. Nothing in this
+project modelled that. The app had two states, recording and faulted, and
+rendered a switch position the user had chosen on purpose as data loss.
+
+Worse, the state it reports cannot be trusted even when it says the reassuring
+thing.
+
+#### The measured state table
+
+| Switch | Software | Status word | Write pointer | Actually recording |
+|---|---|---|---|---|
+| LOG | enabled | `0x0102` | advancing | **yes** |
+| LOG | disabled | `0x0100` | frozen | no — the §12 fault |
+| NAV | enabled | **`0x0102`** | **frozen** | **no — the switch wins** |
+| NAV | disabled | `0x0100` | frozen | no |
+
+Two conclusions, both measured on hardware rather than reasoned about.
+
+**`0x0100` is ambiguous and always will be.** A software disable with the
+switch on LOG produces a byte-identical status word to the NAV position. Both
+`PMTK182,5` and `PMTK182,4` ack flag 3 either way. There is no bit that
+separates "you chose not to log" from "logging is off when you wanted it on" —
+bit 9 `0x0200` (*device is in disable status*) has never been observed on this
+device in any state.
+
+**`0x0102` is not evidence of recording.** With the switch in NAV, an enable is
+accepted, the status flips to `0x0102`, and a status-change marker is written to
+flash — and then nothing else is. Measured: pointer moved 32 bytes (two 16-byte
+markers, the state change recording itself) and then sat at `0x0001FA20` for
+**3 m 24 s with a solid fix**, where a 10-second interval should have written
+about twenty records. The firmware says yes; the hardware refuses; the status
+word reports the firmware's opinion.
+
+#### The discriminator is behavioural, not a bit
+
+Send an enable, then watch the write pointer for longer than one log interval
+**while a fix is present**:
+
+- pointer advances → it was a software disable, and you have just fixed it
+- pointer frozen → the switch is in NAV, and no software will change that
+
+This is the §12 lesson arriving from the opposite direction. That section
+established the status bit could not be trusted to report a *stopped* logger;
+this one establishes it cannot be trusted to report a *running* one either. The
+write pointer is the only ground truth in both directions.
+
+#### What the UI now does
+
+The indicator distinguishes three cases instead of two, because a frozen
+pointer means nothing without knowing whether there was anything to write:
+
+1. **no fix** — "no fix, nothing to record", stated plainly and *not* styled as
+   a fault. Indoors this logger holds no fix for hours and correctly writes
+   nothing; the previous wording called that NOT RECORDING and was wrong for a
+   whole day before anyone noticed the switch.
+2. **fix, pointer advancing** — RECORDING, with the age of the fact.
+3. **fix, pointer frozen** — NOT RECORDING, naming the switch *first* because it
+   is the likelier cause and the only one the app cannot fix, then the firmware
+   disable and its remedy.
+
+The "Reported" row keeps the raw status word but is now explicitly not the
+verdict, and when it claims logging while the pointer is frozen under a good
+fix, the card says so outright.
+
+#### Also worth knowing
+
+**Moving the slide switch drops the Bluetooth link.** Observed at 20:21:20 that
+evening: the link fell over the moment the switch moved, with no other cause. If
+a session dies while someone is fiddling with the device, that is why.
+
+#### Still open
+
+- **What left logging disabled on 2026-09-08 morning is unexplained.** The app
+  sent no disable that day, and a software enable at 13:18 was followed by the
+  pointer advancing — which means the switch was on LOG and something had
+  genuinely disabled logging in firmware. Either that, or the switch was in NAV
+  and was moved at the same moment. The evidence does not decide it, and this
+  section deliberately does not guess.
+- The state table above is complete for switch/software combinations, but
+  **OFF was never tested**, since testing it means powering the logger down.

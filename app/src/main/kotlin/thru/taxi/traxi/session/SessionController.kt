@@ -375,6 +375,19 @@ class SessionController(
     private var connectedAddress: String? = null
     private var linkWatcher: android.content.BroadcastReceiver? = null
 
+    /**
+     * Address whose last connect failed while bonded, or null.
+     *
+     * Drives an *offer* to re-pair, never an act. See [connect] for why this
+     * app no longer deletes a pairing on its own.
+     */
+    private val _stalePairingSuspected = MutableStateFlow<String?>(null)
+    val stalePairingSuspected: StateFlow<String?> = _stalePairingSuspected.asStateFlow()
+
+    private var stalePairingSuspectedFor: String?
+        get() = _stalePairingSuspected.value
+        set(value) { _stalePairingSuspected.value = value }
+
     /** Set when the session is a simulation, so the UI can say so plainly. */
     var isSimulated: Boolean = false
         private set
@@ -434,49 +447,89 @@ class SessionController(
                 // that was streaming NMEA. See [AclLink].
                 AclLink.awaitDown(context, device, note = transcript::note)
 
+                // **The pairing is never destroyed automatically.**
+                //
+                // A stale link key is real -- this logger uses legacy pairing
+                // and forgets its key across a power cycle while Android keeps
+                // hers -- but a failed connect is weak evidence for it. It is
+                // equally the signature of a wedged radio, a device out of
+                // range, or one that has just been switched off. The old code
+                // guessed, and the guess was destructive: undoing a deleted
+                // bond needs the user physically at the device typing a PIN.
+                // It cost thirteen minutes on 2026-09-08, seconds after a
+                // confirmed wedge, which is exactly when the guess is least
+                // likely to be right.
+                //
+                // Note also what `looksStale` actually tested. Its own comment
+                // promised "bonded, but with no authenticated or encrypted
+                // link" -- the genuinely contradictory state. Its body was
+                // `bondState == BOND_BONDED`, which is true of every healthy
+                // paired device. The narrow evidence-based check was documented
+                // and never implemented, so in practice any connect failure at
+                // all reached the remedy.
+                //
+                // So: offer it, and let the person holding the phone decide.
                 val opened = try {
                     BluetoothSppTransport(device).also { it.open() }
                 } catch (first: Exception) {
-                    // A connect failure on a device Android believes is bonded
-                    // is the signature of a stale link key: this logger uses
-                    // legacy pairing and forgets its key across a power cycle
-                    // while the phone keeps hers. Nothing prompts for a PIN
-                    // because nothing thinks pairing is needed. Clear the bond
-                    // and pair again, which restores the PIN exchange.
-                    if (!Bonding.looksStale(device)) throw first
-
-                    transcript.note(
-                        "connect failed while bonded; clearing a probably-stale " +
-                            "link key and re-pairing"
-                    )
-                    if (!Bonding.removeBond(device)) {
-                        throw IllegalStateException(
-                            "The pairing with this logger has gone stale, and it could " +
-                                "not be cleared automatically.\n\n" +
-                                "Forget \"${runCatching { device.name }.getOrNull() ?: address}\" " +
-                                "in Android's Bluetooth settings, then connect again and " +
-                                "enter ${Bonding.KNOWN_PIN}."
+                    if (Bonding.looksStale(device)) {
+                        transcript.note(
+                            "connect failed while bonded; the pairing may be stale, " +
+                                "offering a re-pair rather than clearing it"
                         )
+                        stalePairingSuspectedFor = address
                     }
-
-                    // Give the stack time to settle into BOND_NONE.
-                    kotlinx.coroutines.delay(1_500)
-                    when (val again = Bonding.ensureBonded(context, device)) {
-                        is Bonding.Result.Failed ->
-                            throw IllegalStateException(again.reason)
-                        else -> transcript.note("re-paired; retrying connect")
-                    }
-
-                    BluetoothSppTransport(device).also { it.open() }
+                    throw first
                 }
 
-                // Outside the stale-key handler on purpose: whatever happens in
-                // here, the pairing stays untouched.
+                stalePairingSuspectedFor = null
                 openWith(opened, simulated = false)
             } catch (e: Exception) {
                 disconnectQuietly()
                 _connection.value = ConnectionState.Failed(explainConnectFailure(e, address))
             }
+        }
+    }
+
+    /**
+     * Clear the pairing and connect again, **because a person asked for it**.
+     *
+     * The same sequence the app used to run on its own guess, now behind an
+     * explicit tap. Everything destructive about it is unchanged; what changed
+     * is who decides, and that the decision is made by someone who can see the
+     * logger, knows whether they just power-cycled it, and can type the PIN the
+     * re-pair will ask for.
+     */
+    fun clearPairingAndReconnect(address: String) {
+        scope.launch {
+            _connection.value = ConnectionState.Connecting(address)
+            stalePairingSuspectedFor = null
+            try {
+                val device = pairing.deviceFor(address)
+                    ?: throw IllegalStateException("No Bluetooth device at $address")
+
+                transcript.note("user asked to clear the pairing for $address")
+                if (!Bonding.removeBond(device)) {
+                    throw IllegalStateException(
+                        "The pairing could not be cleared automatically.\n\n" +
+                            "Forget \"${runCatching { device.name }.getOrNull() ?: address}\" " +
+                            "in Android's Bluetooth settings, then connect again and " +
+                            "enter ${Bonding.KNOWN_PIN}."
+                    )
+                }
+                // Let the stack settle into BOND_NONE before asking again.
+                delay(1_500)
+                when (val again = Bonding.ensureBonded(context, device)) {
+                    is Bonding.Result.Failed -> throw IllegalStateException(again.reason)
+                    else -> transcript.note("re-paired at the user's request")
+                }
+            } catch (e: Exception) {
+                _connection.value = ConnectionState.Failed(
+                    e.message ?: "Could not clear the pairing"
+                )
+                return@launch
+            }
+            connect(address)
         }
     }
 

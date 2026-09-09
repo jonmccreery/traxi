@@ -59,7 +59,13 @@ object AclLink {
     suspend fun awaitDown(
         context: Context,
         device: BluetoothDevice,
-        timeoutMillis: Long = 12_000,
+        // Twelve seconds was too short and it mattered: on 2026-09-08 a link
+        // rebuild after a wedge timed out here twice and connected onto the
+        // same stale ACL, which is the one thing the rebuild exists to avoid.
+        // Observed teardowns run 10-14 s, and a supervision timeout longer, so
+        // the wait now covers the case it was written for. Waiting half a
+        // minute is cheap; inheriting a wedged session is not.
+        timeoutMillis: Long = 30_000,
         note: (String) -> Unit = {},
     ): Boolean {
         when (isConnected(device)) {

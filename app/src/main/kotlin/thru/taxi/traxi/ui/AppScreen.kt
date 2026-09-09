@@ -6,6 +6,7 @@ import thru.taxi.traxi.core.format.LogFormat
 import thru.taxi.traxi.core.format.RecordingAudit
 import thru.taxi.traxi.core.protocol.FixType
 import thru.taxi.traxi.core.protocol.FlashEraser
+import thru.taxi.traxi.bt.Bonding
 import thru.taxi.traxi.core.protocol.Pmtk
 import thru.taxi.traxi.core.protocol.SatelliteView
 import thru.taxi.traxi.core.protocol.Telemetry
@@ -46,15 +47,6 @@ private enum class Tab(val label: String) {
 }
 
 /**
- * Age of a reading, in words.
- *
- * The recording indicator states how old its fact is rather than implying it is
- * live. Over Bluetooth the write pointer is sampled rarely -- asking this logger
- * too often takes the link down -- so "checked 6 minutes ago" is the honest
- * shape of the answer, and pretending to a live feed is what the previous
- * clock-decayed rule got wrong.
- */
-/**
  * How recently a fix must have arrived for the receiver to count as fixed.
  *
  * Fixes land at ~1 Hz, so fifteen seconds is many missed epochs -- long enough
@@ -63,6 +55,15 @@ private enum class Tab(val label: String) {
  */
 private const val FIX_RECENT_NANOS = 15_000_000_000L
 
+/**
+ * Age of a reading, in words.
+ *
+ * The recording indicator states how old its fact is rather than implying it is
+ * live. Over Bluetooth the write pointer is sampled rarely -- asking this logger
+ * too often takes the link down -- so "checked 6 minutes ago" is the honest
+ * shape of the answer, and pretending to a live feed is what the previous
+ * clock-decayed rule got wrong.
+ */
 private fun describeAgo(seconds: Double): String = when {
     seconds < 45 -> "just now"
     seconds < 90 -> "a minute ago"
@@ -296,6 +297,7 @@ private fun DeviceTab(
     val usbDevices = remember { container.usb.candidates() }
 
     val recording by session.recording.collectAsState()
+    val staleAddress by session.stalePairingSuspected.collectAsState()
 
     when (connection) {
         is ConnectionState.Connected -> {
@@ -335,6 +337,23 @@ private fun DeviceTab(
                                 "unpaired-connect path.",
                             style = MaterialTheme.typography.bodySmall,
                         )
+                        // Offered, never done unnoticed. Clearing a pairing
+                        // needs the user back at the device with the PIN, so it
+                        // is their call -- and they know things the app cannot,
+                        // like whether they just power-cycled it.
+                        staleAddress?.let { address ->
+                            Text(
+                                "If the logger is powered on and in range, the pairing may " +
+                                    "have gone stale — this logger forgets its key when it " +
+                                    "loses power, while the phone keeps hers. Re-pairing " +
+                                    "fixes that, and will ask for PIN ${Bonding.KNOWN_PIN}.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            OutlinedButton(
+                                onClick = { session.clearPairingAndReconnect(address) },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("Clear pairing and re-pair") }
+                        }
                     }
                 }
             }

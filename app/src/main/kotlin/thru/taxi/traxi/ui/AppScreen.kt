@@ -54,6 +54,15 @@ private enum class Tab(val label: String) {
  * shape of the answer, and pretending to a live feed is what the previous
  * clock-decayed rule got wrong.
  */
+/**
+ * How recently a fix must have arrived for the receiver to count as fixed.
+ *
+ * Fixes land at ~1 Hz, so fifteen seconds is many missed epochs -- long enough
+ * not to flicker on a single dropped sentence, short enough that walking indoors
+ * is reflected before the recording indicator draws a conclusion from it.
+ */
+private const val FIX_RECENT_NANOS = 15_000_000_000L
+
 private fun describeAgo(seconds: Double): String = when {
     seconds < 45 -> "just now"
     seconds < 90 -> "a minute ago"
@@ -122,7 +131,7 @@ fun AppScreen(
             }
 
             when (tab) {
-                Tab.DEVICE -> DeviceTab(container, connection, onPairDevice)
+                Tab.DEVICE -> DeviceTab(container, connection, liveActivity, onPairDevice)
                 Tab.LIVE -> LiveTab(connection, telemetry, liveActivity, linkHealth)
                 Tab.DUMPS -> DumpsTab(container, connection, download, summary)
                 Tab.CONFIG -> ConfigTab(container, connection)
@@ -274,6 +283,7 @@ private fun PermissionCard(onRequest: () -> Unit) {
 private fun DeviceTab(
     container: AppContainer,
     connection: ConnectionState,
+    liveActivity: LiveActivity,
     onPairDevice: () -> Unit,
 ) {
     val session = container.session
@@ -289,7 +299,7 @@ private fun DeviceTab(
 
     when (connection) {
         is ConnectionState.Connected -> {
-            DeviceInfoCard(connection.info, session.isSimulated, recording)
+            DeviceInfoCard(connection.info, session.isSimulated, recording, liveActivity)
             BatteryExemptionCard()
             OutlinedButton(
                 onClick = { session.disconnect() },
@@ -467,7 +477,12 @@ private fun DeviceButton(name: String?, address: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun DeviceInfoCard(info: DeviceInfo, simulated: Boolean, recording: RecordingActivity) {
+private fun DeviceInfoCard(
+    info: DeviceInfo,
+    simulated: Boolean,
+    recording: RecordingActivity,
+    activity: LiveActivity,
+) {
     SectionCard(if (simulated) "Simulated logger" else "Logger") {
         Text(info.displayModel, style = MaterialTheme.typography.titleLarge)
         Row2("Transport", info.transportDescription)
@@ -500,6 +515,13 @@ private fun DeviceInfoCard(info: DeviceInfo, simulated: Boolean, recording: Reco
             val conclusive = recording.lastProbeGapNanos >
                 (info.timeIntervalSeconds * 1.5 * 1e9).toLong()
             val checkedAgo = (now - recording.lastProbeAtNanos) / 1e9
+            // A frozen pointer means nothing without knowing whether the
+            // receiver had anything to write. Indoors this logger holds no fix
+            // for hours and correctly records nothing; calling that "not
+            // recording" is a false alarm on the one reading that must never
+            // cry wolf.
+            val hasFix = activity.lastFixAtNanos != 0L &&
+                (now - activity.lastFixAtNanos) < FIX_RECENT_NANOS
             when {
                 !looked || (!recording.lastProbeAdvanced && !conclusive) ->
                     Row2("Recording", "checking…")
@@ -525,6 +547,19 @@ private fun DeviceInfoCard(info: DeviceInfo, simulated: Boolean, recording: Reco
                     )
                 }
 
+                // Nothing was written, and nothing was available to write. Not
+                // a fault, and deliberately not styled as one.
+                !hasFix -> {
+                    Row2("Recording", "no fix — nothing to record")
+                    Text(
+                        "The receiver has no position, so there is nothing for the " +
+                            "logger to write. This is normal indoors and is not a " +
+                            "fault; recording resumes on its own once it sees the sky.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+
                 else -> {
                     Text(
                         "NOT RECORDING",
@@ -532,23 +567,47 @@ private fun DeviceInfoCard(info: DeviceInfo, simulated: Boolean, recording: Reco
                         color = MaterialTheme.colorScheme.error,
                     )
                     Text(
-                        if (recording.confirmedEver) {
-                            "The write pointer had not moved when checked " +
-                                "${describeAgo(checkedAgo)}, after " +
-                                "%.0f s of watching. Recording appears to have stopped."
-                                    .format(recording.lastProbeGapNanos / 1e9)
-                        } else {
-                            "No fixes have been written to flash since connecting. " +
-                                "The logger is not recording — resume it before setting off."
-                        },
+                        "There is a good fix and the write pointer still has not " +
+                            "moved — checked ${describeAgo(checkedAgo)}, after " +
+                            "%.0f s of watching. Fixes are being lost.".format(
+                                recording.lastProbeGapNanos / 1e9),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    // The switch comes first because it is the likelier cause
+                    // and the only one the app cannot fix. Measured 2026-09-08:
+                    // in NAV the logger accepts an enable and reports 0x0102
+                    // while writing nothing at all, so no software setting --
+                    // and no reassuring status word -- overrides the slider.
+                    Text(
+                        "Check the slide switch on the logger is set to LOG, not NAV. " +
+                            "In NAV it navigates but deliberately does not record, and " +
+                            "the app cannot override that — it will even report " +
+                            "\"logging\" while writing nothing.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        "If the switch is already on LOG, logging has been disabled in " +
+                            "firmware: use Resume logging on the Config tab.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
             }
-            // The device's own status bit, kept as detail. It is not the alarm:
-            // it reads NOT logging right after a reconnect even while fixes are
-            // still being written, which is the false alarm this card replaces.
-            reported?.let { Row2("Reported", it.describe()) }
+            // The device's own status bit, kept as detail and never as the
+            // verdict. It is not merely unreliable, it is capable of stating
+            // the opposite of the truth: with the switch in NAV it reports
+            // 0x0102 "logging" while the write pointer never moves. Only the
+            // pointer above says whether anything is being recorded.
+            reported?.let {
+                Row2("Reported", it.describe())
+                if (it.isLoggingEnabled && !recording.lastProbeAdvanced && hasFix) {
+                    Text(
+                        "The logger reports logging, but nothing is reaching flash — " +
+                            "the switch is almost certainly in NAV.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
         }
 
         info.flash?.let { Row2("Flash", it.describe()) }

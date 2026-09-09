@@ -451,12 +451,35 @@ BT    493 B/s         full read ~3 hours (see below — this is a residue,
                       not the bridge's speed)
 ```
 
-**493 B/s is what is left after NMEA, not what the bridge can do.** Measured
+~~**493 B/s is what is left after NMEA, not what the bridge can do.** Measured
 2026-09-07 from a timestamped transcript: the idle navigation stream alone is
 **415 B/s**, 43% of the ~960 B/s the internal 9600-baud UART carries. Add the
 log payload and `415 + 493 = 908 B/s`, **95% of the bridge**. A Bluetooth
 download therefore runs the UART pinned near capacity for its entire three
-hours, and the download's share is simply the remainder. See §15.
+hours, and the download's share is simply the remainder. See §15.~~
+
+> **Wrong, and it was my own addition — corrected 2026-09-08 by the first
+> completed Bluetooth download.** The arithmetic assumed NMEA keeps streaming
+> at its idle rate while log data flows. It does not. Measured across that
+> 14-minute transfer: NMEA runs **9 B/s during the download** against
+> **289 B/s idle immediately after it**. The device all but suspends the
+> navigation stream and gives the bridge to the log reads.
+>
+> The original line in the table was right and did not need correcting. The
+> real accounting is hex encoding, not contention:
+>
+> ```
+> 396 B/s payload  x2 (hex on the wire)  = 792 B/s
+> + sentence framing (~20 chars per 4096) ~ 797 B/s
+> against the ~960 B/s the 9600-baud bridge carries = ~83%
+> ```
+>
+> So a transfer does run the bridge near capacity, but on its own account,
+> and the remaining headroom goes on inter-chunk gaps and the device's flash
+> reads — not on NMEA. The lesson worth keeping is the one about method: that
+> paragraph reasoned from two numbers measured in *different* conditions and
+> added them, which is how a plausible figure ends up in a document that is
+> supposed to contain only measured ones.
 
 ### Current logger configuration (changed during the session)
 
@@ -704,10 +727,22 @@ capture failure in §12 found and closed.
    response to `PMTK182,6,1` — how long it actually takes, and whether the 90 s
    `PmtkClient.ERASE_TIMEOUT_MILLIS` is right. Do it with a dump already
    exported off the phone; that is the run where a mistake is real.
-2. **A full Bluetooth download.** ~3 hours at 493 B/s against a nearly-full
+2. ~~**A full Bluetooth download.** ~3 hours at 493 B/s against a nearly-full
    chip, which is the point — the flash is deliberately being left full so the
    long path gets exercised for real. Watch for the idle timeout and the
-   foreground service surviving a screen-off overnight run.
+   foreground service surviving a screen-off overnight run.~~
+
+   > **Done 2026-09-08, on an empty chip — so half of it still stands.** A
+   > complete Bluetooth read to end-of-data: 5 blocks, 327,680 bytes, 827 s,
+   > 396 B/s, **zero retries, zero link rebuilds, zero checksum failures**,
+   > stopping correctly on two consecutive unwritten blocks. Parsed to 2,768
+   > records, time monotonic. Capture at `data/bt_full_2026-09-08.bin`.
+   >
+   > What this does **not** yet prove is the long path: the flash had been
+   > erased, so this was 14 minutes and 5 blocks, not 3 hours and 84. The
+   > nearly-full-chip run is still outstanding, and with it the screen-off
+   > overnight behaviour. Nor did it exercise `downloadWithLinkRecovery` —
+   > nothing wedged, so the recovery code has still never run against hardware.
 3. **Tighten the simulator** (§9). It still accepts sub-block reads and answers
    instantly, and every download bug this project has had lived in that gap.
 4. The `1 + 511` throughput curiosity in §10, which is optional.
@@ -1467,3 +1502,58 @@ a session dies while someone is fiddling with the device, that is why.
   section deliberately does not guess.
 - The state table above is complete for switch/software combinations, but
   **OFF was never tested**, since testing it means powering the logger down.
+
+### 15.3 The first completed Bluetooth download, and what a healthy block looks like
+
+2026-09-08, 21:04–21:18. The run that §11 item 2 had been waiting for, and the
+first hard data on what this link does when nothing is wrong.
+
+```
+5 blocks   327,680 bytes   827 s   396 B/s
+0 retries   0 link rebuilds   0 checksum failures   0 damaged ranges
+stopped correctly on 2 consecutive unwritten blocks at 0x00050000
+parsed: 2,768 records, time monotonic
+```
+
+Evidence at `data/bt_full_2026-09-08.bin` and
+`data/bt-full-download-2026-09-08.log`.
+
+#### Every block has the same internal shape
+
+The per-block arrival gaps are remarkably consistent, and they explain the
+"burst then asymptote" that opened this whole line of investigation — a fast
+start settling to about `0.3 KB/s`, sector after sector:
+
+| Block | first gap | median | 1st half | 2nd half | ratio |
+|---|---|---|---|---|---|
+| `0x00000000` | 1346 ms | 7309 ms | 3807 ms | 7160 ms | 1.88 |
+| `0x00010000` | 1334 ms | 6821 ms | 3646 ms | 6764 ms | 1.86 |
+| `0x00020000` | 1679 ms | 6826 ms | 3428 ms | 6947 ms | 2.03 |
+| `0x00030000` | 1087 ms | 6828 ms | 3337 ms | 7069 ms | 2.12 |
+| `0x00040000` | 950 ms | 6825 ms | 3441 ms | 6795 ms | 1.97 |
+
+Chunk gaps roughly **double** from the start of a block to its end, and then
+**reset completely** at the next block. Block 5 is indistinguishable from block
+1, so nothing accumulates across a transfer.
+
+The shape is a buffer draining, not a link degrading. Early chunks arrive at
+~3.4 s — `4096` wire bytes per chunk over 3.4 s is ~1200 B/s, comfortably above
+what a 9600-baud bridge can carry, so those bytes were already staged. Late
+chunks settle at ~6.8 s, about 600 B/s of hex, which is the bridge actually
+working. **This is the answer to the original question about the speed burst,
+and it is not the same phenomenon as the §15 wedge:** it is bounded, it repeats
+identically, and it resets.
+
+Distinguishing the two is the useful part. A healthy block ramps from ~3.4 s to
+~6.8 s and starts over. The wedge climbs *across* probes without resetting and
+ends in silence.
+
+#### What it does not prove
+
+- **The chip was nearly empty.** This was 14 minutes and 5 blocks; the
+  nearly-full case is 84 blocks and hours, and remains untested.
+- **`downloadWithLinkRecovery` never ran.** Nothing wedged, so the recovery
+  path still has no hardware evidence behind it.
+- One clean run is not a stability claim. It is one clean run, after a device
+  power cycle and on a freshly built ACL — both of which §15.1 predicts are
+  favourable starting conditions.

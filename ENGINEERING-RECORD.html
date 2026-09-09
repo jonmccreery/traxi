@@ -544,12 +544,31 @@ above 4096 would gain nothing.</strong>
 BT    493 B/s         full read ~3 hours (see below — this is a residue,
                       not the bridge's speed)
 </code></pre>
-<p><strong>493 B/s is what is left after NMEA, not what the bridge can do.</strong> Measured
+<p><del><strong>493 B/s is what is left after NMEA, not what the bridge can do.</strong> Measured
 2026-09-07 from a timestamped transcript: the idle navigation stream alone is
 <strong>415 B/s</strong>, 43% of the ~960 B/s the internal 9600-baud UART carries. Add the
 log payload and <code>415 + 493 = 908 B/s</code>, <strong>95% of the bridge</strong>. A Bluetooth
 download therefore runs the UART pinned near capacity for its entire three
-hours, and the download's share is simply the remainder. See §15.</p>
+hours, and the download's share is simply the remainder. See §15.</del></p>
+<blockquote>
+<p><strong>Wrong, and it was my own addition — corrected 2026-09-08 by the first
+completed Bluetooth download.</strong> The arithmetic assumed NMEA keeps streaming
+at its idle rate while log data flows. It does not. Measured across that
+14-minute transfer: NMEA runs <strong>9 B/s during the download</strong> against
+<strong>289 B/s idle immediately after it</strong>. The device all but suspends the
+navigation stream and gives the bridge to the log reads.</p>
+<p>The original line in the table was right and did not need correcting. The
+real accounting is hex encoding, not contention:</p>
+<p><code>396 B/s payload  x2 (hex on the wire)  = 792 B/s
++ sentence framing (~20 chars per 4096) ~ 797 B/s
+against the ~960 B/s the 9600-baud bridge carries = ~83%</code></p>
+<p>So a transfer does run the bridge near capacity, but on its own account,
+and the remaining headroom goes on inter-chunk gaps and the device's flash
+reads — not on NMEA. The lesson worth keeping is the one about method: that
+paragraph reasoned from two numbers measured in <em>different</em> conditions and
+added them, which is how a plausible figure ends up in a document that is
+supposed to contain only measured ones.</p>
+</blockquote>
 <h3>Current logger configuration (changed during the session)</h3>
 <pre><code>log format  0x000A1C3F   (UTC,VALID,LAT,LON,HEIGHT,SPEED,HDOP,VDOP,NSAT,RCR,DISTANCE)
 interval    5.0 s        (was 20.0 s)
@@ -787,14 +806,26 @@ capture failure in §12 found and closed.</p>
    response to <code>PMTK182,6,1</code> — how long it actually takes, and whether the 90 s
    <code>PmtkClient.ERASE_TIMEOUT_MILLIS</code> is right. Do it with a dump already
    exported off the phone; that is the run where a mistake is real.</li>
-<li><strong>A full Bluetooth download.</strong> ~3 hours at 493 B/s against a nearly-full
+<li><del><strong>A full Bluetooth download.</strong> ~3 hours at 493 B/s against a nearly-full
    chip, which is the point — the flash is deliberately being left full so the
    long path gets exercised for real. Watch for the idle timeout and the
-   foreground service surviving a screen-off overnight run.</li>
-<li><strong>Tighten the simulator</strong> (§9). It still accepts sub-block reads and answers
-   instantly, and every download bug this project has had lived in that gap.</li>
-<li>The <code>1 + 511</code> throughput curiosity in §10, which is optional.</li>
+   foreground service surviving a screen-off overnight run.</del></li>
 </ol>
+<blockquote>
+<p><strong>Done 2026-09-08, on an empty chip — so half of it still stands.</strong> A
+complete Bluetooth read to end-of-data: 5 blocks, 327,680 bytes, 827 s,
+396 B/s, <strong>zero retries, zero link rebuilds, zero checksum failures</strong>,
+stopping correctly on two consecutive unwritten blocks. Parsed to 2,768
+records, time monotonic. Capture at <code>data/bt_full_2026-09-08.bin</code>.</p>
+<p>What this does <strong>not</strong> yet prove is the long path: the flash had been
+erased, so this was 14 minutes and 5 blocks, not 3 hours and 84. The
+nearly-full-chip run is still outstanding, and with it the screen-off
+overnight behaviour. Nor did it exercise <code>downloadWithLinkRecovery</code> —
+nothing wedged, so the recovery code has still never run against hardware.
+3. <strong>Tighten the simulator</strong> (§9). It still accepts sub-block reads and answers
+   instantly, and every download bug this project has had lived in that gap.
+4. The <code>1 + 511</code> throughput curiosity in §10, which is optional.</p>
+</blockquote>
 <hr />
 <h2>12. The silent capture failure — read this before touching config writes</h2>
 <p>Found 2026-09-06, and the most consequential bug in the project's history.
@@ -1604,6 +1635,97 @@ a session dies while someone is fiddling with the device, that is why.</p>
   section deliberately does not guess.</li>
 <li>The state table above is complete for switch/software combinations, but
   <strong>OFF was never tested</strong>, since testing it means powering the logger down.</li>
+</ul>
+<h3>15.3 The first completed Bluetooth download, and what a healthy block looks like</h3>
+<p>2026-09-08, 21:04–21:18. The run that §11 item 2 had been waiting for, and the
+first hard data on what this link does when nothing is wrong.</p>
+<pre><code>5 blocks   327,680 bytes   827 s   396 B/s
+0 retries   0 link rebuilds   0 checksum failures   0 damaged ranges
+stopped correctly on 2 consecutive unwritten blocks at 0x00050000
+parsed: 2,768 records, time monotonic
+</code></pre>
+<p>Evidence at <code>data/bt_full_2026-09-08.bin</code> and
+<code>data/bt-full-download-2026-09-08.log</code>.</p>
+<h4>Every block has the same internal shape</h4>
+<p>The per-block arrival gaps are remarkably consistent, and they explain the
+"burst then asymptote" that opened this whole line of investigation — a fast
+start settling to about <code>0.3 KB/s</code>, sector after sector:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Block</th>
+<th>first gap</th>
+<th>median</th>
+<th>1st half</th>
+<th>2nd half</th>
+<th>ratio</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0x00000000</code></td>
+<td>1346 ms</td>
+<td>7309 ms</td>
+<td>3807 ms</td>
+<td>7160 ms</td>
+<td>1.88</td>
+</tr>
+<tr>
+<td><code>0x00010000</code></td>
+<td>1334 ms</td>
+<td>6821 ms</td>
+<td>3646 ms</td>
+<td>6764 ms</td>
+<td>1.86</td>
+</tr>
+<tr>
+<td><code>0x00020000</code></td>
+<td>1679 ms</td>
+<td>6826 ms</td>
+<td>3428 ms</td>
+<td>6947 ms</td>
+<td>2.03</td>
+</tr>
+<tr>
+<td><code>0x00030000</code></td>
+<td>1087 ms</td>
+<td>6828 ms</td>
+<td>3337 ms</td>
+<td>7069 ms</td>
+<td>2.12</td>
+</tr>
+<tr>
+<td><code>0x00040000</code></td>
+<td>950 ms</td>
+<td>6825 ms</td>
+<td>3441 ms</td>
+<td>6795 ms</td>
+<td>1.97</td>
+</tr>
+</tbody>
+</table></div>
+<p>Chunk gaps roughly <strong>double</strong> from the start of a block to its end, and then
+<strong>reset completely</strong> at the next block. Block 5 is indistinguishable from block
+1, so nothing accumulates across a transfer.</p>
+<p>The shape is a buffer draining, not a link degrading. Early chunks arrive at
+~3.4 s — <code>4096</code> wire bytes per chunk over 3.4 s is ~1200 B/s, comfortably above
+what a 9600-baud bridge can carry, so those bytes were already staged. Late
+chunks settle at ~6.8 s, about 600 B/s of hex, which is the bridge actually
+working. <strong>This is the answer to the original question about the speed burst,
+and it is not the same phenomenon as the §15 wedge:</strong> it is bounded, it repeats
+identically, and it resets.</p>
+<p>Distinguishing the two is the useful part. A healthy block ramps from ~3.4 s to
+~6.8 s and starts over. The wedge climbs <em>across</em> probes without resetting and
+ends in silence.</p>
+<h4>What it does not prove</h4>
+<ul>
+<li><strong>The chip was nearly empty.</strong> This was 14 minutes and 5 blocks; the
+  nearly-full case is 84 blocks and hours, and remains untested.</li>
+<li><strong><code>downloadWithLinkRecovery</code> never ran.</strong> Nothing wedged, so the recovery
+  path still has no hardware evidence behind it.</li>
+<li>One clean run is not a stability claim. It is one clean run, after a device
+  power cycle and on a freshly built ACL — both of which §15.1 predicts are
+  favourable starting conditions.</li>
 </ul>
 </main>
 </body>

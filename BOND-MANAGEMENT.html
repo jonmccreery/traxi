@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bond management in Traxi: how it worked, and why it kept deleting your pairing</title>
+<style>
+  :root {
+    --paper: #F6F7F4;
+    --ink: #212E28;
+    --muted: #5F6D65;
+    --line: #D7DDD5;
+    --accent: #2E6B52;
+    --accent-soft: #E4EEE8;
+    --card: #FFFFFF;
+    --code-bg: #EAEEE9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #121815;
+      --ink: #D9E0DA;
+      --muted: #8C988F;
+      --line: #29332D;
+      --accent: #7DBFA0;
+      --accent-soft: #1B2A23;
+      --card: #171F1B;
+      --code-bg: #1D2721;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, serif;
+    font-size: 17px;
+    line-height: 1.62;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 48rem; margin: 0 auto; padding: 3rem 1.4rem 5rem; }
+  h1 {
+    font-size: clamp(1.9rem, 5vw, 2.6rem);
+    line-height: 1.12;
+    margin: 0 0 1.2rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+  h2 {
+    font-size: 1.45rem; font-weight: 600; letter-spacing: -0.01em;
+    margin: 2.8rem 0 0.7rem; text-wrap: balance;
+    padding-top: 0.4rem;
+  }
+  h3 { font-size: 1.12rem; font-weight: 600; margin: 1.9rem 0 0.6rem; text-wrap: balance; }
+  h4 {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.78rem; font-weight: 700; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--muted);
+    margin: 1.6rem 0 0.6rem;
+  }
+  p { margin: 0 0 1rem; }
+  ul, ol { margin: 0 0 1rem; padding-left: 1.3rem; }
+  li { margin-bottom: 0.4rem; }
+  code {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.85em;
+    background: var(--code-bg);
+    padding: 0.1em 0.35em;
+    border-radius: 3px;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.85rem 1rem;
+    overflow-x: auto;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    margin: 1rem 0;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .tablewrap { overflow-x: auto; margin: 1.2rem 0; }
+  table {
+    border-collapse: collapse; width: 100%;
+    font-size: 0.88rem;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+  }
+  th {
+    text-align: left; font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600;
+    padding: 0.45rem 0.9rem 0.45rem 0; border-bottom: 1px solid var(--ink);
+  }
+  td { padding: 0.5rem 0.9rem 0.5rem 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  blockquote {
+    margin: 1.3rem 0;
+    padding: 0.9rem 1.15rem;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--accent);
+    border-radius: 6px;
+  }
+  blockquote > :first-child { margin-top: 0; }
+  blockquote > :last-child, blockquote p:last-child { margin-bottom: 0; }
+  blockquote h2 { margin-top: 0; font-size: 1.2rem; }
+  blockquote blockquote { border-left-color: var(--muted); margin: 1rem 0; }
+  del { color: var(--muted); text-decoration: line-through; }
+  hr { border: none; border-top: 1px solid var(--line); margin: 2.6rem 0; }
+  a { color: var(--accent); overflow-wrap: anywhere; }
+  strong { font-weight: 700; }
+</style>
+</head>
+<body>
+<main>
+<h1>Bond management in Traxi: how it worked, and why it kept deleting your pairing</h1>
+<p>Written 2026-09-08, after the second time the app destroyed a working Bluetooth
+pairing and cost a manual re-pair at the device.</p>
+<p>This is the history of one small piece of code, written out because the
+behaviour it produced was surprising every single time it happened, and because
+the reason it existed was never actually written down anywhere.</p>
+<hr />
+<h2>The short version</h2>
+<p>The app deleted your pairing whenever a Bluetooth connect failed. It did that
+because a genuine, well-understood failure mode exists on this hardware — a
+stale link key — and clearing the bond is the correct cure for it.</p>
+<p>The problem was never the cure. It was that <strong>the test for "is this the stale
+key case?" was written to be narrow and implemented to be universal</strong>, so every
+connect failure of any kind reached a destructive remedy designed for one
+specific cause.</p>
+<hr />
+<h2>1. Why bonding exists here at all</h2>
+<p>Classic Bluetooth, unlike BLE, has no unpaired-connect path. An RFCOMM socket
+needs a link key, so the device must be <strong>bonded</strong> before a socket can open.</p>
+<p>This is not the same as being <em>associated</em>. Picking the logger in Android's
+companion-device chooser creates an association — a remembered relationship —
+and exchanges no keys at all. The first real pairing attempt (<code>418f692</code>,
+2026-09-05) went straight to the socket on the assumption that choosing the
+device was enough, and failed with:</p>
+<pre><code>read failed, socket might closed or timeout, read ret: -1
+</code></pre>
+<p>which reads like a dead device and sends you looking in entirely the wrong
+place. That commit added <code>Bonding.ensureBonded</code>, which runs before the socket
+opens and waits on <code>ACTION_BOND_STATE_CHANGED</code>.</p>
+<p>So far, so ordinary: <strong>bond first, then connect.</strong> Nothing is torn down.</p>
+<h2>2. The real failure this hardware has</h2>
+<p>The BT-Q1000XT uses <strong>legacy pairing</strong> — Bluetooth 2.0 PIN pairing rather than
+Secure Simple Pairing — with PIN <code>0000</code> (<code>382a6bf</code>). Legacy pairing brings a
+specific and genuinely nasty failure:</p>
+<blockquote>
+<p><strong>The logger forgets its link key when it loses power. The phone does not.</strong></p>
+</blockquote>
+<p>The result is a contradictory state that nothing surfaces. Android still reports
+<code>BOND_BONDED</code>, so <code>ensureBonded</code> short-circuits and no PIN is ever requested,
+while the device refuses the key it no longer has. The phone's own stack shows
+the contradiction plainly:</p>
+<pre><code>bredr_linkkey_known:T   bredr_authenticated:F   bredr_encrypted:F
+</code></pre>
+<p>Bonded, but neither authenticated nor encrypted. The connect fails with no
+prompt, no explanation, and a socket error identical to the device being
+switched off.</p>
+<p><strong>Clearing the bond genuinely is the fix</strong>, because it forces the PIN exchange
+to happen again. This part of the story is sound, and the capability is worth
+keeping.</p>
+<h2>3. Where it went wrong</h2>
+<p>The remedy arrived in <code>c13ebf5</code> (2026-09-05) — a commit whose message is
+entirely about reverting a read-path rewrite and about not discarding partial
+downloads. <strong>The bond-deletion behaviour is not mentioned in it at all.</strong> A
+destructive, automatic action on the user's pairing entered the codebase as an
+undocumented passenger on a commit about something else. That is most of the
+answer to "why did we do this in the first place?" — nobody wrote it down, so
+there was nothing to disagree with later.</p>
+<p>The code itself carried the right intent. Here is the doc comment it shipped
+with:</p>
+<blockquote>
+<p>True when the phone holds a bond that the device is evidently not honouring —
+<strong>bonded, but with no authenticated or encrypted link.</strong></p>
+</blockquote>
+<p>And here is the implementation, in full:</p>
+<pre><code class="language-kotlin">fun looksStale(device: BluetoothDevice): Boolean =
+    device.bondState == BluetoothDevice.BOND_BONDED
+</code></pre>
+<p><strong>The comment describes a two-part test. The body tests one part.</strong> It never
+looks at authentication or encryption — the very evidence that distinguishes a
+stale key from a healthy pairing — and <code>BOND_BONDED</code> is true of every correctly
+paired device in the world.</p>
+<p>So the guard was vacuous. In <code>connect()</code>, the effective logic became:</p>
+<pre><code>if (the connect failed at all) and (we are paired):
+    delete the pairing
+</code></pre>
+<p>A stale link key, a wedged radio, a device out of range, a device switched off,
+a logger whose Bluetooth module has stopped answering — all identical, all
+answered by deleting the credential.</p>
+<h2>4. What that cost</h2>
+<p><strong>2026-09-08, first incident.</strong> The logger accepted an RFCOMM connection and
+streamed NMEA normally while refusing to answer <code>PMTK605</code> — the command-path
+wedge of engineering record §15. The query timeout propagated into the
+stale-key handler, which deleted the bond. Re-pairing then failed nine times
+(<code>AUTH_FAIL : 4</code>, no PIN prompt ever shown) because the device's radio, not the
+key, was the problem. Recovery needed a power cycle and a PIN typed by hand.</p>
+<p>The fix at the time narrowed the <em>scope</em>: only a failure of <code>open()</code> itself
+could reach the remedy, since a live socket proves the key was good. That was
+correct and insufficient.</p>
+<p><strong>2026-09-08, second incident, ~14 minutes of downloads later.</strong> A fetch-new
+wedged the device. The new link-recovery code fired correctly, tried to rebuild
+the radio link, and the rebuild's <code>open()</code> failed — a genuine open failure, so
+the narrowed guard passed it straight through:</p>
+<pre><code>22:05:10  the device has stopped answering reads
+22:05:10  cycling the radio link to clear a wedged read session
+22:05:22  the old radio link did not drop within 12000ms; connecting anyway
+22:06:38  could not rebuild the radio link: RFCOMM connect failed
+22:06:38  connect failed while bonded; clearing a probably-stale link key
+   ... 13 minutes of manual recovery ...
+22:20:03  bonded
+</code></pre>
+<p>Seconds after a <em>confirmed</em> wedge — the moment a stale key is least likely to be
+the explanation — the app deleted the pairing anyway.</p>
+<h2>5. What it does now</h2>
+<p><strong>The app never deletes a pairing on its own.</strong> When a connect fails while
+bonded, it says so and offers the remedy:</p>
+<blockquote>
+<p>If the logger is powered on and in range, the pairing may have gone stale —
+this logger forgets its key when it loses power, while the phone keeps hers.
+Re-pairing fixes that, and will ask for PIN 0000.</p>
+<p><code>[ Clear pairing and re-pair ]</code></p>
+</blockquote>
+<p>The sequence behind that button is byte-for-byte what the app used to run on its
+own guess. Nothing about the remedy changed. What changed is <strong>who decides</strong> —
+and the person deciding can see the logger, knows whether they just power-cycled
+it, knows whether they are in range, and is holding the phone that will ask for
+the PIN.</p>
+<p>Alongside it, <code>AclLink.awaitDown</code> now waits 30 s instead of 12 s, because the
+rebuild above timed out twice and connected onto the same wedged link it was
+trying to escape.</p>
+<h2>6. The rule this belongs to</h2>
+<p>The project already had the principle, from an earlier regression where a
+merely-quiet link was torn down automatically:</p>
+<blockquote>
+<p><strong>Auto-remediation on conjecture is categorically different from reaction to
+an observed state.</strong></p>
+</blockquote>
+<p>Both bond deletions were conjecture. A failed connect does not observe a stale
+key; it observes a failure with many possible causes. Compare the download
+recovery, which acts automatically and is fine: it fires on three consecutive
+block attempts each returning zero bytes — a measurement, not an inference — and
+its remedy destroys nothing.</p>
+<p>The sharper test this history suggests:</p>
+<p><strong>How expensive is being wrong, and who pays?</strong> A wrong link rebuild costs
+fifteen seconds and the app pays it. A wrong bond deletion costs a trip to the
+device, a PIN, and thirteen minutes — and the user pays it, in the field,
+possibly at a trailhead. The second one needed a human in the loop no matter how
+good the inference was.</p>
+<h2>7. If you want the automatic path back</h2>
+<p>It could be made honest rather than removed, by implementing <code>looksStale</code> as its
+comment always claimed: check that the link is bonded <strong>and</strong> unauthenticated
+<strong>and</strong> unencrypted, which is the contradictory state a stale key actually
+produces. Android exposes no public API for it, so it would need reflection over
+the same fields <code>dumpsys</code> prints, and it would need testing against a genuinely
+stale key rather than against theory.</p>
+<p>Until someone does that and proves it on hardware, the offer is the right shape.</p>
+</main>
+</body>
+</html>

@@ -1,24 +1,36 @@
 #!/usr/bin/env python3
-"""Render ENGINEERING-RECORD.md to ENGINEERING-RECORD.html at the repo root.
+"""Render a project markdown document to styled HTML at the repo root.
 
 Faithful conversion, not a rewrite: python-markdown (tables + fenced_code)
 plus the two things it can't do alone — GFM strikethrough, and raw angle
 brackets in prose that a browser would otherwise eat as fake HTML tags.
 Styled to match DEVELOPMENT-JOURNEY.html.
 
-Usage: python3 tools/render-engineering-record.py
+Defaults to ENGINEERING-RECORD.md, which is what it was written for; any
+other document in the repo can be passed instead, so the second one did not
+have to mean a second copy of the stylesheet.
+
+Usage: python3 tools/render-engineering-record.py [NAME.md]
 Requires: pip install markdown
 """
 import re
+import sys
 from pathlib import Path
 
 import markdown
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / "ENGINEERING-RECORD.md"
-DST = ROOT / "ENGINEERING-RECORD.html"
+SRC = ROOT / (sys.argv[1] if len(sys.argv) > 1 else "ENGINEERING-RECORD.md")
+DST = SRC.with_suffix(".html")
 
 md = SRC.read_text()
+
+# The <title> is the document's own first heading, so a rendered page is not
+# mislabelled as the engineering record.
+title = next(
+    (l.lstrip("# ").strip() for l in md.splitlines() if l.startswith("# ")),
+    SRC.stem,
+)
 
 # Raw angle brackets in prose (not code) would be eaten as fake HTML tags.
 md = md.replace('"dump by <date>"', '"dump by &lt;date&gt;"')
@@ -37,7 +49,7 @@ TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Traxi Engineering Record</title>
+<title>TITLE</title>
 <style>
   :root {
     --paper: #F6F7F4;
@@ -151,5 +163,5 @@ BODY
 </html>
 """
 
-DST.write_text(TEMPLATE.replace("BODY", body))
+DST.write_text(TEMPLATE.replace("TITLE", title).replace("BODY", body))
 print(f"wrote {DST} ({len(body)} bytes of body)")

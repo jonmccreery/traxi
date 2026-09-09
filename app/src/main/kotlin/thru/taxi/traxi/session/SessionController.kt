@@ -296,6 +296,9 @@ class SessionController(
     private var rateLastNanos = 0L
     private var rateEmaBps = 0.0
 
+    /** Chunk arrivals seen since the meter was armed; gates the estimate. */
+    private var rateSamples = 0
+
     // Where the running download is expected to end, for the ETA. The pointer
     // target is right for an unwrapped log (the read stops just past the write
     // frontier) and for every fetch-new; a wrapped log has no unwritten sectors
@@ -608,6 +611,7 @@ class SessionController(
         rateLastBlockBytes = 0
         rateLastNanos = System.nanoTime()
         rateEmaBps = 0.0
+        rateSamples = 0
 
         val info = (_connection.value as? ConnectionState.Connected)?.info
         val block = FlashDownloader.DEFAULT_BLOCK_SIZE
@@ -641,10 +645,25 @@ class SessionController(
             p.blockBytes
         }
         rateLastBlockBytes = p.blockBytes
-        if (dt > 0 && db > 0) {
+
+        if (rateSamples == 0) {
+            // The gap between "the transfer started" and the first chunk is not
+            // a transfer rate. It is a request round trip, the device's own
+            // flash read, and whatever wait the read lock imposed -- tens of
+            // seconds over Bluetooth, against the two or three a chunk really
+            // takes. Dividing the first chunk by all of that produced a rate an
+            // order of magnitude too low, and because the EMA had nothing to
+            // blend with it was adopted whole: the first sector of a download
+            // advertised three hours where the second, by then converged,
+            // showed twelve minutes. Start the clock at the first chunk instead
+            // of measuring against a starting gun.
+            rateLastNanos = now
+            rateSamples = 1
+        } else if (dt > 0 && db > 0) {
             val inst = db / dt
             rateEmaBps = if (rateEmaBps == 0.0) inst else 0.4 * inst + 0.6 * rateEmaBps
             rateLastNanos = now
+            rateSamples++
         }
 
         // A read that has passed the pointer target is the wrapped-log case and
@@ -652,7 +671,11 @@ class SessionController(
         // neither figure is known -- there is nothing left to estimate honestly.
         val target = etaPointerTargetBytes?.takeIf { p.bytesDownloaded < it }
             ?: etaFlashTargetBytes?.takeIf { p.bytesDownloaded < it }
-        val eta = if (target != null && rateEmaBps > 0) {
+        // Withhold the estimate until the rate has seen a few intervals. One
+        // sample over a bursty RFCOMM link is not a throughput, and a wrong
+        // number shown confidently is worse than no number at all -- it is the
+        // figure someone decides whether to wait on.
+        val eta = if (target != null && rateEmaBps > 0 && rateSamples >= MIN_RATE_SAMPLES) {
             ((target - p.bytesDownloaded) / rateEmaBps).toInt()
         } else null
 
@@ -1651,6 +1674,16 @@ class SessionController(
      * above the log interval so a healthy log has advanced by then.
      */
     private val FIRST_WRITE_PROBE_NANOS = 30_000_000_000L
+
+    /**
+     * Chunk arrivals required before a time estimate is shown.
+     *
+     * Four gives three measured intervals -- roughly fifteen seconds over
+     * Bluetooth -- which is enough for the EMA to shake off a single fast or
+     * slow arrival. RFCOMM delivers in bursts, so one interval is never a
+     * throughput.
+     */
+    private val MIN_RATE_SAMPLES = 4
 
     /**
      * Radio links a single transfer may rebuild before giving up.

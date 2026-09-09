@@ -523,8 +523,16 @@ private fun DeviceInfoCard(
             val hasFix = activity.lastFixAtNanos != 0L &&
                 (now - activity.lastFixAtNanos) < FIX_RECENT_NANOS
             when {
+                // Says how long the wait is rather than leaving it open-ended:
+                // the pre-flight probe lands about two log intervals after
+                // connecting, and a silent "checking…" that might mean anything
+                // is its own small alarm.
                 !looked || (!recording.lastProbeAdvanced && !conclusive) ->
-                    Row2("Recording", "checking…")
+                    Row2(
+                        "Recording",
+                        "checking… (about %.0f s)".format(
+                            (info.timeIntervalSeconds * 2).coerceAtLeast(10.0)),
+                    )
 
                 recording.lastProbeAdvanced -> {
                     Text(
@@ -599,7 +607,14 @@ private fun DeviceInfoCard(
             // pointer above says whether anything is being recorded.
             reported?.let {
                 Row2("Reported", it.describe())
-                if (it.isLoggingEnabled && !recording.lastProbeAdvanced && hasFix) {
+                // `looked && conclusive` is the whole guard, and leaving it out
+                // was a bug: lastProbeAdvanced is false before any probe has
+                // run, so connecting to a healthy logger in LOG mode fired this
+                // in red immediately, on no evidence whatsoever. An accusation
+                // needs a measurement behind it, not the absence of one.
+                if (it.isLoggingEnabled && looked && conclusive &&
+                    !recording.lastProbeAdvanced && hasFix
+                ) {
                     Text(
                         "The logger reports logging, but nothing is reaching flash — " +
                             "the switch is almost certainly in NAV.",

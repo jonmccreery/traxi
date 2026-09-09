@@ -828,7 +828,17 @@ class SessionController(
             // takes ten minutes to say anything is not an indicator.
             val steadyProbeNanos =
                 (transport?.writePointerProbeIntervalMillis ?: 600_000L) * 1_000_000
-            var probeIntervalNanos = minOf(FIRST_WRITE_PROBE_NANOS, steadyProbeNanos)
+            // Pre-flight: one early probe, timed off the log interval rather
+            // than a flat constant, because the earliest an advance can
+            // possibly be seen is one interval after the connect-time baseline.
+            // Twice the interval clears the UI's own "long enough to judge"
+            // threshold with room to spare, so the card resolves to a real
+            // answer instead of sitting on "checking…" while the user wonders.
+            val logIntervalNanos = (((_connection.value as? ConnectionState.Connected)
+                ?.info?.timeIntervalSeconds ?: 10.0).coerceAtLeast(1.0) * 1e9).toLong()
+            val firstProbeNanos =
+                maxOf(logIntervalNanos * 2, MIN_FIRST_WRITE_PROBE_NANOS)
+            var probeIntervalNanos = minOf(firstProbeNanos, steadyProbeNanos)
             while (isActive) {
                 // A read while another operation holds the lock would take
                 // bytes belonging to that operation.
@@ -1691,16 +1701,21 @@ class SessionController(
     private val FIX_RATE_WINDOW_NANOS = 4_000_000_000L
 
     /**
-     * How long after connecting to take the first write-pointer sample.
+     * Floor on the pre-flight write-pointer probe.
      *
-     * The steady rate is the link's own business -- see
-     * [Transport.writePointerProbeIntervalMillis], which is rare over Bluetooth
-     * because the query destabilises this logger's radio. The *first* sample is
-     * different: it is what turns the recording indicator from "unknown" into a
-     * confirmed fact, and one probe's risk is worth paying once. Comfortably
-     * above the log interval so a healthy log has advanced by then.
+     * The pre-flight itself is timed at twice the configured log interval --
+     * the earliest point a healthy log is certain to have advanced past the
+     * connect-time baseline. This floor only stops a very short interval from
+     * turning that into a query within a second or two of connecting, when the
+     * link is at its least settled.
+     *
+     * The steady rate afterwards is the link's own business; see
+     * [Transport.writePointerProbeIntervalMillis]. The pre-flight is worth its
+     * one probe regardless, because it is what turns the recording indicator
+     * from "unknown" into a checked fact while the user is still holding the
+     * phone and can act on it.
      */
-    private val FIRST_WRITE_PROBE_NANOS = 30_000_000_000L
+    private val MIN_FIRST_WRITE_PROBE_NANOS = 10_000_000_000L
 
     /**
      * Chunk arrivals required before a time estimate is shown.

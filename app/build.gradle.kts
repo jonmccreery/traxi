@@ -68,4 +68,16 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     testImplementation(libs.junit)
+    testImplementation(kotlin("test"))
+    testImplementation(kotlin("test-junit"))
+}
+
+// The app module had no unit tests at all until 2026-09-15, so every piece of
+// logic that lived here -- the fetch-new outcome message among them -- was
+// verified only by reading it. Anything worth asserting belongs in a pure
+// function this source set can reach.
+tasks.withType<Test>().configureEach {
+    testLogging {
+        events("passed", "failed", "skipped")
+    }
 }

@@ -1019,7 +1019,7 @@ private fun DumpsTab(
                 val frac = (download.blockBytes.toFloat() / download.blockSizeBytes)
                     .coerceIn(0f, 1f)
                 Row2(
-                    "Sector ${download.sectorsRead + 1}",
+                    "Sector ${download.sectorPosition + 1}",
                     "${download.blockBytes / 1024} / ${download.blockSizeBytes / 1024} KB",
                 )
                 LinearProgressIndicator(progress = { frac }, modifier = Modifier.fillMaxWidth())
@@ -1030,7 +1030,10 @@ private fun DumpsTab(
                 Row2("Speed", "%.1f KB/s".format(download.bytesPerSecond / 1024))
             }
             download.etaSeconds?.let { Row2("Time left", "~${describeEta(it)}") }
-            Row2("Sectors done", download.sectorsRead.toString())
+            // Work, not position. On a fetch-new these differ: the untouched
+            // prefix is spanned but never asked for, while the wrap probe is a
+            // whole sector that does not advance the position at all.
+            Row2("Sectors fetched", download.sectorsFetched.toString())
             if (download.resumedFrom > 0) Row2("Resumed from", Bytes.describe(download.resumedFrom))
             if (download.retries > 0) Row2("Retries", download.retries.toString())
             // Surfaced, not hidden. A transfer that had to rebuild the radio
@@ -1090,7 +1093,7 @@ private fun DumpRow(
         HorizontalDivider()
         Text(dump.name, style = MonoStyle)
         Text(
-            "${Bytes.describe(dump.sizeBytes)} · ${dump.sectorsComplete} sectors · $stamp" +
+            "${Bytes.describe(dump.sizeBytes)} · $stamp" +
                 if (dump.isPartial) " · partial" else "",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1177,7 +1180,7 @@ private fun ParseSummaryCard(summary: ParseSummary) {
         }
         Text("${summary.fixes} fixes", style = MaterialTheme.typography.titleLarge)
         Row2("Checksum failures", summary.checksumFailures.toString())
-        Row2("Sectors", summary.sectors.toString())
+        Row2("Sectors with data", summary.sectors.toString())
         Row2("Track segments", summary.segments.toString())
         Row2("Waypoints", summary.waypoints.toString())
         Row2("First fix", summary.firstFix)

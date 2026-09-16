@@ -37,7 +37,16 @@ class DumpRepository(private val context: Context) {
         val isPartial: Boolean,
     ) {
         val name: String get() = file.name
-        val sectorsComplete: Int get() = (sizeBytes / 0x10000).toInt()
+        /**
+         * Sectors the file spans -- its length over the sector size.
+         *
+         * Not a count of sectors holding data: a dump that stopped on two
+         * unwritten sectors spans them too. The parser's `sectorsWithData` is
+         * the figure that answers "how much of this is log", and on the same
+         * file it is smaller. Named for the arithmetic it does so the two are
+         * not mistaken for each other again.
+         */
+        val sectorSpan: Int get() = (sizeBytes / 0x10000).toInt()
     }
 
     suspend fun list(): List<Dump> = withContext(Dispatchers.IO) {

@@ -59,7 +59,7 @@ class DownloadService : Service() {
                     if (!state.running) return@collectLatest
                     val kb = state.bytesDownloaded / 1024
                     val text = buildString {
-                        append("$kb KB · ${state.sectorsRead} sectors")
+                        append("$kb KB · ${state.sectorsFetched} sectors fetched")
                         if (state.retries > 0) append(" · ${state.retries} retries")
                     }
                     // No trustworthy total exists to compute a percentage from,

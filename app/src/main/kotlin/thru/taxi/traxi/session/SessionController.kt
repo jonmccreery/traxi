@@ -66,7 +66,10 @@ data class DeviceInfo(
 data class DownloadState(
     val running: Boolean = false,
     val bytesDownloaded: Int = 0,
-    val sectorsRead: Int = 0,
+    /** Flash position of the read, in sectors. A position, not a tally. */
+    val sectorPosition: Int = 0,
+    /** Sectors actually pulled off the device this transfer, wrap probe included. */
+    val sectorsFetched: Int = 0,
     val retries: Int = 0,
     val resumedFrom: Int = 0,
     /** Bytes filled in the sector currently in flight, 0..[blockSizeBytes]. */
@@ -761,7 +764,8 @@ class SessionController(
 
         _download.value = _download.value.copy(
             bytesDownloaded = p.bytesDownloaded,
-            sectorsRead = p.sectorsRead,
+            sectorPosition = p.sectorPosition,
+            sectorsFetched = p.sectorsFetched,
             retries = p.retries,
             blockBytes = p.blockBytes,
             blockSizeBytes = p.blockSizeBytes,
@@ -1165,11 +1169,10 @@ class SessionController(
         downloadJob = launchExclusive {
             try {
                 val previous = dumps.read(source)
-                _download.value = DownloadState(
-                    running = true,
-                    bytesDownloaded = previous.size,
-                    resumedFrom = previous.size,
-                )
+                // Both the seed and the closing message are pure functions in
+                // [FetchOutcome], so the app's test source set can assert on
+                // them. Neither was reachable from a test while it lived here.
+                _download.value = FetchOutcome.extendSeed(previous)
                 resetRateMeter()
 
                 val target = dumps.newDumpFile()
@@ -1202,17 +1205,12 @@ class SessionController(
                     downloadComplete = result.isComplete,
                     damagedBytes = result.damagedBytes,
                 )
-                val gained = result.image.size - previous.size
-                _message.value = when {
-                    result.failure != null ->
-                        "Interrupted — ${result.image.size / 1024} KB saved and resumable"
-                    // Cancelled mid-extend: "already up to date" would present a
-                    // stop the user requested as a checked fact about the logger.
-                    cancelRequested && !result.isComplete ->
-                        "Cancelled — ${result.image.size / 1024} KB saved and resumable"
-                    gained > 0 -> "Added ${gained / 1024} KB of new tracking to ${target.name}"
-                    else -> "Already up to date — nothing new on the logger"
-                }
+                _message.value = FetchOutcome.message(
+                    result = result,
+                    previous = previous,
+                    targetName = target.name,
+                    cancelled = cancelRequested,
+                )
                 if (result.failure != null) noticeIfLinkDied()
                 parse(target)
             } catch (e: Exception) {

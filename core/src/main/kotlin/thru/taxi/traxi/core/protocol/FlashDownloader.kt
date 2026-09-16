@@ -50,7 +50,16 @@ class FlashDownloader(
 ) {
     data class Progress(
         val bytesDownloaded: Int,
-        val sectorsRead: Int,
+        /**
+         * How far into the flash the read has reached, in sectors -- the read
+         * address divided by the sector size.
+         *
+         * **A position, not a tally.** A fetch-new that resumes at sector 2 and
+         * ends at sector 5 reports 5, having pulled three sectors plus the wrap
+         * probe. Calling it "sectors read" and labelling it "Sectors done"
+         * overstated the work by the whole untouched prefix.
+         */
+        val sectorPosition: Int,
         val retries: Int,
         /**
          * Bytes filled in the block currently in flight, 0..[blockSizeBytes].
@@ -59,11 +68,28 @@ class FlashDownloader(
          */
         val blockBytes: Int = 0,
         val blockSizeBytes: Int = 0,
+        /**
+         * Sectors actually pulled off the device in this transfer, wrap probe
+         * included.
+         *
+         * The one figure here that measures *work*, as against [sectorPosition]
+         * and [Result.sectorSpan], which measure where the read is. On a
+         * fetch-new they diverge sharply: the 2026-09-15 run ended at position
+         * 5 over a 5-sector image while fetching 4 sectors -- the probe plus
+         * three -- because the two sectors before the frontier were never
+         * asked for. 4 x 64 KB is the 256 KB that run actually spent on the
+         * wire for 8,432 bytes of new riding.
+         *
+         * Each sector position counts once however many attempts it took;
+         * re-reads are reported separately as [retries].
+         */
+        val sectorsFetched: Int = 0,
     )
 
     data class Result(
         val image: ByteArray,
-        val sectorsRead: Int,
+        /** Sectors the finished image spans: its length over the sector size. */
+        val sectorSpan: Int,
         val retries: Int,
         val stoppedOnUnwritten: Boolean,
         /**
@@ -98,6 +124,19 @@ class FlashDownloader(
          * zero bytes is not a judgement call.
          */
         val stoppedUnanswered: Boolean = false,
+        /**
+         * Set when fetch-new could not extend the previous dump and re-read the
+         * whole flash instead -- the log wrapped, was erased, or the probe
+         * could not be read.
+         *
+         * The caller needs this to describe the outcome honestly. After a full
+         * re-read the previous dump's frontier is not a baseline for anything,
+         * so "added N KB of new tracking" is not a statement that can be made,
+         * however the byte counts happen to compare.
+         */
+        val fullReread: Boolean = false,
+        /** Sectors pulled off the device in this transfer; see [Progress.sectorsFetched]. */
+        val sectorsFetched: Int = 0,
     ) {
         val isComplete: Boolean
             get() = stoppedOnUnwritten && failure == null && damagedRanges.isEmpty()
@@ -107,20 +146,33 @@ class FlashDownloader(
         val damagedBytes: Int get() = damagedRanges.sumOf { it.last - it.first + 1 }
 
         override fun equals(other: Any?): Boolean =
-            other is Result && sectorsRead == other.sectorsRead &&
+            other is Result && sectorSpan == other.sectorSpan &&
                 retries == other.retries && image.contentEquals(other.image)
 
-        override fun hashCode(): Int = image.contentHashCode() * 31 + sectorsRead
+        override fun hashCode(): Int = image.contentHashCode() * 31 + sectorSpan
     }
 
     /** Whether a previous dump can be extended, or must be re-read in full. */
     sealed interface Plan {
+        /**
+         * Sectors the wrap probe pulled off the device before deciding. Zero
+         * when the answer came from bytes already in hand, without a read.
+         */
+        val sectorsProbed: Int
+
         /** Re-read from [fromOffset]; everything before it is already correct. */
-        data class Extend(val fromOffset: Int, val previousBytes: Int) : Plan {
+        data class Extend(
+            val fromOffset: Int,
+            val previousBytes: Int,
+            override val sectorsProbed: Int = 0,
+        ) : Plan {
             val bytesToSkip: Int get() = fromOffset
         }
 
-        data class FullRequired(val reason: String) : Plan
+        data class FullRequired(
+            val reason: String,
+            override val sectorsProbed: Int = 0,
+        ) : Plan
     }
 
     /**
@@ -169,17 +221,31 @@ class FlashDownloader(
             return Plan.FullRequired("no previous dump worth extending")
         }
 
-        // During the probe nothing new has been fetched, so bytesDownloaded
-        // holds at what the previous dump already covers and only the
-        // per-sector bar moves. Same signal, same honesty, as a download block.
-        val usableSectors = usable / SectorHeader.SECTOR_SIZE
+        // Work out where the extend will resume *before* probing, for two
+        // reasons.
+        //
+        // First, it decides the no-data case without spending a block on the
+        // wire -- two minutes over Bluetooth for an answer that is already
+        // determined by bytes in hand.
+        //
+        // Second, it is what the probe reports progress against. The probe used
+        // to pin at `usable`, the previous dump's whole length, and the extend
+        // then began at the frontier block: the bar jumped *backwards* two
+        // sectors at the handover -- 320 KB/sector 5 dropping to 128 KB/sector 2
+        // in the 2026-09-15 run -- and climbed the same ground again. Nothing
+        // was lost; the two phases were simply counting different things. They
+        // now count the same thing, so the number only ever moves forward.
+        val from = extendOffset(previous, blockSize)
+            ?: return Plan.FullRequired("the previous dump holds no data")
+        val fromSectors = from / SectorHeader.SECTOR_SIZE
+
         val probe = client.readLogBlock(
             0, blockSize, blockIdleTimeoutMillis,
             onChunk = { filledInBlock ->
                 onProgress(
                     Progress(
-                        bytesDownloaded = usable,
-                        sectorsRead = usableSectors,
+                        bytesDownloaded = from,
+                        sectorPosition = fromSectors,
                         retries = 0,
                         blockBytes = filledInBlock,
                         blockSizeBytes = blockSize,
@@ -188,11 +254,14 @@ class FlashDownloader(
             },
             shouldContinue = shouldContinue,
         )
+        // From here on the probe has been on the wire, so every outcome carries
+        // its cost -- a whole 64 KB sector, about two and a half minutes over
+        // Bluetooth. A fetch that gives up after probing did not do no work.
         if (!shouldContinue()) {
-            return Plan.FullRequired("cancelled during the wrap probe")
+            return Plan.FullRequired("cancelled during the wrap probe", sectorsProbed = 1)
         }
         if (!probe.isComplete) {
-            return Plan.FullRequired("could not read the flash to check for a wrap")
+            return Plan.FullRequired("could not read the flash to check for a wrap", sectorsProbed = 1)
         }
 
         // Compare only the records, skipping the 512-byte sector header. The
@@ -217,7 +286,7 @@ class FlashDownloader(
                     "wrap probe differs at 0x%08X; the log has %s since that dump"
                         .format(i, verdict)
                 )
-                return Plan.FullRequired("the log has $verdict since that dump")
+                return Plan.FullRequired("the log has $verdict since that dump", sectorsProbed = 1)
             }
         }
 
@@ -230,20 +299,14 @@ class FlashDownloader(
         // reports the result complete: silent loss in the saved image, wearing
         // an "Added N KB" message. For a data-only prefix dump the frontier IS
         // the final block, so the old shape is unchanged.
-        var lastReal = usable - 1
-        while (lastReal >= 0 && previous[lastReal] == PmtkClient.UNWRITTEN) lastReal--
-        if (lastReal < 0) {
-            return Plan.FullRequired("the previous dump holds no data")
-        }
-        val from = (lastReal / blockSize) * blockSize
         client.transcript.note(
             "wrap probe matches; frontier at 0x%08X, extending from 0x%08X"
-                .format(lastReal + 1, from)
+                .format(frontierOffset(previous, usable), from)
         )
         // Block boundary, as in [download]: empty the in-flight bar so it does
         // not sit at 64/64 KB while the first extend chunk is still on the wire.
-        onProgress(Progress(usable, usableSectors, 0, blockBytes = 0, blockSizeBytes = blockSize))
-        return Plan.Extend(from, usable)
+        onProgress(Progress(from, fromSectors, 0, blockBytes = 0, blockSizeBytes = blockSize))
+        return Plan.Extend(from, usable, sectorsProbed = 1)
     }
 
     /**
@@ -258,18 +321,43 @@ class FlashDownloader(
         shouldContinue: () -> Boolean = { true },
     ): Result {
         val plan = planIncremental(previous, onProgress, shouldContinue)
+        // The probe's sectors are work this transfer did, so they are carried
+        // into everything downstream reports. [download] counts only its own
+        // reads and cannot know a probe ran.
+        val probed = plan.sectorsProbed
+        val withProbe: (Progress) -> Unit =
+            { onProgress(it.copy(sectorsFetched = it.sectorsFetched + probed)) }
+
         if (!shouldContinue()) {
             // Not a wrap and not a failure: the user stopped it. Falling through
             // to the full-download branch would note "full download required"
             // for a transfer that was never going to run.
             client.transcript.note("cancelled during the wrap probe; nothing fetched")
-            return Result(ByteArray(0), sectorsRead = 0, retries = 0, stoppedOnUnwritten = false)
+            // Nothing toward the image -- but the probe still crossed the wire,
+            // and a cancel does not unspend it.
+            return Result(
+                ByteArray(0), sectorSpan = 0, retries = 0, stoppedOnUnwritten = false,
+                sectorsFetched = probed,
+            )
         }
         return when (plan) {
-            is Plan.Extend -> download(previous, plan.fromOffset, onProgress, shouldContinue)
+            is Plan.Extend ->
+                download(previous, plan.fromOffset, withProbe, shouldContinue)
+                    .let { it.copy(sectorsFetched = it.sectorsFetched + probed) }
             is Plan.FullRequired -> {
                 client.transcript.note("full download required: ${plan.reason}")
-                download(ByteArray(0), 0, onProgress, shouldContinue)
+                // The plan is abandoned, so the position the probe reported no
+                // longer describes anything. Zero it in one deliberate step: a
+                // full re-read genuinely does start from nothing, and letting
+                // the first block's callback drop it silently would look like
+                // exactly the backwards jump this class no longer makes.
+                // The work counter is not zeroed with it: the probe happened.
+                onProgress(
+                    Progress(0, 0, 0, blockBytes = 0, blockSizeBytes = blockSize,
+                        sectorsFetched = probed)
+                )
+                download(ByteArray(0), 0, withProbe, shouldContinue)
+                    .let { it.copy(fullReread = true, sectorsFetched = it.sectorsFetched + probed) }
             }
         }
     }
@@ -300,6 +388,10 @@ class FlashDownloader(
 
         var address = resumeFrom
         var sectors = resumeFrom / SectorHeader.SECTOR_SIZE
+        // Sectors this call pulls off the device, as against the prefix it was
+        // handed. Counted once per position; a block that needed three attempts
+        // is one sector fetched and two retries.
+        var fetched = 0
         var retries = 0
         var consecutiveUnwritten = 0
         var stoppedOnUnwritten = false
@@ -325,10 +417,11 @@ class FlashDownloader(
                     onProgress(
                         Progress(
                             bytesDownloaded = out.size() + filledInBlock,
-                            sectorsRead = sectors,
+                            sectorPosition = sectors,
                             retries = retries,
                             blockBytes = filledInBlock,
                             blockSizeBytes = blockSize,
+                            sectorsFetched = fetched,
                         )
                     )
                 },
@@ -351,10 +444,11 @@ class FlashDownloader(
                     onProgress(
                         Progress(
                             bytesDownloaded = out.size() + filledInBlock,
-                            sectorsRead = sectors,
+                            sectorPosition = sectors,
                             retries = retries,
                             blockBytes = filledInBlock,
                             blockSizeBytes = blockSize,
+                            sectorsFetched = fetched,
                         )
                     )
                 },
@@ -412,13 +506,19 @@ class FlashDownloader(
             out.write(block.bytes, 0, blockSize)
             address += blockSize
             sectors = address / SectorHeader.SECTOR_SIZE
+            fetched++
 
             consecutiveUnwritten =
                 if (isUnwritten(block.bytes)) consecutiveUnwritten + 1 else 0
 
             // Block boundary: the in-flight bar resets to empty for the next
             // sector, and bytesDownloaded is now the exact completed total.
-            onProgress(Progress(address, sectors, retries, blockBytes = 0, blockSizeBytes = blockSize))
+            onProgress(
+                Progress(
+                    address, sectors, retries,
+                    blockBytes = 0, blockSizeBytes = blockSize, sectorsFetched = fetched,
+                )
+            )
 
             if (consecutiveUnwritten >= unwrittenSectorsToStop) {
                 stoppedOnUnwritten = true
@@ -451,6 +551,7 @@ class FlashDownloader(
         return Result(
             out.toByteArray(), sectors, retries, stoppedOnUnwritten, failure, damaged,
             stoppedUnanswered = stoppedUnanswered,
+            sectorsFetched = fetched,
         )
     }
 
@@ -490,5 +591,62 @@ class FlashDownloader(
          * device reliably serves; see [planIncremental].
          */
         const val PROBE_OFFSET = SectorHeader.SIZE
+
+        /**
+         * The exclusive end of real data in [image] -- the write frontier.
+         *
+         * Trailing `0xFF` is unwritten flash, not content, so the frontier sits
+         * one past the last byte the logger actually wrote. This is the same
+         * number [planIncremental] notes to the transcript as `frontier at
+         * 0x...`, which means anything derived from it can be checked against
+         * the log rather than taken on trust.
+         *
+         * [limit] bounds the search, for callers that only trust a prefix of
+         * the image. Returns 0 when there is no real data at all.
+         */
+        fun frontierOffset(image: ByteArray, limit: Int = image.size): Int {
+            var last = minOf(limit, image.size) - 1
+            while (last >= 0 && image[last] == PmtkClient.UNWRITTEN) last--
+            return last + 1
+        }
+
+        /**
+         * Bytes of new logging that [updated] holds and [previous] did not.
+         *
+         * **Measured from the write frontier, never from file size.** New
+         * records land at the frontier, which usually sits mid-sector, so a
+         * fetch that adds half an hour of riding produces a file of exactly the
+         * same length as the one it extended -- 327,680 bytes before and after,
+         * in the 2026-09-15 run that found this. A size delta therefore reports
+         * 0, and the app tells the user "nothing new on the logger" about a
+         * transfer that just brought back their ride. That is the §12 failure
+         * shape: a confident negative claim about capture that is false.
+         *
+         * The log is append-only between wraps, so every byte between the two
+         * frontiers is new. That assumption fails across a wrap or an erase,
+         * where the result is meaningless and may be negative -- callers must
+         * check [Result.fullReread] first.
+         */
+        fun newDataBytes(previous: ByteArray, updated: ByteArray): Int =
+            frontierOffset(updated) - frontierOffset(previous)
+
+        /**
+         * The offset a fetch-new would resume from, or null if [previous]
+         * cannot be extended at all.
+         *
+         * New records land at the write frontier, which normally sits partway
+         * through a sector, so the re-read starts at the block *containing*
+         * the frontier -- not past the end of the dump, and not at the end of
+         * its data. Shared with the caller so the UI can say where the transfer
+         * will resume without guessing, and so "resumed from" and the byte
+         * counter cannot disagree.
+         */
+        fun extendOffset(previous: ByteArray, blockSize: Int = DEFAULT_BLOCK_SIZE): Int? {
+            val usable = (previous.size / blockSize) * blockSize
+            if (usable < 2 * blockSize) return null
+            val frontier = frontierOffset(previous, usable)
+            if (frontier == 0) return null
+            return ((frontier - 1) / blockSize) * blockSize
+        }
     }
 }

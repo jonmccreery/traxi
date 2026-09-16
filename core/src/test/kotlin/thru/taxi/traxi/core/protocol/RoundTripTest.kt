@@ -445,6 +445,9 @@ class RoundTripTest {
         val extended = FlashDownloader(client()).downloadIncremental(previous)
         val full = FlashDownloader(client()).download()
 
+        assertTrue(!extended.fullReread, "this extended; it must not claim a full re-read")
+        assertTrue(FlashDownloader.newDataBytes(previous, extended.image) > 0)
+
         assertEquals(full.image.size, extended.image.size)
         assertTrue(full.image.contentEquals(extended.image), "extended image differs")
         assertEquals(EXPECTED_FIXES, MtkLogParser.parse(extended.image, GpsRollover.AXN_130B).fixes.size)
@@ -501,6 +504,120 @@ class RoundTripTest {
     }
 
     @Test
+    fun `fetch-new progress never runs backwards`() = runBlocking {
+        val size = FlashDownloader.DEFAULT_BLOCK_SIZE
+        // A complete dump of an unfull chip: data through block 35, unwritten
+        // to the end. This is the shape every real fetch-new starts from, and
+        // the shape that made the readout jump.
+        val cut = 35 * size + 1234
+        val previous = flash.copyOf(40 * size)
+        for (i in cut until previous.size) previous[i] = 0xFF.toByte()
+
+        val bytes = mutableListOf<Int>()
+        val sectors = mutableListOf<Int>()
+        FlashDownloader(client()).downloadIncremental(previous, onProgress = {
+            bytes += it.bytesDownloaded
+            sectors += it.sectorPosition
+        })
+
+        assertTrue(bytes.isNotEmpty(), "the transfer reported no progress at all")
+        // The probe reports from where the extend will resume, not from the
+        // previous dump's full length. Before the fix this opened at 40 blocks
+        // and then fell to 35 the moment the extend began.
+        assertEquals(35 * size, bytes.first())
+        assertEquals(35, sectors.first())
+
+        for (i in 1 until bytes.size) {
+            if (bytes[i] < bytes[i - 1]) {
+                throw AssertionError(
+                    "bytes went backwards at sample $i: ${bytes[i - 1]} -> ${bytes[i]}"
+                )
+            }
+            if (sectors[i] < sectors[i - 1]) {
+                throw AssertionError(
+                    "sectors went backwards at sample $i: ${sectors[i - 1]} -> ${sectors[i]}"
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `sectors fetched counts work done, not ground spanned`() = runBlocking {
+        val size = FlashDownloader.DEFAULT_BLOCK_SIZE
+        val cut = 35 * size + 1234
+        val previous = flash.copyOf(40 * size)
+        for (i in cut until previous.size) previous[i] = 0xFF.toByte()
+
+        val extend = FlashDownloader(client()).downloadIncremental(previous)
+        // Spanned: the whole image, including 35 sectors never asked for.
+        // Fetched: the wrap probe, plus every block from the frontier on.
+        val blocksFromFrontier = extend.sectorSpan - 35
+        assertEquals(blocksFromFrontier + 1, extend.sectorsFetched)
+        assertTrue(
+            extend.sectorsFetched < extend.sectorSpan,
+            "a fetch-new must do less work than it spans",
+        )
+
+        // A full download asks for everything it spans, so the two agree.
+        val full = FlashDownloader(client()).download()
+        assertEquals(full.sectorSpan, full.sectorsFetched)
+    }
+
+    @Test
+    fun `sectors fetched never decreases, and the probe is counted from the start`() = runBlocking {
+        val size = FlashDownloader.DEFAULT_BLOCK_SIZE
+        val cut = 35 * size + 1234
+        val previous = flash.copyOf(40 * size)
+        for (i in cut until previous.size) previous[i] = 0xFF.toByte()
+
+        val fetched = mutableListOf<Int>()
+        val result = FlashDownloader(client()).downloadIncremental(previous, onProgress = {
+            fetched += it.sectorsFetched
+        })
+        for (i in 1 until fetched.size) {
+            if (fetched[i] < fetched[i - 1]) {
+                throw AssertionError(
+                    "sectors fetched went backwards at $i: ${fetched[i - 1]} -> ${fetched[i]}"
+                )
+            }
+        }
+        // The probe is already counted while the first extend block is in
+        // flight, so the counter never sits at zero once work has been done.
+        assertEquals(1, fetched.first { it > 0 })
+        assertEquals(result.sectorsFetched, fetched.last())
+    }
+
+    @Test
+    fun `a wrap fallback resets progress once, deliberately, and then climbs`() = runBlocking {
+        val size = FlashDownloader.DEFAULT_BLOCK_SIZE
+        val stale = flash.copyOf(40 * size)
+        for (i in 0 until 64) {
+            stale[FlashDownloader.PROBE_OFFSET + i] = (stale[FlashDownloader.PROBE_OFFSET + i] + 1).toByte()
+        }
+
+        val bytes = mutableListOf<Int>()
+        val result = FlashDownloader(client()).downloadIncremental(stale, onProgress = {
+            bytes += it.bytesDownloaded
+        })
+
+        // A full re-read really does start from nothing, so one drop to zero is
+        // correct -- but exactly one, and everything after it moves forward.
+        val zero = bytes.indexOf(0)
+        assertTrue(zero >= 0, "the fallback never announced its restart")
+        for (i in zero + 1 until bytes.size) {
+            if (bytes[i] < bytes[i - 1]) {
+                throw AssertionError(
+                    "bytes went backwards after the restart at $i: ${bytes[i - 1]} -> ${bytes[i]}"
+                )
+            }
+        }
+        // The read runs block-aligned past the end of the served image and
+        // stops on two unwritten sectors, so the final figure is the image the
+        // transfer actually produced -- not the source file's length.
+        assertEquals(result.image.size, bytes.last())
+    }
+
+    @Test
     fun `an erased flash is detected by the probe, never appended to`() = runBlocking {
         val size = FlashDownloader.DEFAULT_BLOCK_SIZE
         val previous = flash.copyOf(40 * size)
@@ -540,6 +657,10 @@ class RoundTripTest {
 
         // And the fallback yields a correct image rather than a spliced one.
         val result = FlashDownloader(client()).downloadIncremental(stale)
+        // The caller must be able to tell this from an extend. After a wrap the
+        // previous dump's frontier is not a baseline, so no "added N" claim can
+        // honestly be made from comparing the two.
+        assertTrue(result.fullReread, "a wrap fallback must report itself as a full re-read")
         for (i in 0 until FLASH_BYTES) {
             if (flash[i] != result.image[i]) {
                 throw AssertionError("fallback image is corrupt at 0x%08X".format(i))

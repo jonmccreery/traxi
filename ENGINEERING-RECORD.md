@@ -1734,6 +1734,11 @@ what checking it caught.
 The two that matter most are §16.1 and §16.3. Both defeat a protection this
 project already built, on purpose, after a real incident.
 
+§16.9 records how the fixes were verified against each other, and §16.10 what
+happened when they were finally run against the logger — which settled the last
+assumption in §16.3 and turned up two things about the hardware that no
+simulator could have told us.
+
 ### 16.1 A resume launders a holed dump into a verified one
 
 **`FlashDownloader.Result.damagedRanges` describes one `download()` call, not
@@ -2091,6 +2096,119 @@ empty because everything passed, unless the harness is built to tell them
 apart. It now checks for compile errors explicitly and restores from a file
 snapshot rather than from the last commit. That is the same shape as everything
 else in this section: **a measurement that cannot fail is not a measurement.**
+
+### 16.10 Exercising the fixes on the hardware, and what the logger said back
+
+Everything above was proven against a simulator. On 2026-09-15 at 23:33 the
+fixed build was run against the logger itself over Bluetooth, for the narrow
+purpose of settling §16.3's one remaining assumption — and it settled rather
+more than that.
+
+#### The ack shapes, now observed rather than assumed
+
+§16.3 tightened ack matching from the command to the command **and**
+subcommand. The captures in `data/` only ever proved the shape for subcommand
+2 (queries) and 7 (log reads); the shapes for a config write, an enable and a
+disable came from the simulator, which is to say from an assumption. Pausing
+and then writing the interval back to its existing value exercises all three:
+
+```
+23:33:47.754 >> $PMTK182,5*20
+23:33:47.987 << $PMTK001,182,5,3*22        disable
+23:34:54.774 >> $PMTK182,1,3,100*26
+23:34:54.857 << $PMTK001,182,1,3*26        config write
+23:34:54.888 >> $PMTK182,4*21
+23:34:54.992 << $PMTK001,182,4,3*23        enable
+```
+
+All three carry `<subcommand>,<flag>`, and all three were accepted by the
+tightened predicate. Four of four observed write acks now have that shape, so
+`mtk-android-prep.md`'s `PMTK001,182,6` for erase is very likely shorthand
+written while erase was still unimplemented, rather than a different shape.
+
+**Erase remains the one unobserved ack, and cannot be observed without
+erasing.** Worth knowing precisely what happens if it really is three fields:
+`Ack.from` takes the *last* field as the flag, so `PMTK001,182,6` parses as
+flag 6, `isSuccess` is false, and the erase is reported as rejected — after
+the flash has gone. That is true of the code before §16.3 as well as after, so
+the tightening neither caused it nor cures it. A relaxation that accepts a
+missing subcommand was considered and rejected: it would not help, because the
+failure is in the flag parse and not in the match.
+
+The same transcript also shows §16.3 itself, live on the wire:
+
+```
+23:34:55.023 >> $PMTK182,2,2*39
+23:34:55.378 << $PMTK182,3,2,000A1C3F*62     the value
+23:34:55.378 << $PMTK001,182,2,3*25          the ack nothing consumes
+```
+
+Note the order is **reversed** from the USB capture in
+`data/usb_clean_2026-09-06.log`, where the ack precedes the value. Either way
+the ack is left unconsumed, which is the supply §16.3 cuts off.
+
+#### `PMTK182,5` does not stop this logger recording
+
+The write pointer, sampled by the telemetry loop once a minute:
+
+| time | pointer | advance | logging, as commanded |
+|---|---|---|---|
+| 23:32:26 | 190,960 | — | on |
+| 23:33:26 | 191,248 | +288 | on |
+| **23:34:26** | **191,568** | **+320** | **paused for 39 s of this minute** |
+| 23:35:26 | 191,904 | +336 | restored |
+
+The minute containing the pause advanced *more* than the undisturbed minute
+before it. Had recording stopped when the disable was acknowledged, that minute
+should have carried about 21 seconds of writing — roughly 96 bytes. It carried
+320.
+
+**The slide switch was physically confirmed in LOG**, three times, by the
+person holding it. So this is §15.2 from the other side. That section recorded
+NAV: the status word claims "logging" while nothing is written. This is LOG:
+the status word claims "logging", the firmware's own disable is acknowledged
+with success, and the device goes on writing anyway.
+
+Put together, on this unit **`0x0102` is not a state, it is a constant.** The
+switch wins in both directions, and the status word is incapable of reporting
+either of them. Only the pointer is truth — which §15.2 already said, and which
+this makes unconditional.
+
+#### What that cost, and what now prevents it
+
+The Config tab drew **one** of "Pause logging" and "Resume logging", chosen by
+`status?.isLoggingEnabled != true`. Since the bit never clears, *"Resume
+logging" could never be drawn on this hardware* — and that is the control
+`withLoggingPaused`'s own failure message sends the user to:
+
+> The logger is NOT recording — re-enabling it failed. **Use Resume logging on
+> the Config tab**, or power-cycle the device.
+
+The one escape from §12's failure was unreachable, behind a signal that cannot
+move. It was only possible to re-enable logging during this exercise by writing
+the log interval, because `withLoggingPaused` ends in `PMTK182,4` whatever the
+status word thinks.
+
+So: **both controls are drawn, always.** Enabling logging that is already
+enabled costs one command and is harmless; being unable to enable it at all is
+the failure this project exists to prevent. The status row now says in words
+that it is the device's claim rather than evidence, and points at the Device
+tab, where the indicator is computed from the write pointer.
+
+The pause message changed for the same reason. "Logging paused" was a claim
+about the device inferred from an acknowledgement; it now reports that the
+command was accepted and says that the switch overrides it.
+
+#### Still open
+
+- **Whether a longer pause behaves differently.** The window measured here was
+  39 seconds. A several-minute pause would rule out a buffering explanation
+  beyond argument, at the cost of genuinely not recording for that long if the
+  disable does work after all. Not run.
+- **Whether the status word ever moves on this unit**, in any switch position.
+  Every reading in every capture to date is `0x0102` or `258`.
+- The erase ack, as above, and for the same reason as always: the only way to
+  read it is to destroy the flash.
 
 ### The rule
 

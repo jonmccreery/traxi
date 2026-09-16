@@ -1285,25 +1285,45 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
     SectionCard("Recording") {
         val status = Pmtk.LogStatus.parse(info.logStatus)
         Row2("Status", status?.describe() ?: info.logStatus)
-        if (status?.isLoggingEnabled != true) {
-            Button(
-                onClick = {
-                    busy = true
-                    container.session.setLogging(true) { busy = false }
-                },
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("Resume logging") }
-        } else {
-            OutlinedButton(
-                onClick = {
-                    busy = true
-                    container.session.setLogging(false) { busy = false }
-                },
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("Pause logging") }
-        }
+        // **The status word is the device's claim, not evidence, and on this
+        // hardware it does not move.** Measured 2026-09-15 with the slide
+        // switch physically confirmed in LOG: PMTK182,5 was acknowledged
+        // `PMTK001,182,5,3`, the status word stayed 0x0102, and the write
+        // pointer went on advancing at its full rate right through the
+        // supposedly-paused window. §15.2 recorded the NAV side of this; §16.10
+        // is the LOG side. The switch wins either way.
+        Text(
+            "The device's own claim. It does not change when logging is paused, " +
+                "and the slide switch overrides it in both directions — the " +
+                "recording indicator on the Device tab reads the write pointer, " +
+                "which is the only thing here that cannot lie.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        // Both actions, always. Gating the *recovery* control on
+        // `isLoggingEnabled != true` made it unreachable on this unit: the bit
+        // never clears, so "Resume logging" could never be drawn -- and it is
+        // the control withLoggingPaused's own failure message tells the user to
+        // go and press when the logger has been left switched off. A recovery
+        // path that depends on an untrustworthy signal is not a recovery path.
+        // Enabling logging that is already enabled costs one command and is
+        // harmless; not being able to enable it at all is §12.
+        Button(
+            onClick = {
+                busy = true
+                container.session.setLogging(true) { busy = false }
+            },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Resume logging") }
+        OutlinedButton(
+            onClick = {
+                busy = true
+                container.session.setLogging(false) { busy = false }
+            },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Pause logging") }
     }
 
     SectionCard("Log interval") {

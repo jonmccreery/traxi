@@ -1738,7 +1738,24 @@ class SessionController(
         launchExclusive {
             try {
                 c.writeLoggingEnabled(enabled)
-                _message.value = if (enabled) "Logging resumed" else "Logging paused"
+                // "Logging paused" was a claim about the device, made from an
+                // acknowledgement. Measured 2026-09-15 with the slide switch
+                // physically confirmed in LOG: the logger acked PMTK182,5 with
+                // PMTK001,182,5,3 and went on writing at its full rate -- the
+                // write pointer advanced 320 bytes across the minute containing
+                // the pause, against 288 for the quiet minute before it. The
+                // switch beats the firmware in this direction too (§16.10).
+                //
+                // So report what was actually established -- that the command
+                // was accepted -- and send the user to the one indicator that
+                // cannot lie.
+                _message.value = if (enabled) {
+                    "Logging resumed"
+                } else {
+                    "Pause accepted by the logger — but the slide switch " +
+                        "overrides it. Check the Device tab's recording indicator, " +
+                        "which reads the write pointer."
+                }
                 refreshConfig()
             } catch (e: Exception) {
                 _message.value = "Could not ${if (enabled) "resume" else "pause"} logging: ${e.message}"

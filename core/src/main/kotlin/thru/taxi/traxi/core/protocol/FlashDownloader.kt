@@ -319,6 +319,8 @@ class FlashDownloader(
         previous: ByteArray,
         onProgress: (Progress) -> Unit = {},
         shouldContinue: () -> Boolean = { true },
+        /** Ranges of [previous] that never arrived; see [download]. */
+        priorDamage: List<IntRange> = emptyList(),
     ): Result {
         val plan = planIncremental(previous, onProgress, shouldContinue)
         // The probe's sectors are work this transfer did, so they are carried
@@ -342,7 +344,7 @@ class FlashDownloader(
         }
         return when (plan) {
             is Plan.Extend ->
-                download(previous, plan.fromOffset, withProbe, shouldContinue)
+                download(previous, plan.fromOffset, withProbe, shouldContinue, priorDamage)
                     .let { it.copy(sectorsFetched = it.sectorsFetched + probed) }
             is Plan.FullRequired -> {
                 client.transcript.note("full download required: ${plan.reason}")
@@ -378,13 +380,25 @@ class FlashDownloader(
         resumeFrom: Int = existing.size,
         onProgress: (Progress) -> Unit = {},
         shouldContinue: () -> Boolean = { true },
+        /**
+         * Ranges of [existing] that never arrived when it was downloaded.
+         *
+         * **Damage is a property of the image, not of the call that produced
+         * it.** Without this the resume path laundered a holed dump clean: the
+         * holes were copied forward inside [existing], the new result reported
+         * `damagedBytes = 0` and `isComplete = true`, the `.partial` marker was
+         * deleted, and the erase gate opened on an image whose 0xFF gaps are
+         * indistinguishable from erased flash. See §16.1.
+         *
+         * Given them, this re-reads the affected blocks before extending and
+         * carries whatever is still missing into [Result.damagedRanges], so the
+         * dump either gets repaired or stays honestly marked.
+         */
+        priorDamage: List<IntRange> = emptyList(),
     ): Result {
         require(resumeFrom % blockSize == 0) {
             "resume offset $resumeFrom must be a multiple of the $blockSize block size"
         }
-
-        val out = java.io.ByteArrayOutputStream(maxOf(existing.size, blockSize))
-        out.write(existing, 0, minOf(existing.size, resumeFrom))
 
         var address = resumeFrom
         var sectors = resumeFrom / SectorHeader.SECTOR_SIZE
@@ -397,6 +411,19 @@ class FlashDownloader(
         var stoppedOnUnwritten = false
         var stoppedUnanswered = false
         val damaged = mutableListOf<IntRange>()
+
+        // The prefix is repaired in place before anything is appended to it, so
+        // the bytes written below are the best copy available rather than the
+        // one that arrived first.
+        val prefix = existing.copyOf(minOf(existing.size, resumeFrom))
+        if (priorDamage.isNotEmpty()) {
+            val repair = repair(prefix, priorDamage, onProgress, shouldContinue)
+            damaged += repair.stillMissing
+            fetched += repair.blocksRead
+        }
+
+        val out = java.io.ByteArrayOutputStream(maxOf(existing.size, blockSize))
+        out.write(prefix, 0, prefix.size)
 
         if (resumeFrom > 0) {
             client.transcript.note("resuming download at 0x%08X".format(resumeFrom))
@@ -557,6 +584,119 @@ class FlashDownloader(
 
     private fun isUnwritten(block: ByteArray): Boolean =
         block.all { it == PmtkClient.UNWRITTEN }
+
+    /** Outcome of a repair pass: what is still missing, and what it cost. */
+    private data class Repair(val stillMissing: List<IntRange>, val blocksRead: Int)
+
+    /**
+     * Re-read the blocks of [image] that are known to be missing bytes.
+     *
+     * The ranges are known exactly, the device serves whole blocks reliably --
+     * that is the only request shape it has ever honoured -- and re-reading one
+     * costs what any other block costs. So a resume can *recover* the holes a
+     * bad link left rather than merely reporting them, which is the difference
+     * between a dump that needs three more hours and one that needs two more
+     * minutes.
+     *
+     * Only the previously-missing bytes are taken from the new read. A block
+     * that comes back short must not be allowed to overwrite good bytes with
+     * fresh 0xFF, which would turn a repair into more damage.
+     *
+     * Ranges outside [image] are dropped: they lie past the resume point and
+     * the main loop is about to read them from scratch.
+     */
+    private suspend fun repair(
+        image: ByteArray,
+        prior: List<IntRange>,
+        onProgress: (Progress) -> Unit,
+        shouldContinue: () -> Boolean,
+    ): Repair {
+        // Split the damage per block, clamped to what the prefix actually holds.
+        val byBlock = sortedMapOf<Int, MutableList<IntRange>>()
+        for (range in prior) {
+            var i = maxOf(range.first, 0)
+            val last = minOf(range.last, image.size - 1)
+            while (i <= last) {
+                val blockAddress = (i / blockSize) * blockSize
+                val end = minOf(last, blockAddress + blockSize - 1)
+                byBlock.getOrPut(blockAddress) { mutableListOf() } += i..end
+                i = end + 1
+            }
+        }
+        if (byBlock.isEmpty()) return Repair(emptyList(), 0)
+
+        client.transcript.note(
+            "repairing ${byBlock.size} damaged block(s) before extending"
+        )
+
+        val stillMissing = mutableListOf<IntRange>()
+        var blocksRead = 0
+
+        for ((blockAddress, ranges) in byBlock) {
+            val missing = BooleanArray(blockSize)
+            for (range in ranges) {
+                for (i in range) missing[i - blockAddress] = true
+            }
+
+            if (blockAddress + blockSize <= image.size && shouldContinue()) {
+                client.transcript.note("re-reading damaged block 0x%08X".format(blockAddress))
+                val block = client.readLogBlock(
+                    blockAddress, blockSize, blockIdleTimeoutMillis,
+                    onChunk = { filledInBlock ->
+                        onProgress(
+                            Progress(
+                                bytesDownloaded = image.size,
+                                sectorPosition = blockAddress / SectorHeader.SECTOR_SIZE,
+                                retries = 0,
+                                blockBytes = filledInBlock,
+                                blockSizeBytes = blockSize,
+                                sectorsFetched = blocksRead,
+                            )
+                        )
+                    },
+                    shouldContinue = shouldContinue,
+                )
+                blocksRead++
+
+                val absent = BooleanArray(blockSize)
+                for (gap in block.gaps) {
+                    for (i in gap) absent[i - blockAddress] = true
+                }
+                for (i in 0 until blockSize) {
+                    if (missing[i] && !absent[i]) {
+                        image[blockAddress + i] = block.bytes[i]
+                        missing[i] = false
+                    }
+                }
+            }
+
+            // Whatever the re-read did not bring back is still damage.
+            var runStart = -1
+            for (i in 0 until blockSize) {
+                if (missing[i]) {
+                    if (runStart < 0) runStart = i
+                } else if (runStart >= 0) {
+                    stillMissing += (blockAddress + runStart)..(blockAddress + i - 1)
+                    runStart = -1
+                }
+            }
+            if (runStart >= 0) {
+                stillMissing += (blockAddress + runStart)..(blockAddress + blockSize - 1)
+            }
+        }
+
+        val recovered = prior.sumOf { it.last - it.first + 1 } -
+            stillMissing.sumOf { it.last - it.first + 1 }
+        client.transcript.note(
+            if (stillMissing.isEmpty()) {
+                "repaired all ${Bytes.describe(recovered)} of previously missing data"
+            } else {
+                "repaired ${Bytes.describe(recovered)}; " +
+                    "${stillMissing.sumOf { it.last - it.first + 1 }} bytes still missing"
+            }
+        )
+        return Repair(stillMissing, blocksRead)
+    }
 
     companion object {
         /**

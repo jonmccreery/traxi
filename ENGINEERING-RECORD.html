@@ -1942,6 +1942,269 @@ history, not state. Two dumps dated the same day were different files.</p>
   behaviour (<code>Sectors fetched</code>, the monotonic readout, the corrected message)
   is still only verified by reading it; it needs a real transfer to watch.</li>
 </ul>
+<h2>16. The audit — seven holes found by reading, not by losing anything</h2>
+<p>Found 2026-09-15 by going through the whole tree looking for them, after
+§15.4. Nothing here cost data yet. That is the only reason this section can be
+written calmly, and it is not a reason to rank it below the sections that were
+written after a loss.</p>
+<p>Every claim below is backed by a test that runs in <code>:core</code> or <code>:app</code> and that
+<strong>passed against the unfixed code</strong> — the finding was put at risk and survived.
+Those tests now assert the fixed behaviour instead, so each one is a regression
+test for exactly one of these.</p>
+<p>The two that matter most are §16.1 and §16.3. Both defeat a protection this
+project already built, on purpose, after a real incident.</p>
+<h3>16.1 A resume launders a holed dump into a verified one</h3>
+<p><strong><code>FlashDownloader.Result.damagedRanges</code> describes one <code>download()</code> call, not
+the image on disk.</strong> The resume path passes the previous image in as <code>existing</code>
+and starts reading past it, so a hole already in that prefix is copied forward
+and counted by nobody. The second result reports <code>isComplete = true</code> and
+<code>damagedBytes = 0</code>.</p>
+<p>Everything downstream believes it, because everything downstream was built to:</p>
+<ul>
+<li><code>DumpRepository.save(partial = !isComplete)</code> <strong>deletes the <code>.partial</code>
+  marker</strong>, so the dump stops being a partial dump;</li>
+<li><code>SessionController.pendingEvidence</code> records <code>damagedBytes = 0</code>;</li>
+<li><code>EraseGate.blockers</code> finds nothing to object to, and the erase is permitted;</li>
+<li>the dump list starts offering <strong>Fetch new</strong> on it, which is only offered for
+  non-partial dumps — so the hole propagates into every descendant.</li>
+</ul>
+<p>That is the whole safety argument of §0.2 clause 1 defeated by a second
+download that happened to be clean.</p>
+<h4>The parser cannot catch it, and neither can anything else</h4>
+<p>A missing range is <code>0xFF</code>, which is byte-identical to erased flash. That is
+stated in <code>damagedRanges</code>' own doc comment as the reason it exists. Inside a
+sector, <code>MtkLogParser</code> reads <code>0xFF</code> as end-of-data fill and jumps to the next
+sector, so the records after the hole are dropped <strong>in silence</strong> — no checksum
+failure, no bad header, nothing in <code>Stats</code>.</p>
+<p>Measured on two real sectors of <code>cdt_v2.bin</code>, a single lost 2 KB chunk:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>hole</th>
+<th>fixes</th>
+<th>checksum failures</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>none</td>
+<td>3,091</td>
+<td>0</td>
+</tr>
+<tr>
+<td><code>0x4000</code>, 2 KB</td>
+<td>1,921</td>
+<td><strong>0</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>1,170 fixes — 38% of the dump — gone, with a clean parse.</strong> Sweeping all 31
+chunk positions in that sector: two are completely silent like this one, and
+the other 29 raise exactly one checksum failure, from the record that straddles
+the hole's leading edge. So the erase gate was being saved, when it was saved
+at all, by an accident of record alignment. It is not a protection.</p>
+<h4>What now prevents it</h4>
+<p>Three things, because the single fix is not enough on its own:</p>
+<ol>
+<li><strong>Damage is persisted with the dump.</strong> The <code>.partial</code> sidecar already
+   carried <code>resume=&lt;bytes&gt;</code>; it now also carries the damaged ranges. A dump
+   that is missing bytes says so on disk, and says it after a reboot.</li>
+<li><strong>A resume re-reads the damaged blocks before it extends.</strong> This is the
+   part that recovers data rather than merely reporting its absence: the ranges
+   are known, the device serves whole blocks reliably, and re-reading one is
+   the same cost as any other block. Only ranges that are <em>still</em> missing
+   afterwards stay damaged.</li>
+<li><strong>Damage that survives is carried into the new <code>Result</code>.</strong> So <code>isComplete</code>
+   stays false, the <code>.partial</code> marker stays, the evidence carries a non-zero
+   <code>damagedBytes</code>, and the gate stays shut.</li>
+<li><strong>The dump list says so.</strong> A holed dump now carries a line in red saying how
+   many bytes never arrived and that Resume will re-read them. A dump with
+   holes looks exactly like a good one, which is the entire hazard, so the
+   person choosing what to export or erase against has to be able to see it.</li>
+</ol>
+<p>The link recovery gets the repair for free: a rebuilt link is the best chance a
+transfer will have of recovering what the wedged one dropped, so each cycle now
+hands the earlier segments' holes to the next pass rather than merely carrying
+them forward.</p>
+<h4>Still open</h4>
+<p>Dumps written <strong>before</strong> this fix that were laundered are indistinguishable
+from clean ones — there is no marker to read and the holes look like erased
+flash. Any dump on the phone older than this change that was ever resumed
+should be treated as unverified. There is no way to check it short of
+re-downloading and comparing.</p>
+<h3>16.2 A wedge during fetch-new reports "nothing new on the logger"</h3>
+<p>§15.4 fixed the gain measurement and this survived it, one branch above.</p>
+<p><code>stoppedUnanswered</code> is deliberately <strong>not</strong> a <code>failure</code> — that distinction is
+what lets <code>downloadWithLinkRecovery</code> tell a recoverable §15 wedge from a dead
+transport. <code>FetchOutcome.message</code> never learned it. Its first test is
+<code>failure != null</code>, which is null for a wedge, so the message falls through to
+the byte comparison.</p>
+<p>And the comparison is against a <strong>truncated</strong> image. The extend restarts at the
+block holding the previous dump's frontier, so a wedge on that first block
+leaves an image <em>shorter</em> than the dump it was extending. <code>newDataBytes</code> goes
+negative, <code>gained &gt; 0</code> is false, and the last branch — written for a logger
+that genuinely had nothing to add — claims exactly that.</p>
+<p>So the §12 shape is back, on this device's single most common failure:</p>
+<blockquote>
+<p>Already up to date — nothing new on the logger</p>
+</blockquote>
+<p><strong>What now prevents it:</strong> a wedge gets its own branch, and — the general rule —
+<strong>"already up to date" is now reachable only from a transfer that completed.</strong>
+A negative claim about capture requires a complete measurement, not merely the
+absence of a positive one.</p>
+<h3>16.3 Every query leaves a success-ack in the queue, and a write takes it</h3>
+<p>The worst of the seven, and the one that was hardest to see because the
+simulator does not reproduce it.</p>
+<p><strong>The real device acks its queries.</strong> From <code>data/usb_clean_2026-09-06.log:22</code>:</p>
+<pre><code>&gt;&gt; $PMTK182,2,3*38
+&lt;&lt; $PMTK001,182,2,3*25        &lt;- the ack
+&lt;&lt; $PMTK182,3,3,50*10         &lt;- the value
+</code></pre>
+<p>Seventy-six of those in one capture. <code>queryConfig</code> waits for the <em>value</em>, so
+the <strong>ack is never consumed</strong>. <code>PmtkClient.ingest</code> queues it, nothing ages it
+out, and only <code>resetStream</code> — which just the block reader calls — ever clears
+the queue.</p>
+<p>Now read the write path:</p>
+<pre><code class="language-kotlin">exchange(payload) { Pmtk.Ack.from(it)?.command == &quot;182&quot; }
+</code></pre>
+<p>Command only. Never the subcommand, although <code>Ack</code> parses one. A leftover
+<code>PMTK001,182,2,3</code> from <em>any earlier query</em> matches that predicate, and
+<code>awaitSentence</code> consults the queue <strong>before</strong> the wire. So:</p>
+<blockquote>
+<p><code>writeLoggingEnabled(true)</code> returns success immediately, having put
+<code>PMTK182,4</code> on the wire and never waited to see whether the logger obeyed it.</p>
+</blockquote>
+<p>A connect alone runs six queries and parks six of these. No retry, no timeout,
+no marginal link required. Every config write and both halves of
+<code>withLoggingPaused</code> were exposed — which is to say <strong>the §12 guarantee, the one
+this project cares most about, could report a restored logger that was still
+switched off.</strong></p>
+<p>The same mechanism serves stale <em>values</em> as well as stale acks. A retried
+query — routine on a link where three probes in seventeen go unanswered — is
+answered twice, the second copy is parked, and the next caller gets it. That
+reaches the write pointer, which is the only truth about recording (§15.2) and
+the freshness the erase gate rests on: a pointer read from minutes ago can
+clear the coverage check that a current one would fail.</p>
+<p><strong>What now prevents it:</strong></p>
+<ul>
+<li>acks are matched on <strong>command and subcommand</strong>, which the device supplies on
+  every one;</li>
+<li><code>exchange</code> drops the queue before it sends, so no answer predating a request
+  can satisfy it;</li>
+<li><code>pump</code> no longer queues at all. Nothing is waiting during a pump by
+  definition, so queuing there only ever parked staleness for a later caller;</li>
+<li><code>exchange</code> also <strong>drains the wire</strong> before sending, which extends the same
+  rule one layer down, to bytes that have arrived but not yet been parsed;</li>
+<li><strong>the simulator now acks queries like the device does</strong>, so this class of bug
+  cannot survive the test suite again. That is the §15.4 lesson repeated: a
+  simulator more forgiving than the hardware hides exactly the bugs worth
+  finding.</li>
+</ul>
+<h4>Still open, and it is a real limit</h4>
+<p><strong>An answer still inside the device when the next request goes out cannot be
+told from an answer to that request.</strong> PMTK carries no request id, so there is
+nothing to correlate on. Clearing the queue and draining the wire cover
+everything that has <em>arrived</em>; a duplicate that is still in the logger's output
+buffer when the next query is sent will be matched by it.</p>
+<p>The exposure is now small and bounded — it needs a retry, and then a second
+request inside the round trip that follows, where the steady probe interval is
+60 s — but it is not zero, and a stale write pointer is exactly the input the
+erase gate's coverage rule trusts. The <code>retry</code> note in the transcript is what
+makes such a reading explicable after the fact. A proper fix needs a
+correlating field the protocol does not have, or a rule that treats a repeated
+pointer value as inconclusive when a retry preceded it.</p>
+<h3>16.4 A link cycle erases the full-re-read flag</h3>
+<p><code>downloadWithLinkRecovery</code> rebuilds its result from the continuation:</p>
+<pre><code class="language-kotlin">result = continued.copy(
+    retries = result.retries + continued.retries,
+    damagedRanges = result.damagedRanges + continued.damagedRanges,
+)
+</code></pre>
+<p><code>continued</code> comes from a plain <code>download()</code>, which never saw a wrap probe, so
+<code>fullReread</code> reverts to false and <code>sectorsFetched</code> drops the earlier segments.
+Any one of the sixty permitted link cycles erases the flag — and the flag is
+the only thing stopping the app claiming an amount added after a wrap, which
+<code>FetchOutcomeTest</code> asserts must never happen. <strong>Carried forward explicitly
+now</strong>, along with the work counter.</p>
+<h3>16.5 "Clear pairing and re-pair" could never reconnect</h3>
+<p><code>clearPairingAndReconnect</code> sets <code>Connecting</code>, clears the bond, re-bonds, and
+calls <code>connect(address)</code> — whose first line is:</p>
+<pre><code class="language-kotlin">if (_connection.value is ConnectionState.Connecting) return
+</code></pre>
+<p>It is still <code>Connecting</code>, set by the caller and never cleared on the success
+path, so <code>connect</code> returns immediately and nothing connects. The Connecting
+card renders a progress bar and no buttons, and the session lives in the
+Application scope, so the UI sits there until the process is killed — after
+destroying a pairing that then has to be re-entered by hand at the device.</p>
+<p>This is the recovery path for a stale link key, which means it fails in exactly
+the situation it exists for.</p>
+<p>The same guard had a second defect: it is checked <em>outside</em> the coroutine that
+sets the state, so two taps inside one dispatch both pass it and open two
+RFCOMM sockets to a device that serves one SPP client, leaking the first.</p>
+<p><strong>What now prevents it:</strong> the guard is an atomic claim taken synchronously in
+<code>connect</code> and released when the attempt ends, rather than an inference from UI
+state. One flag fixes both halves.</p>
+<h3>16.6 The probe rate limit was advisory</h3>
+<p><code>Transport.writePointerProbeIntervalMillis</code> is the §15 mitigation: 60 s over
+Bluetooth, because 17 probes in three minutes took the link down. Only the
+telemetry loop honoured it.</p>
+<p><code>EraseCard</code>'s <code>LaunchedEffect</code> calls <code>eraseBlockers()</code>, which queries the write
+pointer, and <code>when (tab)</code> disposes the tab — so <strong>every entry to the Config tab
+fired one probe</strong>, unlimited. Five tab flips in a minute is one probe per 12 s,
+which is the cadence measured to wedge the radio.</p>
+<p><strong>What now prevents it:</strong> rendering the gate uses the pointer the telemetry
+loop already keeps at the link's tolerated rate, and reads nothing. The erase
+<em>action</em> still probes fresh — one query at the moment of an irreversible act is
+proportionate, and that was always the intent: the displayed list is a
+courtesy, the one inside the action is the decision.</p>
+<h3>16.7 Cancellation was caught and re-reported as the device misbehaving</h3>
+<p><code>kotlinx.coroutines.CancellationException</code> is an <code>Exception</code>, and the telemetry
+loop caught it twice:</p>
+<pre><code class="language-kotlin">val read = try { readLock.withLock { c.pump(...) } }
+catch (e: Exception) { ...; endStream(&quot;the read loop stopped: ...&quot;); break }
+</code></pre>
+<p><code>pump</code> holds a 250 ms read and the loop's only other suspension point is a
+50 ms delay, so a cancel usually lands inside the <code>try</code>. <code>cycleLink()</code> cancels
+telemetry on every §15 link rebuild. The result:</p>
+<ul>
+<li><code>linkHealth.streamEnded</code> is set <strong>after</strong> <code>stopTelemetry</code> has reset it, so
+  the Live tab reports a dead stream for the rest of a transfer that is
+  recovering normally;</li>
+<li>the transcript gets <code>telemetry read threw</code> and <code>STREAM ENDED</code>;</li>
+<li>worst, a cancel landing in the probe branch logs <em>"write-pointer probe went
+  unanswered; this logger's Bluetooth link often drops immediately after one"</em>.</li>
+</ul>
+<p>That last line is <strong>fabricated §15 evidence in the one diagnostic that survives
+to the field</strong>, and §15's conclusions are drawn by counting those events. A
+tool that manufactures its own corroboration is worse than one that says
+nothing.</p>
+<p><strong>What now prevents it:</strong> both catches rethrow <code>CancellationException</code> before
+looking at anything else. Cancellation is not a device symptom and must never
+be written down as one.</p>
+<h3>16.8 Smaller things fixed in the same pass</h3>
+<ul>
+<li><code>startDownload</code> and <code>startIncrementalDownload</code> returned without calling
+  <code>onFinished</code> when not connected, so <code>DownloadService</code> never stopped: an
+  ongoing, unswipeable notification holding the process up indefinitely.</li>
+<li><code>writeTimeInterval</code> and <code>writeLogFormat</code> still had no busy check — the gap
+  the <code>readLock</code> comment describes. The mutex keeps them from <em>corrupting</em> a
+  transfer, but they still queue behind it and then pause logging unattended,
+  hours after the tap, on a device that is being ridden. They now refuse while
+  the logger is busy, like <code>setLogging</code> does.</li>
+</ul>
+<h3>The rule</h3>
+<p>Three, and they are all the same rule seen from different angles.</p>
+<p><strong>A property of the data must be stored with the data.</strong> Damage was a property
+of a function call, so it evaporated at the end of the call. Freshness was a
+property of nothing at all, so a five-minute-old answer and a current one were
+the same object.</p>
+<p><strong>A protection is only as good as the thing that can bypass it.</strong> The probe
+interval, the erase gate, the §12 restore guarantee — each was built carefully
+and then reached around by a code path that did not know it existed.</p>
+<p><strong>A simulator that is kinder than the device hides the bugs worth finding.</strong>
+Twice now: the 512-byte read in §15.4, and the query ack here. The simulator's
+job is to be <em>accurate</em>, and where it is not, it should be treated as a known
+gap rather than as a pass.</p>
 </main>
 </body>
 </html>

@@ -1098,6 +1098,17 @@ private fun DumpRow(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        // A dump with holes looks exactly like a good one -- that is the whole
+        // hazard -- so it has to say so where the person choosing what to
+        // export, extend or erase against will see it.
+        if (dump.damagedBytes > 0) {
+            Text(
+                "${dump.damagedBytes} bytes never arrived and read as erased flash. " +
+                    "Resume to re-read them.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (!dump.isPartial && connection is ConnectionState.Connected) {
                 TextButton({ DownloadService.startIncremental(context, dump.file) }) {

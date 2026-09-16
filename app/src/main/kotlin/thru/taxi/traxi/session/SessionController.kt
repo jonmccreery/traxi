@@ -370,6 +370,24 @@ class SessionController(
      */
     private val readLock = Mutex()
 
+    /**
+     * Claimed for the duration of a connection attempt.
+     *
+     * The guard used to be `if (_connection.value is Connecting) return`, read
+     * *outside* the coroutine that sets that state, which failed both ways.
+     * Two taps inside one dispatch both passed it and opened two RFCOMM sockets
+     * to a device that serves exactly one SPP client, leaking the first. And
+     * `clearPairingAndReconnect` -- which sets `Connecting` itself before
+     * re-pairing -- could never reach a connection at all: by the time it
+     * called [connect] the state it had set was the state that turned it away,
+     * so the app sat on "Connecting" forever, having just destroyed a pairing.
+     * See §16.5.
+     *
+     * An explicit claim, taken synchronously, says what was meant. Connection
+     * state is for the user; this is for the code.
+     */
+    private val connectAttempt = java.util.concurrent.atomic.AtomicBoolean(false)
+
     private var transport: Transport? = null
     private var client: PmtkClient? = null
     private var downloadJob: Job? = null
@@ -406,7 +424,7 @@ class SessionController(
      * half-open, so a retry starts from a known state.
      */
     fun connect(address: String) {
-        if (_connection.value is ConnectionState.Connecting) return
+        if (!connectAttempt.compareAndSet(false, true)) return
         scope.launch {
             _connection.value = ConnectionState.Connecting(address)
             disconnectQuietly()
@@ -491,7 +509,9 @@ class SessionController(
                 disconnectQuietly()
                 _connection.value = ConnectionState.Failed(explainConnectFailure(e, address))
             }
-        }
+        // However this ends -- success, failure, an early return, cancellation
+        // -- the claim is released here rather than on any one path out.
+        }.invokeOnCompletion { connectAttempt.set(false) }
     }
 
     /**
@@ -549,7 +569,7 @@ class SessionController(
         usbManager: android.hardware.usb.UsbManager,
         device: android.hardware.usb.UsbDevice,
     ) {
-        if (_connection.value is ConnectionState.Connecting) return
+        if (!connectAttempt.compareAndSet(false, true)) return
         scope.launch {
             _connection.value = ConnectionState.Connecting(
                 device.productName ?: device.deviceName
@@ -565,7 +585,7 @@ class SessionController(
                     e.message ?: "Could not open the USB connection"
                 )
             }
-        }
+        }.invokeOnCompletion { connectAttempt.set(false) }
     }
 
     /**
@@ -901,6 +921,15 @@ class SessionController(
                 // bytes belonging to that operation.
                 val read = try {
                     readLock.withLock { c.pump(TELEMETRY_READ_MILLIS) }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    // Cancellation is this app stopping the loop -- a link
+                    // cycle, a disconnect -- and it is not a device symptom.
+                    // CancellationException is an Exception, so the catch below
+                    // swallowed it and wrote "STREAM ENDED" into the transcript
+                    // and into linkHealth, *after* stopTelemetry had reset them.
+                    // The Live tab then reported a dead stream for the rest of a
+                    // transfer that was recovering normally. See §16.7.
+                    throw e
                 } catch (e: Exception) {
                     transcript.note("telemetry read threw: ${e.message ?: e.toString()}")
                     endStream("the read loop stopped: ${e.message ?: e.toString()}")
@@ -943,6 +972,13 @@ class SessionController(
                     probeIntervalNanos = steadyProbeNanos
                     val ptr = try {
                         readLock.withLock { c.queryWritePointer() }
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        // Never let a cancel be recorded as an unanswered probe.
+                        // The note below is evidence for §15, and §15's
+                        // conclusions are drawn by counting it; a tool that
+                        // manufactures its own corroboration is worse than one
+                        // that says nothing. See §16.7.
+                        throw e
                     } catch (e: Exception) {
                         null
                     }
@@ -1161,8 +1197,19 @@ class SessionController(
      * download that fails partway must not be able to damage it.
      */
     fun startIncrementalDownload(source: File, onFinished: () -> Unit = {}) {
-        val c = client ?: run { _message.value = "Not connected"; return }
-        if (downloadJob?.isActive == true) return
+        // Every exit from here must call onFinished, because DownloadService
+        // passes stopSelf() as that callback. Returning without it left a
+        // foreground service running with an ongoing, unswipeable notification
+        // and no transfer behind it. See §16.8.
+        if (client == null) {
+            _message.value = "Not connected"
+            onFinished()
+            return
+        }
+        if (downloadJob?.isActive == true) {
+            onFinished()
+            return
+        }
 
         cancelRequested = false
         invalidateEraseEvidence()
@@ -1198,7 +1245,11 @@ class SessionController(
                     return@launchExclusive
                 }
 
-                dumps.save(target, result.image, partial = !result.isComplete)
+                dumps.save(
+                    target, result.image,
+                    partial = !result.isComplete,
+                    damaged = result.damagedRanges,
+                )
                 pendingEvidence = PendingEvidence(
                     file = target,
                     coveredBytes = result.image.size,
@@ -1228,11 +1279,16 @@ class SessionController(
     }
 
     fun startDownload(resumeFile: File? = null, onFinished: () -> Unit = {}) {
-        val c = client ?: run {
+        // See startIncrementalDownload: onFinished is DownloadService.stopSelf.
+        if (client == null) {
             _message.value = "Not connected"
+            onFinished()
             return
         }
-        if (downloadJob?.isActive == true) return
+        if (downloadJob?.isActive == true) {
+            onFinished()
+            return
+        }
 
         cancelRequested = false
         // Any previous verdict describes a dump that is no longer the newest
@@ -1242,12 +1298,24 @@ class SessionController(
             var target = resumeFile
             var existing = ByteArray(0)
             var resumeFrom = 0
+            var priorDamage = emptyList<IntRange>()
 
             try {
                 if (target != null) {
                     existing = dumps.read(target)
                     resumeFrom = dumps.resumeOffset(target)
                     existing = existing.copyOf(resumeFrom)
+                    // Holes recorded when this file was written. Without them a
+                    // resume copies the 0xFF forward and reports the result
+                    // complete, which is §16.1 -- the erase gate then opens on
+                    // a dump that is missing data.
+                    priorDamage = dumps.damagedRanges(target)
+                    if (priorDamage.isNotEmpty()) {
+                        transcript.note(
+                            "${target.name} has ${priorDamage.size} damaged range(s); " +
+                                "they will be re-read before extending"
+                        )
+                    }
                 } else {
                     target = dumps.newDumpFile()
                 }
@@ -1265,6 +1333,7 @@ class SessionController(
                         resumeFrom = resumeFrom,
                         onProgress = ::applyDownloadProgress,
                         shouldContinue = { !cancelRequested },
+                        priorDamage = priorDamage,
                     )
                 }
 
@@ -1282,7 +1351,7 @@ class SessionController(
                 val partial = !result.isComplete
                 // Save whenever there are bytes, including after a failure. The
                 // bytes are the whole point; the error is only how it ended.
-                dumps.save(target, result.image, partial = partial)
+                dumps.save(target, result.image, partial = partial, damaged = result.damagedRanges)
                 pendingEvidence = PendingEvidence(
                     file = target,
                     coveredBytes = result.image.size,
@@ -1414,14 +1483,22 @@ class SessionController(
                 resumeFrom = result.image.size,
                 onProgress = ::applyDownloadProgress,
                 shouldContinue = { !cancelRequested },
+                // The fresh link is the best chance this transfer will get of
+                // recovering what the wedged one dropped, so hand the earlier
+                // segments' holes over to be re-read rather than merely carried.
+                // Whatever survives comes back in `continued.damagedRanges`.
+                priorDamage = result.damagedRanges,
             )
 
-            // Carry the earlier segments' damage and retries forward; they
-            // describe the same image and must not be forgotten by a later pass
-            // that happened to be clean.
+            // Carry the earlier segments' work forward. `continued` came from a
+            // plain download() that never saw a wrap probe, so `fullReread`
+            // reverts to false and `sectorsFetched` drops everything before
+            // this cycle -- and `fullReread` is the only thing stopping the app
+            // claiming an amount added after a wrap. See §16.4.
             result = continued.copy(
                 retries = result.retries + continued.retries,
-                damagedRanges = result.damagedRanges + continued.damagedRanges,
+                fullReread = result.fullReread || continued.fullReread,
+                sectorsFetched = result.sectorsFetched + continued.sectorsFetched,
             )
 
             if (result.image.size <= before) {
@@ -1516,13 +1593,14 @@ class SessionController(
      * the one inside the action is the decision.
      */
     suspend fun eraseBlockers(): List<EraseGate.Blocker> {
-        val c = client
-            ?: return listOf(
+        if (client == null) {
+            return listOf(
                 EraseGate.Blocker(
                     "Not connected to a logger.",
                     "Connect over USB or Bluetooth first.",
                 )
             )
+        }
         // Must return *before* touching the device. This is called from a
         // LaunchedEffect that re-fires when the evidence changes, and starting
         // a download clears the evidence -- so without this guard, rendering
@@ -1536,8 +1614,23 @@ class SessionController(
                 )
             )
         }
-        val pointer = runCatching { readLock.withLock { c.queryWritePointer() } }.getOrNull()
-        return EraseGate.blockers(_eraseEvidence.value, pointer)
+        // **Renders from the pointer the telemetry loop already keeps**, and
+        // reads nothing itself.
+        //
+        // This used to query the device. It is called from a LaunchedEffect in
+        // a tab that `when (tab)` disposes, so every visit to the Config tab
+        // fired one `PMTK182,2,8` -- with no rate limit at all, while
+        // `Transport.writePointerProbeIntervalMillis` exists precisely because
+        // 17 of those in three minutes took the Bluetooth link down (§15). Five
+        // tab flips in a minute is that cadence. See §16.6.
+        //
+        // The freshness argument is unaffected, because it never rested here:
+        // the displayed list is a courtesy, and the decision is the gate
+        // re-evaluated inside [eraseFlash] against a pointer read at that
+        // moment. `lastProbedPointer` is seeded at connect and refreshed at
+        // whatever rate the link tolerates, which is the best figure available
+        // without asking again.
+        return EraseGate.blockers(_eraseEvidence.value, lastProbedPointer)
     }
 
     /**
@@ -1669,7 +1762,8 @@ class SessionController(
      * reviewer can see exactly what the device is asked to do.
      */
     fun writeTimeInterval(seconds: Double, onDone: () -> Unit = {}) {
-        val c = client ?: run { _message.value = "Not connected"; return }
+        val c = client ?: run { _message.value = "Not connected"; onDone(); return }
+        if (isBusy(onDone)) return
         launchExclusive {
             try {
                 val tenths = (seconds * 10).toInt()
@@ -1694,7 +1788,8 @@ class SessionController(
      * existing dump. Costs flash-hours: the record grows 42 to 48 bytes.
      */
     fun writeLogFormat(format: LogFormat, onDone: () -> Unit = {}) {
-        val c = client ?: run { _message.value = "Not connected"; return }
+        val c = client ?: run { _message.value = "Not connected"; onDone(); return }
+        if (isBusy(onDone)) return
         launchExclusive {
             try {
                 withLoggingPaused(c) {
@@ -1711,6 +1806,23 @@ class SessionController(
                 onDone()
             }
         }
+    }
+
+    /**
+     * Refuse a device operation while a transfer or an erase holds the link.
+     *
+     * The `readLock` keeps these from *corrupting* a transfer, which is what it
+     * was added for, and that is not the same as making them safe to accept.
+     * Without this the two config writes queued on the mutex behind a transfer
+     * that can run for three hours, and then disabled logging unattended, long
+     * after the tap and quite possibly mid-ride. `setLogging` already refused;
+     * these two were simply missed. See §16.8.
+     */
+    private fun isBusy(onDone: () -> Unit): Boolean {
+        if (downloadJob?.isActive != true && !_erase.value.running) return false
+        _message.value = "The logger is busy"
+        onDone()
+        return true
     }
 
     private suspend fun refreshConfig() {

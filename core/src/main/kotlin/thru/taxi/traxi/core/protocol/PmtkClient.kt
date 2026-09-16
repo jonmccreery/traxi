@@ -62,8 +62,14 @@ class PmtkClient(
 
     /**
      * Parse whatever is in [readBuffer], queue it, and notify [onSentence].
+     *
+     * @param queue whether sentences are held for a later [awaitSentence]. False
+     *   when nothing is waiting for anything -- see [pump] -- because a sentence
+     *   parked with no request outstanding can only ever be served to a *future*
+     *   request it does not answer. That is §16.3: the device acks every query,
+     *   nothing consumes those acks, and a write then matched one instantly.
      */
-    private fun ingest(n: Int) {
+    private fun ingest(n: Int, queue: Boolean = true) {
         for (line in assembler.feed(readBuffer, n)) {
             val sentence = Nmea.parse(line)
             if (sentence == null) {
@@ -81,8 +87,10 @@ class PmtkClient(
                 transcript.rx(sentence.raw)
                 onSentence?.let { observer -> runCatching { observer(sentence) } }
             }
-            if (queued.size >= MAX_QUEUED) queued.removeFirst()
-            queued.addLast(sentence)
+            if (queue) {
+                if (queued.size >= MAX_QUEUED) queued.removeFirst()
+                queued.addLast(sentence)
+            }
         }
     }
 
@@ -105,7 +113,10 @@ class PmtkClient(
      */
     suspend fun pump(timeoutMillis: Long = 250): Int {
         val n = transport.read(readBuffer, timeoutMillis)
-        if (n > 0) ingest(n)
+        // Deliberately not queued. Nothing is waiting during a pump, so anything
+        // held here could only be handed to a later request as an answer it
+        // never gave. See [ingest].
+        if (n > 0) ingest(n, queue = false)
         return n
     }
 
@@ -172,6 +183,18 @@ class PmtkClient(
         predicate: (NmeaSentence) -> Boolean,
     ): NmeaSentence {
         var lastFailure: Exception? = null
+        // Nothing that arrived before this request can be an answer to it. The
+        // queue is only ever a buffer for sentences seen *while waiting*, and
+        // every operation here is serialised, so carrying entries across a
+        // request boundary has no upside and one severe failure mode: §16.3,
+        // where a query's unconsumed ack satisfied the next write.
+        //
+        // The drain extends that to bytes which have arrived but not yet been
+        // parsed -- the same window, one layer down. It cannot cover an answer
+        // that is still inside the device; see the note on that limit in
+        // StaleAnswerTest.
+        queued.clear()
+        drainInput()
         repeat(retries) { attempt ->
             try {
                 send(payload)
@@ -380,9 +403,19 @@ class PmtkClient(
      */
     suspend fun resetStream() {
         queued.clear()
+        drainInput()
+    }
+
+    /**
+     * Discard bytes already on the wire, so they cannot be parsed as an answer
+     * to a request that has not been sent yet.
+     *
+     * Bounded, because the device streams NMEA continuously and would otherwise
+     * never go quiet. Reading is free on this link; it is asking that is not
+     * (§15), so the cost here is latency alone.
+     */
+    private suspend fun drainInput() {
         assembler.reset()
-        // Drain whatever the device is still sending. Bounded, because the
-        // device streams NMEA continuously and would otherwise never go quiet.
         val until = clock() + DRAIN_MILLIS
         while (clock() < until) {
             if (transport.read(readBuffer, 20) <= 0) break
@@ -401,7 +434,7 @@ class PmtkClient(
      */
     suspend fun writeConfig(field: Pmtk.ConfigField, value: String) {
         val sentence = exchange(Pmtk.writeConfig(field, value)) {
-            Pmtk.Ack.from(it)?.command == "182"
+            Pmtk.Ack.from(it)?.acknowledges("182", "1") == true
         }
         val ack = Pmtk.Ack.from(sentence)
             ?: throw PmtkProtocolException("no ack for $field write")
@@ -413,7 +446,14 @@ class PmtkClient(
 
     suspend fun writeLoggingEnabled(enabled: Boolean) {
         val payload = if (enabled) Pmtk.WRITE_ENABLE_LOGGING else Pmtk.WRITE_DISABLE_LOGGING
-        val sentence = exchange(payload) { Pmtk.Ack.from(it)?.command == "182" }
+        // The subcommand is what distinguishes "logging is back on" from any
+        // other 182 acknowledgement the device has left lying around. Getting
+        // this wrong is how a logger stayed switched off while the app said
+        // otherwise -- the exact failure withLoggingPaused exists to prevent.
+        val subcommand = if (enabled) "4" else "5"
+        val sentence = exchange(payload) {
+            Pmtk.Ack.from(it)?.acknowledges("182", subcommand) == true
+        }
         val ack = Pmtk.Ack.from(sentence)!!
         if (!ack.isSuccess) {
             throw PmtkProtocolException(
@@ -503,7 +543,7 @@ class PmtkClient(
             Pmtk.WRITE_ERASE_FLASH,
             timeoutMillis = timeoutMillis,
             retries = 1,
-        ) { Pmtk.Ack.from(it)?.command == "182" }
+        ) { Pmtk.Ack.from(it)?.acknowledges("182", "6") == true }
         val ack = Pmtk.Ack.from(sentence)
             ?: throw PmtkProtocolException("no ack for erase")
         if (!ack.isSuccess) {

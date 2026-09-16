@@ -60,12 +60,27 @@ object FetchOutcome {
         val size = Bytes.describe(result.image.size)
         return when {
             result.failure != null -> "Interrupted — $size saved and resumable"
+            // The §15 wedge is deliberately not a `failure` -- that is what lets
+            // the link recovery tell it from a dead transport -- and this branch
+            // is where that distinction had to be learned. Without it a wedge
+            // fell through to the byte comparison, and because the extend
+            // restarts at the frontier block a wedge on that first block leaves
+            // an image *shorter* than the dump it extended. The gain went
+            // negative and the logger was reported to have nothing new about a
+            // ride still sitting in its flash. See §16.2.
+            result.stoppedUnanswered ->
+                "The logger stopped answering — $size saved and resumable"
             // Cancelled mid-extend: "already up to date" would present a stop
             // the user requested as a checked fact about the logger.
             cancelled && !result.isComplete -> "Cancelled — $size saved and resumable"
             result.fullReread -> "Re-read the whole log — $size in $targetName"
             gained > 0 -> "Added ${Bytes.describe(gained)} of new tracking to $targetName"
-            else -> "Already up to date — nothing new on the logger"
+            // The general form of the same rule: a negative claim about capture
+            // requires a complete measurement, not merely the absence of a
+            // positive one. Anything that stopped early can only report that it
+            // stopped early.
+            result.isComplete -> "Already up to date — nothing new on the logger"
+            else -> "Stopped early — $size saved and resumable"
         }
     }
 }

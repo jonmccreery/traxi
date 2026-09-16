@@ -1717,3 +1717,312 @@ history, not state. Two dumps dated the same day were different files.
   test source set at all until this was fixed. The download card's live
   behaviour (`Sectors fetched`, the monotonic readout, the corrected message)
   is still only verified by reading it; it needs a real transfer to watch.
+
+## 16. The audit — seven holes found by reading, not by losing anything
+
+Found 2026-09-15 by going through the whole tree looking for them, after
+§15.4. Nothing here cost data yet. That is the only reason this section can be
+written calmly, and it is not a reason to rank it below the sections that were
+written after a loss.
+
+Every claim below is backed by a test that runs in `:core` or `:app` and that
+**passed against the unfixed code** — the finding was put at risk and survived.
+Those tests now assert the fixed behaviour instead, so each one is a regression
+test for exactly one of these.
+
+The two that matter most are §16.1 and §16.3. Both defeat a protection this
+project already built, on purpose, after a real incident.
+
+### 16.1 A resume launders a holed dump into a verified one
+
+**`FlashDownloader.Result.damagedRanges` describes one `download()` call, not
+the image on disk.** The resume path passes the previous image in as `existing`
+and starts reading past it, so a hole already in that prefix is copied forward
+and counted by nobody. The second result reports `isComplete = true` and
+`damagedBytes = 0`.
+
+Everything downstream believes it, because everything downstream was built to:
+
+- `DumpRepository.save(partial = !isComplete)` **deletes the `.partial`
+  marker**, so the dump stops being a partial dump;
+- `SessionController.pendingEvidence` records `damagedBytes = 0`;
+- `EraseGate.blockers` finds nothing to object to, and the erase is permitted;
+- the dump list starts offering **Fetch new** on it, which is only offered for
+  non-partial dumps — so the hole propagates into every descendant.
+
+That is the whole safety argument of §0.2 clause 1 defeated by a second
+download that happened to be clean.
+
+#### The parser cannot catch it, and neither can anything else
+
+A missing range is `0xFF`, which is byte-identical to erased flash. That is
+stated in `damagedRanges`' own doc comment as the reason it exists. Inside a
+sector, `MtkLogParser` reads `0xFF` as end-of-data fill and jumps to the next
+sector, so the records after the hole are dropped **in silence** — no checksum
+failure, no bad header, nothing in `Stats`.
+
+Measured on two real sectors of `cdt_v2.bin`, a single lost 2 KB chunk:
+
+| hole | fixes | checksum failures |
+|---|---|---|
+| none | 3,091 | 0 |
+| `0x4000`, 2 KB | 1,921 | **0** |
+
+**1,170 fixes — 38% of the dump — gone, with a clean parse.** Sweeping all 31
+chunk positions in that sector: two are completely silent like this one, and
+the other 29 raise exactly one checksum failure, from the record that straddles
+the hole's leading edge. So the erase gate was being saved, when it was saved
+at all, by an accident of record alignment. It is not a protection.
+
+#### What now prevents it
+
+Three things, because the single fix is not enough on its own:
+
+1. **Damage is persisted with the dump.** The `.partial` sidecar already
+   carried `resume=<bytes>`; it now also carries the damaged ranges. A dump
+   that is missing bytes says so on disk, and says it after a reboot.
+2. **A resume re-reads the damaged blocks before it extends.** This is the
+   part that recovers data rather than merely reporting its absence: the ranges
+   are known, the device serves whole blocks reliably, and re-reading one is
+   the same cost as any other block. Only ranges that are *still* missing
+   afterwards stay damaged.
+3. **Damage that survives is carried into the new `Result`.** So `isComplete`
+   stays false, the `.partial` marker stays, the evidence carries a non-zero
+   `damagedBytes`, and the gate stays shut.
+4. **The dump list says so.** A holed dump now carries a line in red saying how
+   many bytes never arrived and that Resume will re-read them. A dump with
+   holes looks exactly like a good one, which is the entire hazard, so the
+   person choosing what to export or erase against has to be able to see it.
+
+The link recovery gets the repair for free: a rebuilt link is the best chance a
+transfer will have of recovering what the wedged one dropped, so each cycle now
+hands the earlier segments' holes to the next pass rather than merely carrying
+them forward.
+
+#### Still open
+
+Dumps written **before** this fix that were laundered are indistinguishable
+from clean ones — there is no marker to read and the holes look like erased
+flash. Any dump on the phone older than this change that was ever resumed
+should be treated as unverified. There is no way to check it short of
+re-downloading and comparing.
+
+### 16.2 A wedge during fetch-new reports "nothing new on the logger"
+
+§15.4 fixed the gain measurement and this survived it, one branch above.
+
+`stoppedUnanswered` is deliberately **not** a `failure` — that distinction is
+what lets `downloadWithLinkRecovery` tell a recoverable §15 wedge from a dead
+transport. `FetchOutcome.message` never learned it. Its first test is
+`failure != null`, which is null for a wedge, so the message falls through to
+the byte comparison.
+
+And the comparison is against a **truncated** image. The extend restarts at the
+block holding the previous dump's frontier, so a wedge on that first block
+leaves an image *shorter* than the dump it was extending. `newDataBytes` goes
+negative, `gained > 0` is false, and the last branch — written for a logger
+that genuinely had nothing to add — claims exactly that.
+
+So the §12 shape is back, on this device's single most common failure:
+
+> Already up to date — nothing new on the logger
+
+**What now prevents it:** a wedge gets its own branch, and — the general rule —
+**"already up to date" is now reachable only from a transfer that completed.**
+A negative claim about capture requires a complete measurement, not merely the
+absence of a positive one.
+
+### 16.3 Every query leaves a success-ack in the queue, and a write takes it
+
+The worst of the seven, and the one that was hardest to see because the
+simulator does not reproduce it.
+
+**The real device acks its queries.** From `data/usb_clean_2026-09-06.log:22`:
+
+```
+>> $PMTK182,2,3*38
+<< $PMTK001,182,2,3*25        <- the ack
+<< $PMTK182,3,3,50*10         <- the value
+```
+
+Seventy-six of those in one capture. `queryConfig` waits for the *value*, so
+the **ack is never consumed**. `PmtkClient.ingest` queues it, nothing ages it
+out, and only `resetStream` — which just the block reader calls — ever clears
+the queue.
+
+Now read the write path:
+
+```kotlin
+exchange(payload) { Pmtk.Ack.from(it)?.command == "182" }
+```
+
+Command only. Never the subcommand, although `Ack` parses one. A leftover
+`PMTK001,182,2,3` from *any earlier query* matches that predicate, and
+`awaitSentence` consults the queue **before** the wire. So:
+
+> `writeLoggingEnabled(true)` returns success immediately, having put
+> `PMTK182,4` on the wire and never waited to see whether the logger obeyed it.
+
+A connect alone runs six queries and parks six of these. No retry, no timeout,
+no marginal link required. Every config write and both halves of
+`withLoggingPaused` were exposed — which is to say **the §12 guarantee, the one
+this project cares most about, could report a restored logger that was still
+switched off.**
+
+The same mechanism serves stale *values* as well as stale acks. A retried
+query — routine on a link where three probes in seventeen go unanswered — is
+answered twice, the second copy is parked, and the next caller gets it. That
+reaches the write pointer, which is the only truth about recording (§15.2) and
+the freshness the erase gate rests on: a pointer read from minutes ago can
+clear the coverage check that a current one would fail.
+
+**What now prevents it:**
+
+- acks are matched on **command and subcommand**, which the device supplies on
+  every one;
+- `exchange` drops the queue before it sends, so no answer predating a request
+  can satisfy it;
+- `pump` no longer queues at all. Nothing is waiting during a pump by
+  definition, so queuing there only ever parked staleness for a later caller;
+- `exchange` also **drains the wire** before sending, which extends the same
+  rule one layer down, to bytes that have arrived but not yet been parsed;
+- **the simulator now acks queries like the device does**, so this class of bug
+  cannot survive the test suite again. That is the §15.4 lesson repeated: a
+  simulator more forgiving than the hardware hides exactly the bugs worth
+  finding.
+
+#### Still open, and it is a real limit
+
+**An answer still inside the device when the next request goes out cannot be
+told from an answer to that request.** PMTK carries no request id, so there is
+nothing to correlate on. Clearing the queue and draining the wire cover
+everything that has *arrived*; a duplicate that is still in the logger's output
+buffer when the next query is sent will be matched by it.
+
+The exposure is now small and bounded — it needs a retry, and then a second
+request inside the round trip that follows, where the steady probe interval is
+60 s — but it is not zero, and a stale write pointer is exactly the input the
+erase gate's coverage rule trusts. The `retry` note in the transcript is what
+makes such a reading explicable after the fact. A proper fix needs a
+correlating field the protocol does not have, or a rule that treats a repeated
+pointer value as inconclusive when a retry preceded it.
+
+### 16.4 A link cycle erases the full-re-read flag
+
+`downloadWithLinkRecovery` rebuilds its result from the continuation:
+
+```kotlin
+result = continued.copy(
+    retries = result.retries + continued.retries,
+    damagedRanges = result.damagedRanges + continued.damagedRanges,
+)
+```
+
+`continued` comes from a plain `download()`, which never saw a wrap probe, so
+`fullReread` reverts to false and `sectorsFetched` drops the earlier segments.
+Any one of the sixty permitted link cycles erases the flag — and the flag is
+the only thing stopping the app claiming an amount added after a wrap, which
+`FetchOutcomeTest` asserts must never happen. **Carried forward explicitly
+now**, along with the work counter.
+
+### 16.5 "Clear pairing and re-pair" could never reconnect
+
+`clearPairingAndReconnect` sets `Connecting`, clears the bond, re-bonds, and
+calls `connect(address)` — whose first line is:
+
+```kotlin
+if (_connection.value is ConnectionState.Connecting) return
+```
+
+It is still `Connecting`, set by the caller and never cleared on the success
+path, so `connect` returns immediately and nothing connects. The Connecting
+card renders a progress bar and no buttons, and the session lives in the
+Application scope, so the UI sits there until the process is killed — after
+destroying a pairing that then has to be re-entered by hand at the device.
+
+This is the recovery path for a stale link key, which means it fails in exactly
+the situation it exists for.
+
+The same guard had a second defect: it is checked *outside* the coroutine that
+sets the state, so two taps inside one dispatch both pass it and open two
+RFCOMM sockets to a device that serves one SPP client, leaking the first.
+
+**What now prevents it:** the guard is an atomic claim taken synchronously in
+`connect` and released when the attempt ends, rather than an inference from UI
+state. One flag fixes both halves.
+
+### 16.6 The probe rate limit was advisory
+
+`Transport.writePointerProbeIntervalMillis` is the §15 mitigation: 60 s over
+Bluetooth, because 17 probes in three minutes took the link down. Only the
+telemetry loop honoured it.
+
+`EraseCard`'s `LaunchedEffect` calls `eraseBlockers()`, which queries the write
+pointer, and `when (tab)` disposes the tab — so **every entry to the Config tab
+fired one probe**, unlimited. Five tab flips in a minute is one probe per 12 s,
+which is the cadence measured to wedge the radio.
+
+**What now prevents it:** rendering the gate uses the pointer the telemetry
+loop already keeps at the link's tolerated rate, and reads nothing. The erase
+*action* still probes fresh — one query at the moment of an irreversible act is
+proportionate, and that was always the intent: the displayed list is a
+courtesy, the one inside the action is the decision.
+
+### 16.7 Cancellation was caught and re-reported as the device misbehaving
+
+`kotlinx.coroutines.CancellationException` is an `Exception`, and the telemetry
+loop caught it twice:
+
+```kotlin
+val read = try { readLock.withLock { c.pump(...) } }
+catch (e: Exception) { ...; endStream("the read loop stopped: ..."); break }
+```
+
+`pump` holds a 250 ms read and the loop's only other suspension point is a
+50 ms delay, so a cancel usually lands inside the `try`. `cycleLink()` cancels
+telemetry on every §15 link rebuild. The result:
+
+- `linkHealth.streamEnded` is set **after** `stopTelemetry` has reset it, so
+  the Live tab reports a dead stream for the rest of a transfer that is
+  recovering normally;
+- the transcript gets `telemetry read threw` and `STREAM ENDED`;
+- worst, a cancel landing in the probe branch logs *"write-pointer probe went
+  unanswered; this logger's Bluetooth link often drops immediately after one"*.
+
+That last line is **fabricated §15 evidence in the one diagnostic that survives
+to the field**, and §15's conclusions are drawn by counting those events. A
+tool that manufactures its own corroboration is worse than one that says
+nothing.
+
+**What now prevents it:** both catches rethrow `CancellationException` before
+looking at anything else. Cancellation is not a device symptom and must never
+be written down as one.
+
+### 16.8 Smaller things fixed in the same pass
+
+- `startDownload` and `startIncrementalDownload` returned without calling
+  `onFinished` when not connected, so `DownloadService` never stopped: an
+  ongoing, unswipeable notification holding the process up indefinitely.
+- `writeTimeInterval` and `writeLogFormat` still had no busy check — the gap
+  the `readLock` comment describes. The mutex keeps them from *corrupting* a
+  transfer, but they still queue behind it and then pause logging unattended,
+  hours after the tap, on a device that is being ridden. They now refuse while
+  the logger is busy, like `setLogging` does.
+
+### The rule
+
+Three, and they are all the same rule seen from different angles.
+
+**A property of the data must be stored with the data.** Damage was a property
+of a function call, so it evaporated at the end of the call. Freshness was a
+property of nothing at all, so a five-minute-old answer and a current one were
+the same object.
+
+**A protection is only as good as the thing that can bypass it.** The probe
+interval, the erase gate, the §12 restore guarantee — each was built carefully
+and then reached around by a code path that did not know it existed.
+
+**A simulator that is kinder than the device hides the bugs worth finding.**
+Twice now: the 512-byte read in §15.4, and the query ack here. The simulator's
+job is to be *accurate*, and where it is not, it should be treated as a known
+gap rather than as a pass.

@@ -35,6 +35,14 @@ class DumpRepository(private val context: Context) {
          * dumps are kept, listed, and resumable rather than discarded.
          */
         val isPartial: Boolean,
+        /**
+         * Bytes that never arrived and read as 0xFF in this file.
+         *
+         * Surfaced in the list because a dump with holes looks exactly like a
+         * good one -- that is the entire hazard -- and the person deciding what
+         * to export, extend or erase against has no other way to know.
+         */
+        val damagedBytes: Int = 0,
     ) {
         val name: String get() = file.name
         /**
@@ -58,6 +66,7 @@ class DumpRepository(private val context: Context) {
                     sizeBytes = file.length(),
                     modifiedAt = file.lastModified(),
                     isPartial = File(file.path + PARTIAL_MARKER).exists(),
+                    damagedBytes = damagedRanges(file).sumOf { it.last - it.first + 1 },
                 )
             }
             .sortedByDescending { it.modifiedAt }
@@ -79,8 +88,21 @@ class DumpRepository(private val context: Context) {
      * Writes to a temporary file and renames, so an interrupted save can never
      * leave a truncated file wearing a complete dump's name.
      */
-    suspend fun save(file: File, bytes: ByteArray, partial: Boolean) =
-        withContext(Dispatchers.IO) {
+    suspend fun save(
+        file: File,
+        bytes: ByteArray,
+        partial: Boolean,
+        /**
+         * Byte ranges that never arrived and are therefore 0xFF in [bytes].
+         *
+         * Stored with the dump because **damage is a property of the image, not
+         * of the transfer that produced it**. Held only in the transfer's
+         * result, it evaporated the moment a resume produced a clean second
+         * result: the marker was deleted, the holes stayed, and the erase gate
+         * opened on a dump that was missing data. See §16.1.
+         */
+        damaged: List<IntRange> = emptyList(),
+    ) = withContext(Dispatchers.IO) {
             val temp = File(file.path + ".tmp")
             temp.writeBytes(bytes)
             if (!temp.renameTo(file)) {
@@ -88,8 +110,47 @@ class DumpRepository(private val context: Context) {
                 temp.delete()
             }
             val marker = File(file.path + PARTIAL_MARKER)
-            if (partial) marker.writeText("resume=${bytes.size}") else marker.delete()
+            // A dump with holes is never complete, whatever the caller thinks.
+            if (partial || damaged.isNotEmpty()) {
+                marker.writeText(
+                    buildString {
+                        append("resume=${bytes.size}\n")
+                        if (damaged.isNotEmpty()) {
+                            append("damaged=")
+                            append(damaged.joinToString(",") {
+                                "%08X-%08X".format(it.first, it.last)
+                            })
+                            append("\n")
+                        }
+                    }
+                )
+            } else {
+                marker.delete()
+            }
         }
+
+    /**
+     * Ranges of [file] that never arrived, as recorded when it was saved.
+     *
+     * Empty for a dump with no sidecar, which is also what a pre-§16.1 dump
+     * looks like -- those were laundered clean and cannot be told from a good
+     * one, which is why the fix had to be paired with re-reading rather than
+     * with detection.
+     */
+    suspend fun damagedRanges(file: File): List<IntRange> = withContext(Dispatchers.IO) {
+        val marker = File(file.path + PARTIAL_MARKER)
+        if (!marker.exists()) return@withContext emptyList()
+        val line = runCatching { marker.readLines() }.getOrNull()
+            ?.firstOrNull { it.startsWith("damaged=") }
+            ?: return@withContext emptyList()
+        line.removePrefix("damaged=").split(",").mapNotNull { entry ->
+            val halves = entry.trim().split("-")
+            if (halves.size != 2) return@mapNotNull null
+            val first = halves[0].toIntOrNull(16) ?: return@mapNotNull null
+            val last = halves[1].toIntOrNull(16) ?: return@mapNotNull null
+            if (last < first) null else first..last
+        }
+    }
 
     /** Byte offset a partial dump should resume from, or 0 if not resumable. */
     suspend fun resumeOffset(file: File): Int = withContext(Dispatchers.IO) {

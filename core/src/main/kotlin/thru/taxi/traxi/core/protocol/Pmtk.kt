@@ -150,6 +150,18 @@ object Pmtk {
     data class Ack(val command: String, val subcommand: String?, val flag: Int) {
         val isSuccess: Boolean get() = flag == FLAG_SUCCESS
 
+        /**
+         * Whether this acknowledges `PMTK<command>,<subcommand>`.
+         *
+         * Matching on [command] alone was §16.3, and it was not a near miss:
+         * this device acks **every** query with `PMTK001,182,2,3`, nothing in
+         * the query path consumes those acks, and a write then matched one out
+         * of the queue and reported success without the device having answered.
+         * The subcommand was parsed all along and simply never checked.
+         */
+        fun acknowledges(command: String, subcommand: String): Boolean =
+            this.command == command && this.subcommand == subcommand
+
         companion object {
             const val FLAG_INVALID = 0
             const val FLAG_UNSUPPORTED = 1

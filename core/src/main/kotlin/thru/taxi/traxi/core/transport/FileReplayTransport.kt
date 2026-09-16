@@ -194,6 +194,21 @@ class SimulatedLoggerTransport(
             f[0] == "PMTK704" -> Unit
 
             f[0] == "PMTK182" && f.getOrNull(1) == "2" -> {
+                // The real device acknowledges every query before answering it:
+                //
+                //     >> $PMTK182,2,3*38
+                //     << $PMTK001,182,2,3*25
+                //     << $PMTK182,3,3,50*10
+                //
+                // (data/usb_clean_2026-09-06.log:22, 76 of them in that capture.)
+                // Nothing in the query path consumes these, so they piled up in
+                // the client's queue and a later write matched one as its own
+                // acknowledgement -- §16.3. The simulator did not emit them,
+                // which is precisely why the bug survived the test suite. A
+                // simulator kinder than the hardware hides the bugs worth
+                // finding; it is the §15.4 lesson, and this is its second
+                // outing.
+                reply("PMTK001,182,2,3")
                 when (f.getOrNull(2)) {
                     "2" -> reply("PMTK182,3,2,$logFormatHex")
                     "3" -> reply("PMTK182,3,3,200")
@@ -219,6 +234,9 @@ class SimulatedLoggerTransport(
                 val address = f.getOrNull(2)?.toLongOrNull(16)?.toInt() ?: return
                 val length = f.getOrNull(3)?.toLongOrNull(16)?.toInt() ?: return
                 if (length % 2 != 0) return          // device rejects odd lengths
+                // Acked like any other command, ahead of the chunks
+                // (data/usb_clean_2026-09-06.log:37).
+                reply("PMTK001,182,7,3")
                 emitLogChunks(address, length)
             }
 

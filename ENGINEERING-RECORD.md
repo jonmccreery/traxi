@@ -1557,3 +1557,163 @@ ends in silence.
 - One clean run is not a stability claim. It is one clean run, after a device
   power cycle and on a freshly built ACL — both of which §15.1 predicts are
   favourable starting conditions.
+
+### 15.4 The fetch that reported "nothing new" about half an hour of riding
+
+2026-09-15, 13:31–13:41. A fetch-new pulled back a 30.5-minute ride and told
+the user there was nothing to pull. Nothing was lost — the bytes were fetched,
+saved and parsed correctly — but the message was false, and it is the kind of
+false that talks someone out of a download.
+
+```
+4 blocks   262,144 bytes on the wire   612 s   0.4 KB/s
+0 retries   0 link rebuilds   0 checksum failures   0 damaged ranges
+stopped correctly on 2 consecutive unwritten blocks at 0x00050000
+gained: 8,432 bytes, 170 records — 161 of them the ride, 18:03–18:33Z
+reported: "Already up to date — nothing new on the logger"
+```
+
+Evidence at `data/bt_fetch_base_2026-09-08.bin` (3,141 fixes) and
+`data/bt_fetch_new_2026-09-15.bin` (3,311). `IncrementalGainTest` replays the
+transfer between them.
+
+#### Why: the gain was measured from the file's length
+
+```kotlin
+val gained = result.image.size - previous.size   // 327680 - 327680 = 0
+```
+
+Both dumps are **exactly 327,680 bytes**. New records land at the write
+frontier, which sat at `0x00026090` — inside sector 2, with 39 KB still free.
+The ride was written into that free space, so the image gained 8,432 bytes of
+riding without gaining a single byte of length. The size delta was 0 and the
+message fell through to the "nothing new" branch.
+
+This is §12's shape in a new place: a confident negative claim about capture
+that is false. §12 was the logger silently not recording; this is the app
+silently reporting nothing recorded. The second is cheaper — the data is on
+disk either way — but it fails the same way, by sounding certain.
+
+The fix is to measure frontier movement, not length. `frontierOffset` is the
+same figure `planIncremental` already notes to the transcript as
+`frontier at 0x...`, so the message and the log can now be checked against each
+other instead of believed separately.
+
+#### The same disagreement, three more ways
+
+One inconsistency — two phases counting different things — produced four
+symptoms. The wrap probe reported against the previous dump's whole length;
+the extend that followed began at the frontier *block*.
+
+- **The readout fell backwards at the handover**, 320 KB/sector 5 dropping to
+  128 KB/sector 2, then climbing the same ground again. Both phases now report
+  against `extendOffset`.
+- **"Time left" was blank for the entire extend.** `etaStartBytes` latched at
+  327,680 on the probe's first chunk, so `advanced` stayed negative until the
+  transfer climbed back past its own starting figure — which happens at the
+  end. Same root, same fix.
+- **"Sectors" meant three things on screen**, none of them saying which:
+  `sizeBytes / 0x10000` in the dumps list (5), `sectorsWithData` in the parse
+  card (3), and a download counter (5) that was not a count at all.
+
+That last one deserves its own line. `sectorsRead` was `address / SECTOR_SIZE`
+— a **position**, not a tally. It read 5 on a transfer that pulled 4 sectors,
+because the two sectors before the frontier were never asked for. Renamed to
+`sectorPosition` and `sectorSpan`; `sectorsWithData` was already honest.
+`sectorsFetched` is new and is the only figure of the four that measures work.
+
+#### What a fetch-new actually costs
+
+Four sectors are read no matter how little is new:
+
+| sector | why it cannot be skipped |
+|---|---|
+| wrap probe (0) | the safety check; a whole sector because sub-block reads drop the link |
+| the frontier sector | the new records are *inside* it, mixed with old ones |
+| two unwritten sectors | the termination rule — see below |
+
+So **~256 KB is a fixed toll per fetch**, not proportional to the gain. At the
+measured rate (49.6 bytes/record, 10 s interval, ≈6 sectors/day):
+
+| fetched after | sectors | wire | read per byte kept |
+|---|---|---|---|
+| one 30-min ride | 4 | 256 KB | 31 : 1 |
+| half a day | 7 | 448 KB | 2.3 : 1 |
+| one day | 10 | 640 KB | 1.7 : 1 |
+| a week | 48 | 3072 KB | 1.1 : 1 |
+
+The 31:1 is not waste discovered in the code; it is a small numerator under a
+fixed denominator. **The operational reading is to batch.** Three short rides
+fetched separately cost 768 KB; fetched together, 256 KB.
+
+#### Why two unwritten sectors, and why seeing one early does not help
+
+One blank sector is ambiguous. It can mean end of data, a sector whose bytes
+never arrived (`0xFF` is indistinguishable from erased flash), or a sector the
+device **skipped**. On an append-only log a genuine blank proves nothing
+follows it — so the second sector exists solely to defeat the skipped case,
+which would now need two adjacent bad sectors. That this device tracks 16
+failed sectors in `RCD FSECTOR` is reason to think the case is real.
+
+The app *can* see blankness almost immediately: `SectorHeader.isUnwritten`
+needs 16 bytes, and the first chunk carries 2,048, arriving ~1 s into a ~150 s
+read. **It gains nothing.** The device does not short-circuit an erased sector:
+
+```
+block 0x00020000  65536/65536, 32 chunks, 161755 ms   written
+block 0x00030000  65536/65536, 32 chunks, 145733 ms   blank
+block 0x00040000  65536/65536, 32 chunks, 151566 ms   blank
+```
+
+It transmits 64 KB of `0xFF`, hex-encoded to 128 KB, at the same rate as real
+data. The cost is committed when the request goes out, and the granularity of
+the request is one sector.
+
+#### The link itself was fine, and that is the other result
+
+Half an hour of Bluetooth with nothing wrong, seven days and a power cycle
+after §15.3, and the block shape held:
+
+| block | first gap | median | 1st half | 2nd half | ratio |
+|---|---|---|---|---|---|
+| `0x00000000` | 1448 ms | 5844 ms | 3300 ms | 6246 ms | 1.89 |
+| `0x00020000` | 1216 ms | 5852 ms | 4076 ms | 6033 ms | 1.48 |
+| `0x00030000` | 1003 ms | 5364 ms | 3045 ms | 6063 ms | 1.99 |
+| `0x00040000` | 978 ms | 5844 ms | 3653 ms | 5819 ms | 1.59 |
+
+Same ramp-and-reset as 2026-09-08 (1.88–2.12), slightly faster medians. Two
+link drops at 13:29–13:30, a minute before the transfer, recovered by §15.1's
+wait-for-ACL-death rule and did not recur.
+
+#### The rule
+
+**A negative claim about capture must be measured against what was captured,
+never against a proxy.** File length is a proxy for content and it is wrong
+exactly when the gain is small — which is the common case on the trail, and the
+case where a wrong answer costs the most.
+
+And more generally, from how this was found: **read the device or the phone
+before diagnosing.** The first two analyses of this bug were written from a
+week-old copy in `data/` while the phone sat plugged in, and were wrong about
+the base dump, the chip capacity and the sector arithmetic. Repo copies are
+history, not state. Two dumps dated the same day were different files.
+
+#### Still open
+
+- **Reading `RCD FSECTOR` (`$PMTK182,2,11`) would justify stopping at one
+  blank sector**, halving the termination cost, on evidence rather than
+  optimism. §13 already lists fields 1 and 11 as the two worth adding. It is
+  one more query on a link where asking is the expensive verb, so it needs
+  measuring against §15 first.
+- **Is there a read size between 512 and 65,536 that this device honours?** If
+  so, most of the 4-sector floor disappears, termination check and wrap probe
+  alike. Read-only, so nothing can be written or lost; the known failure mode
+  is a dropped RFCOMM link, which §15.1 handles. Untested since the 512-byte
+  attempt that dropped the link.
+- **§6's logger configuration is stale.** It records a 5.0 s interval and
+  48-byte records; the 2026-09-15 data measures **10.0 s** and 49.6 bytes per
+  record. §13.2's burn-rate figures inherit the old number.
+- The app-side symptoms are covered by tests for the first time — `app/` had no
+  test source set at all until this was fixed. The download card's live
+  behaviour (`Sectors fetched`, the monotonic readout, the corrected message)
+  is still only verified by reading it; it needs a real transfer to watch.

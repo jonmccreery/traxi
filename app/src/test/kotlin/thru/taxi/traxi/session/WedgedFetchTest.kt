@@ -50,7 +50,11 @@ class WedgedFetchTest {
         private val muted: Boolean get() = logReads > blocksBeforeMute
 
         override val description: String get() = inner.description
-        override val blockReadIdleTimeoutMillis: Long get() = 50
+        // Wall-clock, unlike the fake-clock fixtures in StaleAnswerTest, so it
+        // needs headroom: at 50 ms a garbage collection pause mid-block would
+        // truncate a healthy read and fail this test for a reason that has
+        // nothing to do with what it checks.
+        override val blockReadIdleTimeoutMillis: Long get() = 250
         override val isOpen: Boolean get() = inner.isOpen
         override suspend fun open() = inner.open()
         override fun close() = inner.close()
@@ -139,9 +143,9 @@ class WedgedFetchTest {
     /**
      * §16.4: `downloadWithLinkRecovery` dropped `fullReread`.
      *
-     * The merge below is transcribed from that method -- it is the only way to
-     * reach it, since `SessionController` needs a `Context` and a Bluetooth
-     * stack to construct. It previously read:
+     * The merge is now [FlashDownloader.Result.continuedBy], extracted so this
+     * can call the real rule instead of a copy of it. It previously read,
+     * inline in that method:
      *
      * ```kotlin
      * result = continued.copy(
@@ -183,11 +187,11 @@ class WedgedFetchTest {
             sectorsFetched = 2,
         )
 
-        val merged = continued.copy(
-            retries = firstPass.retries + continued.retries,
-            fullReread = firstPass.fullReread || continued.fullReread,
-            sectorsFetched = firstPass.sectorsFetched + continued.sectorsFetched,
-        )
+        // The production rule itself, not a copy of it. Transcribing the merge
+        // into the test made the test pass no matter what SessionController
+        // did, which is no test at all; `continuedBy` exists so this line can
+        // call the thing it is checking.
+        val merged = firstPass.continuedBy(continued)
 
         assertTrue(merged.fullReread, "the flag the first pass set must survive the cycle")
         assertEquals(8, merged.sectorsFetched, "and so must the work the first pass did")

@@ -28,10 +28,16 @@ import kotlin.test.assertTrue
  * without waiting to see whether it was. That is the §12 failure the
  * `withLoggingPaused` guarantee exists to prevent, reached from underneath.
  *
- * The cure is three-part and all three parts are exercised here: acks match on
- * subcommand, `exchange` drops the queue and drains the wire before it sends,
- * and `pump` -- which by definition has nothing waiting -- no longer queues at
- * all.
+ * The cure is three-part: acks match on subcommand, `exchange` drops the queue
+ * and drains the wire before it sends, and `pump` -- which by definition has
+ * nothing waiting -- no longer queues at all.
+ *
+ * **Each part has a test that fails when only that part is reverted.** The
+ * first three tests below check the behaviour a user would see; on their own
+ * they passed with any *one* of the three fixes in place, because the three
+ * mask each other, which means none of them was actually verified. The three
+ * that follow isolate one mechanism each. A fix nothing can fail is a fix
+ * nobody has checked.
  */
 class StaleAnswerTest {
 
@@ -45,15 +51,27 @@ class StaleAnswerTest {
      */
     private class SlowDevice(
         /** Reads that must pass before a reply is delivered. */
-        private val holdReads: Int,
+        private val holdReads: Int = 0,
+        /**
+         * Reads during which the device delivers nothing at all, after which
+         * everything it owes arrives **in one batch**.
+         *
+         * This is the §15 shape in miniature: the command path wedges, the
+         * client times out and re-sends, and when the logger comes back it
+         * flushes both answers together. A single `awaitSentence` then ingests
+         * two answers, matches one, and parks the other -- with no `pump`
+         * involved anywhere.
+         */
+        private val stallUntilRead: Int = 0,
         private val respond: (List<String>) -> String?,
     ) : Transport {
 
-        private class Pending(var readsLeft: Int, val bytes: ByteArray)
+        private class Pending(val dueAtRead: Int, val bytes: ByteArray)
 
         private val pending = mutableListOf<Pending>()
         private var out = ByteArray(0)
         private var offset = 0
+        private var reads = 0
 
         /** Fake clock, advanced by the cost of a read. */
         var nowMillis = 0L
@@ -69,15 +87,16 @@ class StaleAnswerTest {
             val sentence = Nmea.parse(line) ?: return
             val reply = respond(sentence.fields) ?: return
             pending += Pending(
-                holdReads,
+                maxOf(reads + holdReads, stallUntilRead),
                 Nmea.frame(reply).toByteArray(Charsets.US_ASCII),
             )
         }
 
         override suspend fun read(dest: ByteArray, timeoutMillis: Long): Int {
             nowMillis += READ_COST_MILLIS
+            reads++
 
-            val due = pending.filter { --it.readsLeft <= 0 }
+            val due = pending.filter { it.dueAtRead <= reads }
             if (due.isNotEmpty()) {
                 pending.removeAll(due)
                 val tail = out.copyOfRange(offset, out.size)
@@ -197,6 +216,118 @@ class StaleAnswerTest {
             "the logger did not acknowledge PMTK182,4, so the user must be told " +
                 "it is not recording -- this is the §12 guarantee",
         )
+    }
+
+    // ---------------- one test per mechanism ----------------
+    //
+    // Each of these fails if, and only if, its own part of the fix is removed.
+
+    /**
+     * Isolates **ack subcommand matching**.
+     *
+     * The queue clear cannot help here: the foreign ack has not arrived when
+     * the write is sent. It lands *during* the wait, which is a window no
+     * amount of clearing covers -- only knowing what the ack is for does.
+     */
+    @Test
+    fun `an ack that arrives mid-wait is still judged on its subcommand`(): Unit = runBlocking {
+        // The query's ack is delayed long enough to arrive while the *write*
+        // is waiting for its own. The device never acks PMTK182,4 at all.
+        val device = SlowDevice(holdReads = 45) { f ->
+            if (f.getOrNull(0) == "PMTK182" && f.getOrNull(1) == "2") "PMTK001,182,2,3" else null
+        }
+        val client = PmtkClient(device, RingTranscript(), clock = { device.nowMillis })
+
+        runCatching { client.queryLogStatus() }
+
+        assertFailsWith<PmtkTimeoutException>(
+            "an ack for PMTK182,2 is not an ack for PMTK182,4, whenever it turns up",
+        ) {
+            client.writeLoggingEnabled(true)
+        }
+    }
+
+    /**
+     * Isolates **the queue clear in `exchange`**.
+     *
+     * Same command, same subcommand, same everything: two answers to the same
+     * question, so no predicate can tell them apart. Only discarding what
+     * predates the request can. No `pump` runs in this test.
+     */
+    @Test
+    fun `a duplicate parked during a stall is not served to the next query`() = runBlocking {
+        var devicePointer = 0x0051F3C2L
+        // Silent for 15 reads, then both the original answer and the retry's
+        // answer arrive together -- one `awaitSentence`, two answers, one match.
+        val device = SlowDevice(stallUntilRead = 15) { f ->
+            if (f.getOrNull(0) == "PMTK182" && f.getOrNull(1) == "2" && f.getOrNull(2) == "8") {
+                "PMTK182,3,8,%08X".format(devicePointer)
+            } else null
+        }
+        val transcript = RingTranscript()
+        val client = PmtkClient(device, transcript, clock = { device.nowMillis })
+
+        assertEquals(devicePointer, client.queryWritePointer())
+        assertTrue(
+            transcript.snapshot().any { it.contains("retry") },
+            "the duplicate must come from a real retry",
+        )
+        assertEquals(0, device.undelivered, "both answers were delivered in the stall flush")
+
+        devicePointer += 4_096
+        assertEquals(
+            devicePointer, client.queryWritePointer(),
+            "the parked duplicate is indistinguishable from a fresh answer, so it " +
+                "must not survive into the next request",
+        )
+    }
+
+    /**
+     * Isolates **`pump` not queuing**.
+     *
+     * Stated as the property itself, through `awaitSentence` rather than
+     * through `exchange`, because `exchange` clears the queue anyway and would
+     * hide it. This is the layer the block reader waits on.
+     */
+    @Test
+    fun `a sentence seen by pump is not waiting in the queue afterwards`(): Unit = runBlocking {
+        val device = EmitsOnce("PMTK182,3,8,0051F3C2")
+        val client = PmtkClient(device, RingTranscript(), clock = { device.nowMillis })
+
+        var observed = 0
+        client.onSentence = { observed++ }
+
+        assertTrue(client.pump(timeoutMillis = 10) > 0, "the sentence was read")
+        assertEquals(1, observed, "and delivered to the observer, which is pump's job")
+
+        assertFailsWith<PmtkTimeoutException>(
+            "having been seen is not having been asked for",
+        ) {
+            client.awaitSentence(timeoutMillis = 1_000) { it.matches("PMTK182", "3", "8") }
+        }
+    }
+
+    /** Emits one sentence, then stays quiet rather than closing. */
+    private class EmitsOnce(sentence: String) : Transport {
+        private val bytes = Nmea.frame(sentence).toByteArray(Charsets.US_ASCII)
+        private var sent = false
+
+        var nowMillis = 0L
+            private set
+
+        override val description: String get() = "emits once"
+        override val isOpen: Boolean get() = true
+        override suspend fun open() = Unit
+        override fun close() = Unit
+        override suspend fun write(bytes: ByteArray) = Unit
+
+        override suspend fun read(dest: ByteArray, timeoutMillis: Long): Int {
+            nowMillis += 250
+            if (sent) return 0
+            sent = true
+            bytes.copyInto(dest)
+            return bytes.size
+        }
     }
 
     @Test

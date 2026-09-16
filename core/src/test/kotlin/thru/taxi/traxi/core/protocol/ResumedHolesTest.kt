@@ -87,7 +87,11 @@ class ResumedHolesTest {
         private var offset = 0
 
         override val description: String get() = inner.description
-        override val blockReadIdleTimeoutMillis: Long get() = 50
+        // Wall-clock, unlike the fake-clock fixtures in StaleAnswerTest, so it
+        // needs headroom: at 50 ms a garbage collection pause mid-block would
+        // truncate a healthy read and fail this test for a reason that has
+        // nothing to do with what it checks.
+        override val blockReadIdleTimeoutMillis: Long get() = 250
         override val isOpen: Boolean get() = inner.isOpen
         override suspend fun open() = inner.open()
         override suspend fun write(bytes: ByteArray) = inner.write(bytes)

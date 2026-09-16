@@ -1728,7 +1728,8 @@ written after a loss.
 Every claim below is backed by a test that runs in `:core` or `:app` and that
 **passed against the unfixed code** — the finding was put at risk and survived.
 Those tests now assert the fixed behaviour instead, so each one is a regression
-test for exactly one of these.
+test for exactly one of these. §16.9 records how that claim was checked, and
+what checking it caught.
 
 The two that matter most are §16.1 and §16.3. Both defeat a protection this
 project already built, on purpose, after a real incident.
@@ -2008,6 +2009,88 @@ be written down as one.
   transfer, but they still queue behind it and then pause logging unattended,
   hours after the tap, on a device that is being ridden. They now refuse while
   the logger is busy, like `setLogging` does.
+
+### 16.9 How these were verified, and what verifying them caught
+
+A test that passed before the fix and passes after it has demonstrated
+*something*. It has not necessarily demonstrated that **this** fix is what makes
+it pass. So each fix was reverted on its own and the suite re-run ten times,
+looking for exactly one test to die.
+
+The first run of that matrix was the useful one:
+
+| fix reverted | tests failing, 10 runs |
+|---|---|
+| §16.1 `priorDamage` | 3, the same 3 every run |
+| §16.3 ack subcommand | **none** |
+| §16.3 `exchange` clear + drain | **none** |
+| §16.3 `pump` not queuing | **none** |
+
+**The three parts of §16.3 masked each other.** Any one of them alone was enough
+to make the scenarios in those tests come out right, so removing a single part
+broke nothing — and none of the three was actually verified by anything. The
+suite was green for reasons unrelated to the code being correct.
+
+Three tests were added, one per mechanism, each constructed so the other two
+cannot rescue it:
+
+- **subcommand matching** — the foreign ack arrives *during* the wait for the
+  write's own ack, a window no amount of clearing covers. Only knowing what an
+  ack is for closes it.
+- **the queue clear** — two answers to the same question, identical in every
+  field, so no predicate can separate them, and no `pump` anywhere. Modelled on
+  the §15 shape: the device stalls, the client retries, and the logger flushes
+  both answers in one burst, which a single `awaitSentence` ingests together.
+- **`pump` not queuing** — stated as the property itself, through
+  `awaitSentence` rather than `exchange`, because `exchange` clears the queue
+  anyway and would hide it.
+
+With those in place, every fix kills exactly one test, on all ten runs:
+
+| fix reverted | test that fails | runs |
+|---|---|---|
+| §16.1 `priorDamage` | the three resume / repair / gate tests | 10/10 |
+| §16.3 ack subcommand | `an ack that arrives mid-wait…` | 10/10 |
+| §16.3 `exchange` clear + drain | `a duplicate parked during a stall…` | 10/10 |
+| §16.3 `pump` not queuing | `a sentence seen by pump…` | 10/10 |
+| §16.2 wedge branch | `a wedge during fetch-new is reported as a wedge` | 10/10 |
+| §16.4 `continuedBy` | `a link cycle carries the full-re-read flag…` | 10/10 |
+
+§16.4 needed a change before it could be verified at all. The merge lived inline
+in `downloadWithLinkRecovery`, so the test had to transcribe it — which means
+the test passed no matter what that method actually did. It is now
+`FlashDownloader.Result.continuedBy`, a function over two results, and the test
+calls the real rule rather than a copy of it.
+
+#### On determinism
+
+None of this is threaded. Every operation on `PmtkClient` is serialised by the
+session's mutex, so §16.3 is a **sequencing** bug rather than a data race: a
+sentence parked in a single-threaded queue and then handed to the wrong caller.
+The fixtures keep it that way deliberately — time is counted in reads and fed
+in through `PmtkClient`'s injectable clock, so the retry lands on the same read
+every run and there is nothing left to be flaky about.
+
+Measured rather than asserted: **240/240** passes idle, and **165/165** with
+four cores of competing load. The two fixtures that do use the wall clock — the
+download tests, where the block reader's idle timeout is real — were given
+250 ms of headroom instead of 50 ms, because at 50 ms a garbage-collection
+pause mid-block would truncate a healthy read and fail the test for a reason
+that has nothing to do with what it checks.
+
+#### The harness mistake, recorded because it nearly passed
+
+The first matrix restored each mutation with `git checkout -- src/main`, which
+restores from **HEAD** — and so quietly reverted the `continuedBy` extraction,
+which was not yet committed. The tree then did not compile, and the failure
+grep filtered out `> Task :app:compileDebugKotlin FAILED` along with the other
+task lines. Two rows came back **empty, and empty read as "no failures"**.
+
+A result that is empty because nothing ran looks exactly like a result that is
+empty because everything passed, unless the harness is built to tell them
+apart. It now checks for compile errors explicitly and restores from a file
+snapshot rather than from the last commit. That is the same shape as everything
+else in this section: **a measurement that cannot fail is not a measurement.**
 
 ### The rule
 

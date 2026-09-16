@@ -1490,16 +1490,11 @@ class SessionController(
                 priorDamage = result.damagedRanges,
             )
 
-            // Carry the earlier segments' work forward. `continued` came from a
-            // plain download() that never saw a wrap probe, so `fullReread`
-            // reverts to false and `sectorsFetched` drops everything before
-            // this cycle -- and `fullReread` is the only thing stopping the app
-            // claiming an amount added after a wrap. See §16.4.
-            result = continued.copy(
-                retries = result.retries + continued.retries,
-                fullReread = result.fullReread || continued.fullReread,
-                sectorsFetched = result.sectorsFetched + continued.sectorsFetched,
-            )
+            // Carry the earlier segments' work forward. The rule lives in
+            // [FlashDownloader.Result.continuedBy] rather than here, so that
+            // what a link cycle must preserve is stated once and can be tested
+            // without a Context and a Bluetooth stack. See §16.4.
+            result = result.continuedBy(continued)
 
             if (result.image.size <= before) {
                 transcript.note(

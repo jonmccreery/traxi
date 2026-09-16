@@ -141,6 +141,29 @@ class FlashDownloader(
         val isComplete: Boolean
             get() = stoppedOnUnwritten && failure == null && damagedRanges.isEmpty()
 
+        /**
+         * Fold the segment that resumed after a link cycle into this one.
+         *
+         * Lives here, as a function over two results, because the version
+         * written inline in `SessionController.downloadWithLinkRecovery` lost
+         * two facts and could not be tested where it stood -- that class needs
+         * a `Context` and a Bluetooth stack to build. [continued] comes from a
+         * plain [download] that never saw a wrap probe, so taking its
+         * `fullReread` and `sectorsFetched` wholesale reverted the first to
+         * false and dropped every earlier segment from the second. The flag is
+         * the only thing stopping the app claiming an amount added after a
+         * wrap. See §16.4.
+         *
+         * `damagedRanges` deliberately comes from [continued] alone: the
+         * continuation is handed this result's damage as `priorDamage` and
+         * re-reads it, so what it reports back is already the survivors.
+         */
+        fun continuedBy(continued: Result): Result = continued.copy(
+            retries = retries + continued.retries,
+            fullReread = fullReread || continued.fullReread,
+            sectorsFetched = sectorsFetched + continued.sectorsFetched,
+        )
+
         val isDamaged: Boolean get() = damagedRanges.isNotEmpty()
 
         val damagedBytes: Int get() = damagedRanges.sumOf { it.last - it.first + 1 }

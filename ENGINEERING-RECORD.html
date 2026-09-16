@@ -1950,7 +1950,8 @@ written after a loss.</p>
 <p>Every claim below is backed by a test that runs in <code>:core</code> or <code>:app</code> and that
 <strong>passed against the unfixed code</strong> — the finding was put at risk and survived.
 Those tests now assert the fixed behaviour instead, so each one is a regression
-test for exactly one of these.</p>
+test for exactly one of these. §16.9 records how that claim was checked, and
+what checking it caught.</p>
 <p>The two that matter most are §16.1 and §16.3. Both defeat a protection this
 project already built, on purpose, after a real incident.</p>
 <h3>16.1 A resume launders a holed dump into a verified one</h3>
@@ -2192,6 +2193,127 @@ be written down as one.</p>
   hours after the tap, on a device that is being ridden. They now refuse while
   the logger is busy, like <code>setLogging</code> does.</li>
 </ul>
+<h3>16.9 How these were verified, and what verifying them caught</h3>
+<p>A test that passed before the fix and passes after it has demonstrated
+<em>something</em>. It has not necessarily demonstrated that <strong>this</strong> fix is what makes
+it pass. So each fix was reverted on its own and the suite re-run ten times,
+looking for exactly one test to die.</p>
+<p>The first run of that matrix was the useful one:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>fix reverted</th>
+<th>tests failing, 10 runs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>§16.1 <code>priorDamage</code></td>
+<td>3, the same 3 every run</td>
+</tr>
+<tr>
+<td>§16.3 ack subcommand</td>
+<td><strong>none</strong></td>
+</tr>
+<tr>
+<td>§16.3 <code>exchange</code> clear + drain</td>
+<td><strong>none</strong></td>
+</tr>
+<tr>
+<td>§16.3 <code>pump</code> not queuing</td>
+<td><strong>none</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>The three parts of §16.3 masked each other.</strong> Any one of them alone was enough
+to make the scenarios in those tests come out right, so removing a single part
+broke nothing — and none of the three was actually verified by anything. The
+suite was green for reasons unrelated to the code being correct.</p>
+<p>Three tests were added, one per mechanism, each constructed so the other two
+cannot rescue it:</p>
+<ul>
+<li><strong>subcommand matching</strong> — the foreign ack arrives <em>during</em> the wait for the
+  write's own ack, a window no amount of clearing covers. Only knowing what an
+  ack is for closes it.</li>
+<li><strong>the queue clear</strong> — two answers to the same question, identical in every
+  field, so no predicate can separate them, and no <code>pump</code> anywhere. Modelled on
+  the §15 shape: the device stalls, the client retries, and the logger flushes
+  both answers in one burst, which a single <code>awaitSentence</code> ingests together.</li>
+<li><strong><code>pump</code> not queuing</strong> — stated as the property itself, through
+  <code>awaitSentence</code> rather than <code>exchange</code>, because <code>exchange</code> clears the queue
+  anyway and would hide it.</li>
+</ul>
+<p>With those in place, every fix kills exactly one test, on all ten runs:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>fix reverted</th>
+<th>test that fails</th>
+<th>runs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>§16.1 <code>priorDamage</code></td>
+<td>the three resume / repair / gate tests</td>
+<td>10/10</td>
+</tr>
+<tr>
+<td>§16.3 ack subcommand</td>
+<td><code>an ack that arrives mid-wait…</code></td>
+<td>10/10</td>
+</tr>
+<tr>
+<td>§16.3 <code>exchange</code> clear + drain</td>
+<td><code>a duplicate parked during a stall…</code></td>
+<td>10/10</td>
+</tr>
+<tr>
+<td>§16.3 <code>pump</code> not queuing</td>
+<td><code>a sentence seen by pump…</code></td>
+<td>10/10</td>
+</tr>
+<tr>
+<td>§16.2 wedge branch</td>
+<td><code>a wedge during fetch-new is reported as a wedge</code></td>
+<td>10/10</td>
+</tr>
+<tr>
+<td>§16.4 <code>continuedBy</code></td>
+<td><code>a link cycle carries the full-re-read flag…</code></td>
+<td>10/10</td>
+</tr>
+</tbody>
+</table></div>
+<p>§16.4 needed a change before it could be verified at all. The merge lived inline
+in <code>downloadWithLinkRecovery</code>, so the test had to transcribe it — which means
+the test passed no matter what that method actually did. It is now
+<code>FlashDownloader.Result.continuedBy</code>, a function over two results, and the test
+calls the real rule rather than a copy of it.</p>
+<h4>On determinism</h4>
+<p>None of this is threaded. Every operation on <code>PmtkClient</code> is serialised by the
+session's mutex, so §16.3 is a <strong>sequencing</strong> bug rather than a data race: a
+sentence parked in a single-threaded queue and then handed to the wrong caller.
+The fixtures keep it that way deliberately — time is counted in reads and fed
+in through <code>PmtkClient</code>'s injectable clock, so the retry lands on the same read
+every run and there is nothing left to be flaky about.</p>
+<p>Measured rather than asserted: <strong>240/240</strong> passes idle, and <strong>165/165</strong> with
+four cores of competing load. The two fixtures that do use the wall clock — the
+download tests, where the block reader's idle timeout is real — were given
+250 ms of headroom instead of 50 ms, because at 50 ms a garbage-collection
+pause mid-block would truncate a healthy read and fail the test for a reason
+that has nothing to do with what it checks.</p>
+<h4>The harness mistake, recorded because it nearly passed</h4>
+<p>The first matrix restored each mutation with <code>git checkout -- src/main</code>, which
+restores from <strong>HEAD</strong> — and so quietly reverted the <code>continuedBy</code> extraction,
+which was not yet committed. The tree then did not compile, and the failure
+grep filtered out <code>&gt; Task :app:compileDebugKotlin FAILED</code> along with the other
+task lines. Two rows came back <strong>empty, and empty read as "no failures"</strong>.</p>
+<p>A result that is empty because nothing ran looks exactly like a result that is
+empty because everything passed, unless the harness is built to tell them
+apart. It now checks for compile errors explicitly and restores from a file
+snapshot rather than from the last commit. That is the same shape as everything
+else in this section: <strong>a measurement that cannot fail is not a measurement.</strong></p>
 <h3>The rule</h3>
 <p>Three, and they are all the same rule seen from different angles.</p>
 <p><strong>A property of the data must be stored with the data.</strong> Damage was a property

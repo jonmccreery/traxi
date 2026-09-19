@@ -4,6 +4,8 @@ import thru.taxi.traxi.AppContainer
 import thru.taxi.traxi.core.format.Bytes
 import thru.taxi.traxi.core.format.LogFormat
 import thru.taxi.traxi.core.format.RecordingAudit
+import thru.taxi.traxi.core.format.MarkProof
+import thru.taxi.traxi.core.format.RecordingSince
 import thru.taxi.traxi.core.protocol.FixType
 import thru.taxi.traxi.core.protocol.FlashEraser
 import thru.taxi.traxi.bt.Bonding
@@ -69,6 +71,270 @@ private fun describeAgo(seconds: Double): String = when {
     seconds < 90 -> "a minute ago"
     seconds < 3600 -> "${(seconds / 60).toInt()} minutes ago"
     else -> "over an hour ago"
+}
+
+/**
+ * A span, for the gaps between sessions.
+ *
+ * [describeAgo] tops out at "over an hour ago", which is right for the age of a
+ * probe and useless for a span that is routinely a working day. These are the
+ * two numbers the user compares against each other, so they are spelled out
+ * rather than rounded into a phrase.
+ */
+private fun describeDuration(seconds: Long): String {
+    if (seconds < 60) return "$seconds s"
+    val minutes = seconds / 60
+    if (minutes < 60) return "$minutes min"
+    val hours = minutes / 60
+    val remainder = minutes % 60
+    if (hours < 24) return if (remainder == 0L) "$hours h" else "$hours h $remainder min"
+    val days = hours / 24
+    val leftoverHours = hours % 24
+    return if (leftoverHours == 0L) "$days d" else "$days d $leftoverHours h"
+}
+
+/**
+ * The trailhead proof: make the logger record something, and watch it land.
+ *
+ * Deliberately a ceremony rather than a readout. Everything else on this screen
+ * is the app telling the user what it believes; this is the user doing a
+ * physical thing to their own device and being shown the consequence, which is
+ * the only form of assurance that survives being disbelieved.
+ *
+ * Two queries, both behind taps. See [MarkProof] for why this must never poll.
+ */
+@Composable
+private fun ProveRecordingCard(
+    session: thru.taxi.traxi.session.SessionController,
+    proof: thru.taxi.traxi.session.MarkProofState,
+) {
+    SectionCard("Prove it is recording") {
+        val result = proof.result
+        when {
+            result != null -> {
+                when (result) {
+                    is MarkProof.Result.Proven -> {
+                        Text(
+                            "RECORDING — PROVEN",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        Text(
+                            "%,d record%s (%s) reached flash between the two readings."
+                                .format(
+                                    result.records,
+                                    if (result.records == 1L) "" else "s",
+                                    Bytes.describe(result.bytes),
+                                ),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        // Spelled out because each clause is a separate failure
+                        // this project has actually had, and no other single
+                        // check rules out all four.
+                        Text(
+                            "That rules out all of it at once: the slide switch is on LOG, " +
+                                "logging is enabled in firmware, the receiver has a position, " +
+                                "and bytes are reaching the flash. Safe to set off.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        // The run doubles as a calibration of the logger's own
+                        // beep, which is the only thing on the trail that works
+                        // without the phone. One run cannot establish the
+                        // implication on its own -- a beep that fires on every
+                        // press is worth nothing -- so this says what it has
+                        // shown and points at the run that would settle it.
+                        Text(
+                            "If the logger beeped when you pressed it, this run has tied that " +
+                                "beep to a real write once. To trust it without the phone, run " +
+                                "the check again with Pause logging on: if it still beeps, the " +
+                                "beep only means the press registered.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+
+                    is MarkProof.Result.NothingWritten -> {
+                        Text(
+                            "NOTHING WAS WRITTEN",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        Text(
+                            "You asked the logger to record a point, it had a position to " +
+                                "record, and the write pointer did not move. It is not " +
+                                "recording. Do not set off on this.",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Text(
+                            "Check the slide switch is on LOG rather than NAV — no command " +
+                                "overrides the switch. If it is already on LOG, use Resume " +
+                                "logging on the Config tab and run this again.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        // A failed run is the most informative calibration
+                        // there is, and it costs nothing to point out: the beep
+                        // just fired over a write that did not happen.
+                        Text(
+                            "If the logger beeped anyway, that beep only means the press " +
+                                "registered — not that anything was recorded. Do not use it " +
+                                "as a recording check on the trail.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+
+                    is MarkProof.Result.Inconclusive -> {
+                        Text(
+                            "Not proven either way",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        // Never styled as a fault. Most of these are a logger
+                        // indoors, which is the healthiest possible reason for
+                        // a pointer not to move.
+                        Text(
+                            "${result.reason.replaceFirstChar { it.uppercase() }}. " +
+                                "This says nothing about whether the logger is recording.",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
+                Button(
+                    onClick = { session.clearMarkProof() },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Run it again") }
+            }
+
+            proof.awaitingPress -> {
+                Text(
+                    "Press the mark button on the logger now",
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Text(
+                    "It writes one point immediately rather than waiting for the next " +
+                        "interval. Then tap below and the app will look for it.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    "Note whether it beeps, and whether an LED flashes. This run will tell " +
+                        "you what that beep is actually worth.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Button(
+                    onClick = { session.confirmMarkProof() },
+                    enabled = !proof.busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(if (proof.busy) "Checking…" else "I pressed it — check") }
+                OutlinedButton(
+                    onClick = { session.clearMarkProof() },
+                    enabled = !proof.busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Cancel") }
+            }
+
+            else -> {
+                Text(
+                    "The check below is the only one that settles every question at " +
+                        "once, and it takes a couple of seconds instead of a couple of " +
+                        "log intervals. Do it at the trailhead, before you set off.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Button(
+                    onClick = { session.beginMarkProof() },
+                    enabled = !proof.busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(if (proof.busy) "Reading the pointer…" else "Start the check") }
+            }
+        }
+    }
+}
+
+/**
+ * What the logger wrote while the app was not connected.
+ *
+ * Placed first on the Device tab, above everything the current session can
+ * measure, because it is the only card here that covers the ride. Everything
+ * below it describes the minutes since connecting, and the minutes since
+ * connecting are never when the logger is doing its job.
+ */
+@Composable
+private fun SinceLastSeenCard(verdict: RecordingSince.Verdict) {
+    SectionCard("Since the app last looked") {
+        when (verdict) {
+            is RecordingSince.Verdict.NothingToCompare -> Text(
+                "This is the first reading of this logger's write pointer. From the " +
+                    "next connect on, this card reports how much the logger wrote " +
+                    "while the app was away — which is the part of the day that " +
+                    "nothing else here can see.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            is RecordingSince.Verdict.Unusable -> Text(
+                "No comparison this time: ${verdict.reason}.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+
+            // Stated plainly and **not** in error colour, on purpose. A pointer
+            // that has not moved is exactly correct for a logger that was
+            // switched off, or indoors without a fix, and connecting twice in
+            // an evening would otherwise light this red every time. The one
+            // reading the user is asked to trust cannot also be the one that
+            // cries wolf -- so this gives them the fact and the two readings of
+            // it, benign one first, and lets them apply the thing only they
+            // know: whether they were out using it.
+            is RecordingSince.Verdict.WroteNothing -> {
+                Text(
+                    "Nothing was written",
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Text(
+                    "The write pointer is exactly where it was " +
+                        "${describeDuration(verdict.elapsedSeconds)} ago. If the logger " +
+                        "was switched off, or indoors without a fix, that is exactly " +
+                        "right. If it was on and outdoors in that time, none of it " +
+                        "was recorded.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    "If it should have been recording: check the slide switch is on " +
+                        "LOG rather than NAV, then use Resume logging on the Config tab.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            is RecordingSince.Verdict.Wrote -> {
+                Text(
+                    "%,d fixes recorded".format(verdict.fixes),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    "${describeDuration(verdict.recordedSeconds)} of recording, " +
+                        "${Bytes.describe(verdict.bytes)}, in the " +
+                        "${describeDuration(verdict.elapsedSeconds)} since the app last " +
+                        "read the pointer. This is the logger's own counter, measured " +
+                        "across the whole gap — not a sample taken while connected.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                // The gap counts every hour since the last connect, including
+                // the ones the logger spent in a drawer, so recorded time is
+                // *expected* to be less than elapsed time and a coverage
+                // percentage here would be a fake verdict. Only the user knows
+                // how long it was switched on, so only the user can close this
+                // comparison -- the app's job is to hand them both numbers.
+                Text(
+                    "Compare that against how long the logger was actually switched " +
+                        "on. The gap counts every hour since the last connect, including " +
+                        "any it spent off.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -297,11 +563,15 @@ private fun DeviceTab(
     val usbDevices = remember { container.usb.candidates() }
 
     val recording by session.recording.collectAsState()
+    val sinceLastSeen by session.sinceLastSeen.collectAsState()
+    val markProof by session.markProof.collectAsState()
     val staleAddress by session.stalePairingSuspected.collectAsState()
 
     when (connection) {
         is ConnectionState.Connected -> {
+            sinceLastSeen?.let { SinceLastSeenCard(it) }
             DeviceInfoCard(connection.info, session.isSimulated, recording, liveActivity)
+            if (!session.isSimulated) ProveRecordingCard(session, markProof)
             BatteryExemptionCard()
             OutlinedButton(
                 onClick = { session.disconnect() },
@@ -626,6 +896,58 @@ private fun DeviceInfoCard(
             // pointer above says whether anything is being recorded.
             reported?.let {
                 Row2("Reported", it.describe())
+
+                // Logging disabled, said out loud. An earlier pass declined to
+                // draw this, on a reading of `data/` that had every `0x0100`
+                // landing while the receiver held no fix -- so it looked like
+                // the ordinary indoor-connect state and alarming on it looked
+                // like crying wolf. That reading was wrong, and the hardware
+                // said so on 2026-09-19: the word flipped to `0x0102` the
+                // moment PMTK182,4 was acked, with no fix either side of it,
+                // and the logger had genuinely been disabled across two
+                // connects. An armed logger waiting for the sky says `0x0102`.
+                // Only a disabled one says this. §16.11.
+                //
+                // No probe is required and none is waited for. The cost of
+                // being wrong here is one harmless button press; the cost of
+                // staying quiet is the trip.
+                if (!it.isLoggingEnabled) {
+                    Text(
+                        "LOGGING IS SWITCHED OFF",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Text(
+                        "The logger reports logging disabled. This state persists — it " +
+                            "survives a power cycle, and the device does not reliably " +
+                            "clear it on its own. Use Resume logging on the Config tab.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        "If the slide switch is in NAV, that reads the same way and no " +
+                            "command will override it; move it to LOG.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+
+                // A standing fault is reported without waiting for a probe,
+                // and deliberately so: everything else in this card is an
+                // inference we have to earn with a measurement, but this is the
+                // device asserting a condition about itself. It also has to
+                // outrank the branches above -- with the flash needing a format
+                // the pointer is frozen, and on a cold indoor connect that
+                // renders as the reassuring "no fix — nothing to record" while
+                // recording is in fact over until someone intervenes.
+                it.faults.forEach { fault ->
+                    Text(
+                        "The logger reports that $fault — recording will not " +
+                            "resume by itself. See §13 in the engineering record.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+
                 // `looked && conclusive` is the whole guard, and leaving it out
                 // was a bug: lastProbeAdvanced is false before any probe has
                 // run, so connecting to a healthy logger in LOG mode fired this
@@ -1285,18 +1607,40 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
     SectionCard("Recording") {
         val status = Pmtk.LogStatus.parse(info.logStatus)
         Row2("Status", status?.describe() ?: info.logStatus)
-        // **The status word is the device's claim, not evidence, and on this
-        // hardware it does not move.** Measured 2026-09-15 with the slide
-        // switch physically confirmed in LOG: PMTK182,5 was acknowledged
-        // `PMTK001,182,5,3`, the status word stayed 0x0102, and the write
-        // pointer went on advancing at its full rate right through the
-        // supposedly-paused window. §15.2 recorded the NAV side of this; §16.10
-        // is the LOG side. The switch wins either way.
+
+        // Standing faults come first and in error colour, because they are the
+        // one thing in this word that is unambiguous. A cleared logging bit is
+        // a state the logger enters constantly and leaves on its own; a
+        // need_format or a full flash is recording over until someone acts, and
+        // §13 spent hours on exactly that without the app ever being able to
+        // say so -- the bits were in every reply it ever read.
+        status?.faults?.forEach { fault ->
+            Text(
+                "The logger reports that $fault. It will not start recording " +
+                    "again on its own.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+
+        // **Asymmetric, and that is the useful thing about it.** Settled on the
+        // hardware 2026-09-19 (§16.11): the word follows the enable flag, not
+        // the fix -- it went `256` -> `258` the instant PMTK182,4 was acked,
+        // with GPRMC void either side, and the logger then sat enabled and
+        // frozen for four more minutes waiting for the sky. So an armed logger
+        // with no fix reports `0x0102`, and `0x0100` means genuinely disabled.
+        //
+        // Believe it when it says no. Do not believe it when it says yes: with
+        // the switch in NAV it claims `0x0102` over a frozen pointer (§15.2),
+        // and a software pause does not move it at all (§16.10).
         Text(
-            "The device's own claim. It does not change when logging is paused, " +
-                "and the slide switch overrides it in both directions — the " +
-                "recording indicator on the Device tab reads the write pointer, " +
-                "which is the only thing here that cannot lie.",
+            "The device's own claim, and it is only trustworthy in one direction. " +
+                "\"NOT logging\" is real — a logger that is merely waiting for a fix " +
+                "still reports \"logging\" — so treat it as a fault and use Resume " +
+                "logging. \"Logging\" proves nothing on its own: it reads the same " +
+                "with the slide switch in NAV, and it does not change when logging " +
+                "is paused. Only the Device tab's recording indicator, which reads " +
+                "the write pointer, can confirm anything is actually being written.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

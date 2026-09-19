@@ -18,6 +18,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import thru.taxi.traxi.session.ConnectionState
 
@@ -52,13 +53,34 @@ class LinkService : Service() {
         val session = container().session
         startForegroundCompat(buildNotification("Connected"))
 
+        // The notification carries the recording state, not just the fact of a
+        // connection, because on the trail it is the only part of this app the
+        // user can see without stopping, unlocking and navigating. "Connected
+        // to BT-Q1000XT" is the reassuring half of the sentence and the half
+        // that has never been in doubt.
+        //
+        // What it reports is deliberately *weaker* than the Device tab's
+        // verdict: only whether a pointer probe has ever confirmed a write, and
+        // how long ago. The tab's four-way reading depends on fix recency and
+        // on whether the window was long enough to judge, and re-deriving that
+        // here would be the same logic in two places, free to drift apart.
+        // Strictly weaker cannot contradict it.
         scope.launch {
-            session.connection.collect { state ->
+            combine(session.connection, session.recording) { state, recording ->
+                state to recording
+            }.collect { (state, recording) ->
                 when (state) {
                     is ConnectionState.Connected -> {
                         val name = state.info.displayModel
+                        val text = if (recording.confirmedEver) {
+                            val agoSeconds =
+                                (System.nanoTime() - recording.lastAdvanceAtNanos) / 1_000_000_000L
+                            "Recording confirmed ${describeAgo(agoSeconds)} · $name"
+                        } else {
+                            "Recording not yet confirmed · $name"
+                        }
                         NotificationManagerCompat.from(this@LinkService)
-                            .notify(NOTIFICATION_ID, buildNotification("Connected to $name"))
+                            .notify(NOTIFICATION_ID, buildNotification(text))
                     }
                     // The session is over: stop holding the process up. Doing
                     // this from the connection flow rather than from each
@@ -85,6 +107,19 @@ class LinkService : Service() {
     }
 
     private fun container() = (applicationContext as TraxiApplication).container
+
+    /**
+     * Age of the last confirmed write, for a line read at a glance.
+     *
+     * Coarse on purpose: the number is only ever as fresh as the probe interval,
+     * which over Bluetooth is a minute, so second-level precision would imply a
+     * liveness the reading does not have.
+     */
+    private fun describeAgo(seconds: Long): String = when {
+        seconds < 90 -> "just now"
+        seconds < 3600 -> "${seconds / 60} min ago"
+        else -> "${seconds / 3600} h ago"
+    }
 
     private fun startForegroundCompat(notification: Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

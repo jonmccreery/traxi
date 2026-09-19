@@ -110,22 +110,114 @@ object Pmtk {
      * logging disabled and enabled respectively. The only bit that differs is
      * `0x02`, so that is the logging flag.
      *
+     * The remaining bits are from BT747 and are recorded in §13, which decoded
+     * them the expensive way -- during the outage where this logger refused to
+     * record for hours. `need_format` (`0x0400`) and `memory_full` (`0x0800`)
+     * ride in this same answer, and both were parsed away for months: §13's
+     * "Traxi could not have reported `need_format`, because it never asks" is
+     * half right. It asks. It asked every time. It read one bit of the reply.
+     *
      * Worth decoding rather than displaying raw, because "logging is off" is a
      * state the user must be able to *see*. A logger that is not recording
      * looks exactly like one that is, until the trip is over.
+     *
+     * **`0x0100` means logging is disabled, and it is worth shouting about.**
+     * Settled on the hardware 2026-09-19: the word flipped `0x0100` ->
+     * `0x0102` the instant `PMTK182,4` was acknowledged, with GPRMC reading
+     * void either side of it, and the logger then sat enabled-but-frozen for
+     * four more minutes until a fix arrived. So the bit follows the *enable
+     * flag*, not the fix: an armed logger waiting for the sky reports `0x0102`,
+     * and only a disabled one reports `0x0100`. §16.11.
+     *
+     * What the bit still cannot do is confirm the *good* news. With the switch
+     * in NAV it reports `0x0102` over a frozen pointer (§15.2), and a software
+     * pause does not move it at all (§16.10). Trust it when it says no; verify
+     * with the write pointer when it says yes.
      */
     @JvmInline
     value class LogStatus(val bits: Int) {
 
         val isLoggingEnabled: Boolean get() = (bits and LOGGING_ENABLED) != 0
 
-        fun describe(): String =
-            if (isLoggingEnabled) "logging (0x%04X)".format(bits)
-            else "NOT logging (0x%04X)".format(bits)
+        /** Flash-full behaviour: stop, rather than overlap and overwrite. */
+        val stopsWhenFull: Boolean get() = (bits and STOP_WHEN_FULL) != 0
+
+        /** The flash needs formatting before anything more can be written. */
+        val needsFormat: Boolean get() = (bits and NEED_FORMAT) != 0
+
+        /** The flash is full. In STOP mode this ends recording for good. */
+        val isMemoryFull: Boolean get() = (bits and MEMORY_FULL) != 0
+
+        /**
+         * Conditions in this word that stop the logger recording and that it
+         * will **not** clear on its own.
+         *
+         * These are the reason the word is worth decoding past bit 1. A
+         * `need_format` or a full flash in STOP mode is not a state that
+         * resolves when the receiver next sees the sky -- it is recording over
+         * for the rest of the trip until someone intervenes, and §13 cost hours
+         * precisely because nothing in the app could say so. The bits were in
+         * every `PMTK182,3,7` answer the whole time; only bit 1 was read.
+         *
+         * Empty on every healthy logger, and empty on a merely idle one, so a
+         * caller can treat any non-empty result as something to say out loud.
+         */
+        val faults: List<String> get() = buildList {
+            if (needsFormat) add("the flash needs formatting")
+            if (isMemoryFull) {
+                add(
+                    if (stopsWhenFull) "the flash is full and the logger is set to stop"
+                    else "the flash is full"
+                )
+            }
+        }
+
+        /**
+         * The word in words.
+         *
+         * Names the standing faults as well as the logging bit, because
+         * `0x0504` and `0x0100` both used to render as "NOT logging" and they
+         * could hardly be less alike: the first is a logger that needs the §13
+         * recovery, the second is very often a logger that is simply waiting
+         * for a fix.
+         */
+        fun describe(): String = buildString {
+            append(if (isLoggingEnabled) "logging" else "NOT logging")
+            val notes = buildList {
+                if (needsFormat) add("NEEDS FORMAT")
+                if (isMemoryFull) add("MEMORY FULL")
+                if (stopsWhenFull) add("stop when full")
+            }
+            if (notes.isNotEmpty()) notes.joinTo(this, ", ", prefix = ", ")
+            append(" (0x%04X)".format(bits))
+        }
 
         companion object {
             /** Set when the device is recording. `0x0102` vs `0x0100`. */
             const val LOGGING_ENABLED = 0x0002
+
+            /** Bit 2: stop when the flash fills, rather than overlap. */
+            const val STOP_WHEN_FULL = 0x0004
+
+            /**
+             * Bit 8: "device is in enable status". Set in both `0x0100` and
+             * `0x0102`, so it distinguishes nothing and is not exposed.
+             */
+            const val ENABLE_STATUS = 0x0100
+
+            /**
+             * Bit 9: "device is in disable status". Never observed on this unit
+             * in any switch position or after any command, which is exactly why
+             * `0x0100` is ambiguous -- see §15.2. Named so that the next reader
+             * does not go looking for the discriminator that would resolve it.
+             */
+            const val DISABLE_STATUS = 0x0200
+
+            /** Bit 10: the flash needs formatting. Observed as `0x0504`. */
+            const val NEED_FORMAT = 0x0400
+
+            /** Bit 11: the flash is full. */
+            const val MEMORY_FULL = 0x0800
 
             /**
              * Parse the raw field, which the device sends in decimal.

@@ -2174,6 +2174,14 @@ switch wins in both directions, and the status word is incapable of reporting
 either of them. Only the pointer is truth — which §15.2 already said, and which
 this makes unconditional.
 
+> **Corrected 2026-09-19 (§16.11).** The last clause holds — only the pointer
+> confirms recording — but "`0x0102` is not a state, it is a constant" is false,
+> and was false when written: `data/` already held readings of `0x0100`, and the
+> word was later watched flipping `0x0100` -> `0x0102` on the wire the instant
+> `PMTK182,4` was acknowledged. It tracks the enable flag. What this experiment
+> actually showed is narrower: *a software pause does not move it.* Do not cite
+> this paragraph for anything wider.
+
 #### What that cost, and what now prevents it
 
 The Config tab drew **one** of "Pause logging" and "Resume logging", chosen by
@@ -2205,10 +2213,390 @@ command was accepted and says that the switch overrides it.
   39 seconds. A several-minute pause would rule out a buffering explanation
   beyond argument, at the cost of genuinely not recording for that long if the
   disable does work after all. Not run.
-- **Whether the status word ever moves on this unit**, in any switch position.
-  Every reading in every capture to date is `0x0102` or `258`.
+- ~~**Whether the status word ever moves on this unit**, in any switch position.
+  Every reading in every capture to date is `0x0102` or `258`.~~ **Answered, and
+  this was simply wrong when written** — `data/` held four readings of `256` at
+  the time. See §16.11.
 - The erase ack, as above, and for the same reason as always: the only way to
   read it is to destroy the flash.
+
+### 16.11 The status word does move, and what it tracks is the enable flag
+
+Found 2026-09-19, from a user report: the last two connects both showed **"NOT
+logging"**, a reading §16.10 had just finished arguing this unit cannot
+produce.
+
+This section was written twice in one session. The first version got the
+mechanism wrong, and the wrong version is kept below the right one because the
+way it went wrong is the more useful lesson.
+
+#### §16.10 was wrong about this, twice
+
+> **Still open** — Whether the status word ever moves on this unit, in any
+> switch position. Every reading in every capture to date is `0x0102` or `258`.
+
+and, in the body:
+
+> on this unit **`0x0102` is not a state, it is a constant.**
+
+Both false, and the refutation was in the repository when they were written:
+
+```
+$ grep -rhoE "PMTK182,3,7,[0-9]+" data/*.log | sort | uniq -c
+      5 PMTK182,3,7,258
+      4 PMTK182,3,7,256
+```
+
+Two of those four `256` are distinct events —
+`bt-probe-teardown-transcript-2026-09-07.log` and
+`bt-probe-fix-verified-2026-09-07.log` are two captures of one session and
+share their readings to the millisecond — so the honest count is two `0x0100`
+against four `0x0102`. Two is not zero. §16.10 generalised a 39-second
+experiment to "in any switch position" without grepping for even that.
+
+#### What the word tracks: the enable flag
+
+Read off the phone, live, 2026-09-19 — `files/logs/transcript.log`, the connect
+at 13:17:30:
+
+```
+13:17:38.379 << $GPRMC,181738.125,V,,,,,0.00,0.00,030207,,,N     no fix
+13:17:38.608 << $PMTK182,3,7,256                                 0x0100
+13:17:38.849 << $PMTK182,3,8,0004F590                            pointer
+
+13:17:47.373 << $PMTK001,182,4,3        <- Resume logging pressed
+13:17:47.372 << $GPRMC,181747.125,V,... still no fix
+13:17:47.697 << $PMTK182,3,7,258                                 0x0102
+```
+
+**The word flipped with no change in fix state whatsoever.** What changed was
+`PMTK182,4`. And the pointer then shows the other half of it:
+
+| time | pointer | advance | fix |
+|---|---|---|---|
+| 13:17:38 | `0004F590` | — | no |
+| 13:17:59 | `0004F5B0` | +32 | no — the two state-change markers, nothing else |
+| 13:18–13:22 | `0004F5B0` | **0** | no |
+| 13:23:00 | `0004F650` | +160 | fix arrives |
+| 13:24:00 → | +288/min | | 6 records/min = the configured 10 s |
+
+So an armed logger with no fix reports **`0x0102`** and writes nothing. Only a
+disabled one reports `0x0100`. The bit follows the enable flag, exactly as §13
+always said, and the user's logger had genuinely been switched off across at
+least two connects.
+
+#### The wrong version, and why it was wrong
+
+The first pass concluded *"what it tracks is the fix"*, from this:
+
+| Capture | GPRMC | Status |
+|---|---|---|
+| `bt-probe-teardown-…-09-07.log:22` | void | **256** |
+| `…:73` | void | **256** |
+| `…:360` | active | 258 |
+| `bt-probe-fix-verified-…-09-07.log:856` | active | 258 |
+| `bt-full-download-…-09-08.log:1621` | active | 258 |
+| `usb_clean_2026-09-06.log:28` | active | 258 |
+
+Six readings, perfect correlation, and completely spurious. The 2026-09-07
+transcript contains **no `PMTK182,4`** — the logger was disabled at 22:51, and
+by 22:52 it had re-enabled itself. §13 records that behaviour explicitly and it
+was there to be read: *"in 18 months the device auto-resumed after every single
+stop — 417 status changes, 167 of them bracketing multi-hour dead intervals,
+every one answered by an ENABLE."* The fix arriving and the auto-resume
+happened in the same 85-second window, and the correlation picked the wrong one.
+
+It is the same error as §16.10's, committed while correcting §16.10: a small
+sample, a clean-looking pattern, and a conclusion stated more widely than the
+evidence carried. The difference is only that this one was caught, by reading
+the device instead of the archive — which is the actual rule. **`data/` is
+history. The phone is state.**
+
+The cost was not zero. The wrong version shipped UI copy telling the user that
+"NOT logging" on an indoor connect was "most likely a logger waiting for the
+sky rather than a fault" — advice to ignore precisely the reading that meant
+their logger was off. It is reverted.
+
+#### The bits nobody was reading
+
+`PMTK182,3,7` carries more than bit 1, and §13 decoded all of it during the
+outage:
+
+> Traxi could not have reported `need_format` or a failing flash, because it
+> never asks.
+
+It asks. Every connect sends `PMTK182,2,7`. `need_format` (`0x0400`) and
+`memory_full` (`0x0800`) came back in every answer and were dropped by a
+decoder that read one bit. `0x0504` — a logger that will not record again until
+it is formatted *and* power-cycled — rendered as `NOT logging (0x0504)`, same
+grey row, same words as an ordinary connect.
+
+`LogStatus` now decodes the documented bits and exposes `faults` for the two
+that mean *recording is over until someone intervenes*. Drawn in error colour
+on both tabs, and without waiting for a probe, because the device is asserting
+a condition about itself rather than us inferring one.
+
+#### What the app now does with `0x0100`
+
+Says so, loudly, at connect. No probe, no fix required, no waiting.
+
+This was declined in the first pass on the crying-wolf argument, which the
+fix-correlation made look sound. With that gone the asymmetry is plain:
+
+- **believe `0x0100`.** It is a real, persisted state. It survives power cycles
+  (§12), the device does not reliably clear it, and the only cost of being
+  wrong is one harmless button press — §16.10 established that enabling an
+  already-enabled logger is a no-op.
+- **never believe `0x0102`.** NAV reports it over a frozen pointer (§15.2), a
+  software pause does not move it (§16.10), and it is what an armed logger with
+  no fix reports. Confirming recording still needs the write pointer.
+
+#### Still open
+
+- **What disabled it.** There is no `PMTK182,5` in either transcript
+  generation — 48,149 lines, 2026-09-15 23:36 through 2026-09-19 13:40. So
+  nothing this app did in that window turned it off, and the event is older
+  than the surviving record.
+- **The transcript is drowning in NMEA and losing exactly this evidence.** Of
+  22,023 lines in `transcript.log`, 21,621 are `GPGGA`/`GPGSV`/`GPGSA`/`GPRMC`
+  — 98.2%. Two 2 MB generations hold **one** connect between them. The file
+  that exists to answer "what happened last time" cannot reach back to last
+  time. Rotating on non-NMEA lines, or keeping a separate connect-events log,
+  would have answered the question this section had to leave open.
+- Whether `0x0200` (*device is in disable status*) ever appears. Still never
+  observed, which is why `0x0100` cannot distinguish a software disable from
+  the NAV switch.
+
+
+### 16.12 Assurance that it is logging, measured across the ride rather than the connect
+
+Asked for directly, 2026-09-19: *"I only need to have assurance that when I use
+this logger, it's logging."*
+
+Every recording signal this project had built answers a different question.
+
+| Signal | Answers | Covers |
+|---|---|---|
+| status word | whether logging is enabled | the instant; trustworthy only when it says *no* (§16.11) |
+| write-pointer probe | did bytes land in the last minute | only while connected |
+| `RecordingAudit` | did logging stop mid-dump | only after a full fetch |
+
+The probe is ground truth and it is genuinely good, but it reports on *the
+minutes the app was watching* — and the phone spends the ride in a pack with
+the link shut down, because asking is what kills the link (§15). The one part
+of the day that matters is precisely the part nothing could see.
+
+#### The pointer is a counter the logger keeps for itself
+
+It does not need the app to be connected, or awake, or installed. Note it
+before setting off, read it again afterwards, and the difference is the entire
+trip — every hour of it, including the ones with Bluetooth off.
+
+That reading already happens: `openWith` queries the write pointer on every
+connect. The whole feature is *not throwing the previous one away*. Before
+this, `recordingBaseline` was nulled in `stopTelemetry`, so the app could only
+ever describe the session it was in.
+
+So: `RecordingMarkStore` persists one `(pointer, timestamp, deviceKey)` across
+process death, and `RecordingSince.compare` turns two of them into a sentence.
+
+```
+Since the app last looked
+1,798 fixes recorded
+4 h 59 m of recording, 87.3 KB, in the 4 h 48 m since the app last read
+the pointer.
+```
+
+Cost: zero extra queries.
+
+#### What it refuses to conclude
+
+**Coverage is not a health metric, and is not shown as one.** The gap counts
+every hour since the last connect, including the ones the logger spent in a
+drawer. Connect on Friday evening, ride Saturday, connect Saturday night: the
+gap is 26 hours and 5 of them were recorded, and that is a *perfectly healthy
+logger*. A percentage there would be a fabricated verdict. `Verdict.Wrote`
+carries `coverage` for callers that have a reason to want it, and the UI shows
+the two durations side by side instead, because only the user knows how long
+the thing was switched on.
+
+**"Nothing was written" is not drawn in error colour**, which is a deliberate
+reversal of the first draft. A frozen pointer is exactly correct for a logger
+that was switched off, and connecting twice in one evening would light it red
+every time. It is stated prominently, with the benign reading first and the
+serious one second, and the user applies the fact only they have. This is the
+same rule as §15.2's `hasFix` guard and §16.11's refusal to alarm on `0x0100`:
+the indicator that must never cry wolf cannot also be the one that guesses.
+
+**A pointer the device did not answer leaves the stored mark alone.** This is
+the destructive case and it has its own test. Writing "unknown" would close the
+open interval without measuring it — so a link that misbehaves at the trailhead
+would destroy the baseline the post-ride connect needs, at exactly the moment
+it is hardest to notice. Leaving the mark stale is right: the gap stays open
+and the next good reading spans all of it. Simulated sessions store nothing at
+all, for the same class of reason.
+
+**A pointer that went backwards is `Unusable`, never `WroteNothing`.** In
+overlap mode a wrap means the logger wrote *more than the whole chip*, and an
+erase means nothing can be concluded; the two are indistinguishable from two
+samples. Reporting either as "nothing was recorded" would be the worst false
+alarm the app is capable of, and it is one subtraction away at all times.
+
+#### Where the marks are moved forward
+
+At connect, and at every answered probe. Without the second, a session left
+open on the handlebars for an hour before setting off would put that hour
+inside the ride's window and dilute the answer.
+
+#### Not covered
+
+- **The app-side persistence has no unit test.** `RecordingMarkStore` wraps
+  `SharedPreferences`, the `:app` module has no Robolectric, and the build runs
+  offline so one could not be added in this pass. The rule worth testing was
+  therefore moved *out* of the store and into `RecordingSince.markFor`, which is
+  pure and has three tests; what remains untested is the `SharedPreferences`
+  round-trip itself — a mark that failed to persist would present as
+  `NothingToCompare` forever, which is visible in the UI rather than silent, but
+  nothing asserts it.
+- **None of this has run against the hardware.** It is arithmetic over two
+  numbers and the arithmetic is tested, but the first real answer will come from
+  a ride, and the number to sanity-check is `fixes` against what the subsequent
+  dump actually parses.
+- The record-size estimate assumes every record is the configured format's
+  width. A format change mid-gap would skew `fixes`; the device writes a
+  `CHANGE_FORMAT` marker when that happens and nothing here reads it.
+
+
+### 16.13 Proving it on the trail: the mark button
+
+Asked for directly, 2026-09-19, after §16.12: *"I really need to know that when
+I switch my unit on, it's logging. How can we prove that it is? Visibly and on
+trail."*
+
+#### What cannot answer it
+
+**The device has no *passive* local recording indicator.** §13 settled that by
+watching it: steady LED blink, 3D DGPS fix on 7–8 satellites, HDOP 1.14, **zero
+bytes written**. The LED means fix. (The mark button's own beep is a separate
+question and possibly a better one — see below.) (§12 says the user first noticed the outage
+"because an LED was not blinking" — the two observations sit in tension and
+§13's is the deliberate one. Worth re-checking on the hardware, because a
+genuine log LED would beat everything below.)
+
+**A status-poll watchdog does not answer it either**, which §13.3 proposed
+before §15 was understood. `PMTK182,2,7` is a request like any other, and §15's
+finding is about requests, not about that one field: *"something is consumed per
+request and not fully released"*, latency climbing 132 ms → 1142 ms → dead. At a
+minute's spacing it survives — today's session probed 23 times without incident
+— but at that rate a poll adds nothing the existing pointer probe does not
+already do better, since the pointer proves writing and the status word only
+proves the enable flag.
+
+#### What does: make it record something
+
+`RCR` — reason for recording — has a `BUTTON` value, and the reference dump
+holds **1,419 records carrying it**. The logger has a physical mark button, and
+pressing it writes a record *immediately* rather than at the next interval tick.
+
+So: read the write pointer, press the button, read it again.
+
+An advance of one record proves the whole chain in one move:
+
+| Established | Otherwise needs |
+|---|---|
+| the slide switch is on LOG | nothing in software can read it (§15.2) |
+| logging is enabled in firmware | the status word, trustworthy only when it says no (§16.11) |
+| the receiver has a position | the NMEA stream |
+| bytes are reaching flash | a probe, one log interval later |
+
+Nothing else in this project establishes all four, and nothing else establishes
+any of them in two seconds. It is also *causal* rather than observational —
+the user does a physical thing to their own device and is shown the
+consequence, which is the only kind of assurance that survives being
+disbelieved.
+
+#### Two queries, both behind taps
+
+The obvious implementation polls the pointer until it sees the press land. That
+is §15's denial of service rewritten from scratch. The check is therefore
+user-paced: one query to take the baseline, a prompt, and one query when the
+user says they have pressed it. Standing still at a trailhead is the one place
+in this project's life where spending a query is unambiguously affordable, and
+where a wedged link costs nothing.
+
+#### The distinction the verdict must hold
+
+`MarkProof` returns three outcomes, and the whole file exists to keep two of
+them apart:
+
+- **`Proven`** — the pointer advanced.
+- **`NothingWritten`** — the pointer did not move **and the receiver had a
+  fix**. The user asked the device to record a point, it had a point to record,
+  and nothing landed. This is the one place the app says *do not set off on
+  this*.
+- **`Inconclusive`** — the pointer did not move and there was no fix, or a
+  query went unanswered, or the log wrapped mid-check. Indoors this logger
+  holds no fix for hours and correctly writes nothing; reporting that as a
+  failed proof would condemn a healthy device for being under a roof, which is
+  the false alarm every indicator in this app is built to refuse.
+
+The two frozen-pointer cases are the same arithmetic. `J-proof-needs-fix` in
+`tools/mutation-check.py` removes the `hadFix` guard, to keep a test standing
+between them.
+
+#### And on the lock screen
+
+`LinkService`'s foreground notification said "Connected to BT-Q1000XT" — the
+reassuring half of the sentence, and the half never in doubt. It now carries
+"Recording confirmed 2 min ago", which is the part worth seeing without
+stopping, unlocking and navigating.
+
+It reports **strictly less** than the Device tab: only whether a probe has ever
+confirmed a write, and how long ago. The tab's four-way verdict depends on fix
+recency and on whether the window was long enough to judge, and re-deriving
+that in a service would be the same logic in two places with nothing holding
+them together. Weaker cannot contradict.
+
+#### The beep, and how to find out what it is worth
+
+**The mark button does give local feedback** — a beep and/or an LED flash,
+confirmed by the person holding the unit, 2026-09-19. That is the only thing in
+this entire problem that works with no phone at all, so what it actually
+signifies is worth establishing precisely rather than assuming.
+
+Two possibilities, and they are not close:
+
+- the beep fires when a **record lands** → it is a complete no-phone recording
+  check, and the trail problem is solved outright;
+- the beep fires when the **button is pressed** → it is worth nothing for this
+  purpose, and would be actively dangerous to rely on. §13's LED is the
+  precedent: it blinks steadily on a good fix while zero bytes are written.
+
+**The proof ceremony settles it for free, and a failed run settles it fastest.**
+Any run where the pointer does not move is a controlled experiment: if the
+logger beeped anyway, the beep is acknowledging the press and nothing more. So
+the deliberate version is to run the check twice — once normally, once with
+logging paused (or the switch in NAV) — and compare. Two minutes, at a bench,
+once in the device's life.
+
+The UI now says this at each outcome rather than leaving it to be remembered:
+the `Proven` card notes that one run has tied the beep to a real write *once*
+and names the run that would confirm the implication; the `NothingWritten` card
+says outright, in error colour, that a beep over a failed write means the beep
+is not a recording check.
+
+Until that experiment is run, **the beep is unvalidated and the app does not
+tell the user to trust it.**
+
+#### Still open
+
+- **The beep experiment itself.** Described above, not performed.
+- **Whether a button press with no fix writes anything at all.** Assumed not,
+  and the verdict treats that case as inconclusive either way, so the assumption
+  is not load-bearing. Worth one measurement indoors.
+- The check has not been run against the hardware. The arithmetic is tested;
+  the ceremony is not.
+
 
 ### The rule
 

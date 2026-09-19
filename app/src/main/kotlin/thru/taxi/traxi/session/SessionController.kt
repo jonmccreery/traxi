@@ -10,6 +10,9 @@ import thru.taxi.traxi.core.format.LogFormat
 import thru.taxi.traxi.core.format.MtkLogParser
 import thru.taxi.traxi.core.format.Quality
 import thru.taxi.traxi.core.format.RecordingAudit
+import thru.taxi.traxi.core.format.MarkProof
+import thru.taxi.traxi.core.format.RecordingSince
+import thru.taxi.traxi.data.RecordingMarkStore
 import thru.taxi.traxi.core.protocol.EraseGate
 import thru.taxi.traxi.core.protocol.FlashDownloader
 import thru.taxi.traxi.core.protocol.FlashEraser
@@ -203,6 +206,19 @@ data class EraseState(
     val phase: FlashEraser.Phase? = null,
 )
 
+/**
+ * Where the mark-button proof has got to.
+ *
+ * @param awaitingPress the baseline is taken and the user has been asked to
+ *   press the button on the logger.
+ */
+data class MarkProofState(
+    val awaitingPress: Boolean = false,
+    val baseline: Long? = null,
+    val busy: Boolean = false,
+    val result: MarkProof.Result? = null,
+)
+
 sealed interface ConnectionState {
     data object Disconnected : ConnectionState
     data class Connecting(val target: String) : ConnectionState
@@ -225,6 +241,7 @@ class SessionController(
     private val context: android.content.Context,
     private val pairing: CompanionPairing,
     private val dumps: DumpRepository,
+    private val marks: RecordingMarkStore,
     private val scope: CoroutineScope,
 ) {
     val transcript = RingTranscript(capacity = 4000)
@@ -273,6 +290,32 @@ class SessionController(
     private val _recording = MutableStateFlow(RecordingActivity())
     val recording: StateFlow<RecordingActivity> = _recording.asStateFlow()
 
+    /**
+     * What the logger wrote since the app last read its write pointer.
+     *
+     * Computed once, at connect, and then left alone: it is a statement about a
+     * closed interval, and re-deriving it mid-session would only shrink the
+     * window it covers. Null when this session has nothing to say -- a
+     * simulator, a first connect, or a pointer query the device did not answer.
+     *
+     * This is the only recording signal in the app that covers the hours when
+     * nothing was connected, which is to say the hours the logger is actually
+     * used. Everything else here can only report on the minutes it was watched.
+     */
+    private val _sinceLastSeen = MutableStateFlow<RecordingSince.Verdict?>(null)
+    val sinceLastSeen: StateFlow<RecordingSince.Verdict?> = _sinceLastSeen.asStateFlow()
+
+    /**
+     * The trailhead proof: read the pointer, press the mark button, read again.
+     *
+     * User-paced on purpose. The obvious implementation polls the pointer until
+     * it sees the press land, and that is the §15 denial of service written
+     * fresh -- 17 probes at 12 s killed the link three times. Two queries,
+     * each one triggered by a tap, is the whole budget.
+     */
+    private val _markProof = MutableStateFlow(MarkProofState())
+    val markProof: StateFlow<MarkProofState> = _markProof.asStateFlow()
+
     private val _linkHealth = MutableStateFlow(LinkHealth())
     val linkHealth: StateFlow<LinkHealth> = _linkHealth.asStateFlow()
 
@@ -280,6 +323,13 @@ class SessionController(
     // so a later sample above an earlier one is proof a fix was written.
     private var recordingBaseline: Long? = null
     private var lastProbedPointer: Long? = null
+
+    /**
+     * Identifies the logger for [RecordingSince.Mark], or null when marks must
+     * not be written -- a simulated session, most importantly, whose pointer
+     * would otherwise be subtracted from the real device's on the next connect.
+     */
+    private var markDeviceKey: String? = null
 
     /** When the current session connected, the first sample's starting edge. */
     private var connectedAtNanos: Long = 0L
@@ -664,6 +714,35 @@ class SessionController(
         connectedAtNanos = System.nanoTime()
         _recording.value = RecordingActivity()
 
+        // Close the interval that has been open since the app last saw this
+        // logger -- which is the ride. Everything else in this class reports
+        // only on the time it was connected and watching; this is the one
+        // reading that covers the hours in a pack with the link shut down, and
+        // it costs nothing extra, because the pointer query above already
+        // happened.
+        //
+        // A simulated session takes no part: its pointer bears no relation to
+        // the hardware's, and one stored mark from the simulator would corrupt
+        // the next real answer. A pointer the device did not answer takes no
+        // part either -- the old mark is left in place, so the gap stays open
+        // and the *next* successful connect still spans the whole of it.
+        // Overwriting it with "unknown" would discard the baseline at exactly
+        // the moment the link is misbehaving.
+        markDeviceKey = if (simulated) null else "${firmware.modelName}/${firmware.release}"
+        val mark = RecordingSince.markFor(pointer, markDeviceKey, System.currentTimeMillis())
+        if (mark != null) {
+            _sinceLastSeen.value = RecordingSince.compare(
+                previous = marks.last(),
+                current = mark,
+                recordBytes = runCatching { format.recordSizeWithChecksum() }.getOrDefault(0),
+                intervalSeconds = interval,
+            )
+            marks.put(mark)
+            transcript.note("since the app last saw this logger: ${_sinceLastSeen.value}")
+        } else {
+            _sinceLastSeen.value = null
+        }
+
         // Tell Android this session is user-visible work. Without it the app is
         // an ordinary background process between actions, and the cached-app
         // freezer suspends the read loop within minutes -- which stalls the
@@ -853,6 +932,13 @@ class SessionController(
 
     /** Fold one write-pointer sample into the recording-confirmation state. */
     private fun noteWritePointer(ptr: Long, now: Long) {
+        // Move the stored mark forward with every answered probe, so the gap
+        // the next connect reports on starts at the last moment the app really
+        // saw the pointer rather than at connect time. Without this, a session
+        // left open on the handlebars for an hour before setting off would put
+        // that hour inside the ride's window and dilute its coverage.
+        RecordingSince.markFor(ptr, markDeviceKey, System.currentTimeMillis())
+            ?.let { marks.put(it) }
         val base = recordingBaseline ?: ptr.also { recordingBaseline = it }
         val prev = lastProbedPointer
         val advanced = prev != null && ptr > prev
@@ -1013,6 +1099,13 @@ class SessionController(
         _liveActivity.value = LiveActivity()
         _recording.value = RecordingActivity()
         _linkHealth.value = LinkHealth()
+        // The verdict describes the interval this session closed, so it goes
+        // when the session does. The stored *mark* stays: it is what the next
+        // connect measures from, and it is the only thing that survives the
+        // ride.
+        _sinceLastSeen.value = null
+        markDeviceKey = null
+        _markProof.value = MarkProofState()
         recordingBaseline = null
         lastProbedPointer = null
     }
@@ -1721,6 +1814,69 @@ class SessionController(
         )
     }
 
+    // ---------------- the trailhead proof ----------------
+
+    /**
+     * Step one: note where the logger is writing, and ask for the press.
+     */
+    fun beginMarkProof(onDone: () -> Unit = {}) {
+        val c = client ?: run { _message.value = "Not connected"; onDone(); return }
+        if (isBusy(onDone)) return
+        _markProof.value = MarkProofState(busy = true)
+        launchExclusive {
+            val ptr = runCatching { c.queryWritePointer() }.getOrNull()
+            _markProof.value = if (ptr == null) {
+                MarkProofState(
+                    result = MarkProof.Result.Inconclusive(
+                        "the logger did not answer the write-pointer query"
+                    )
+                )
+            } else {
+                MarkProofState(awaitingPress = true, baseline = ptr)
+            }
+            onDone()
+        }
+    }
+
+    /**
+     * Step two: read the pointer again and say whether the press landed.
+     *
+     * [MarkProof] owns the verdict, including the distinction the UI must not
+     * be allowed to blur -- a frozen pointer with no fix is inconclusive, not a
+     * failure.
+     */
+    fun confirmMarkProof(onDone: () -> Unit = {}) {
+        val c = client ?: run { _message.value = "Not connected"; onDone(); return }
+        val baseline = _markProof.value.baseline
+        _markProof.value = _markProof.value.copy(busy = true)
+        launchExclusive {
+            val ptr = runCatching { c.queryWritePointer() }.getOrNull()
+            // Fold the reading into the ordinary recording state too: it is an
+            // honest pointer sample and there is no reason to spend the query
+            // twice.
+            if (ptr != null) noteWritePointer(ptr, System.nanoTime())
+            val hadFix = _liveActivity.value.lastFixAtNanos != 0L &&
+                (System.nanoTime() - _liveActivity.value.lastFixAtNanos) < FIX_RECENT_NANOS
+            _markProof.value = MarkProofState(
+                result = MarkProof.of(
+                    before = baseline,
+                    after = ptr,
+                    recordBytes = runCatching {
+                        (_connection.value as? ConnectionState.Connected)
+                            ?.info?.logFormat?.recordSizeWithChecksum() ?: 0
+                    }.getOrDefault(0),
+                    hadFix = hadFix,
+                )
+            )
+            transcript.note("mark-button proof: ${_markProof.value.result}")
+            onDone()
+        }
+    }
+
+    fun clearMarkProof() {
+        _markProof.value = MarkProofState()
+    }
+
     /**
      * Turn logging on or off explicitly.
      *
@@ -1891,6 +2047,15 @@ class SessionController(
      * phone and can act on it.
      */
     private val MIN_FIRST_WRITE_PROBE_NANOS = 10_000_000_000L
+
+    /**
+     * How recent a fix must be to count as "the receiver had a position".
+     *
+     * Matches the Device tab's own threshold. It decides whether a frozen
+     * pointer is evidence of a fault or evidence of nothing, so it is the
+     * difference between condemning a logger and excusing it.
+     */
+    private val FIX_RECENT_NANOS = 15_000_000_000L
 
     /**
      * Chunk arrivals required before a time estimate is shown.

@@ -68,6 +68,9 @@ ROOT = Path(__file__).resolve().parent.parent
 CLIENT = "core/src/main/kotlin/thru/taxi/traxi/core/protocol/PmtkClient.kt"
 DOWNLOADER = "core/src/main/kotlin/thru/taxi/traxi/core/protocol/FlashDownloader.kt"
 OUTCOME = "app/src/main/kotlin/thru/taxi/traxi/session/FetchOutcome.kt"
+PMTK = "core/src/main/kotlin/thru/taxi/traxi/core/protocol/Pmtk.kt"
+SINCE = "core/src/main/kotlin/thru/taxi/traxi/core/format/RecordingSince.kt"
+PROOF = "core/src/main/kotlin/thru/taxi/traxi/core/format/MarkProof.kt"
 
 # name -> (file, [(old, new), ...]). Each entry reverts exactly one fix.
 MUTATIONS = {
@@ -106,6 +109,37 @@ MUTATIONS = {
         ('            result.isComplete -> "Already up to date — nothing new on the logger"\n'
          '            else -> "Stopped early — $size saved and resumable"',
          '            else -> "Already up to date — nothing new on the logger"'),
+    ]),
+
+    # §16.11: read only bit 1 of the log status, and discard need_format and
+    # memory_full the way the decoder did for months.
+    "G-status-faults": (PMTK, [
+        ("val needsFormat: Boolean get() = (bits and NEED_FORMAT) != 0",
+         "val needsFormat: Boolean get() = false"),
+        ("val isMemoryFull: Boolean get() = (bits and MEMORY_FULL) != 0",
+         "val isMemoryFull: Boolean get() = false"),
+    ]),
+
+    # §16.12: let a wrapped pointer fall through to the subtraction, where it
+    # reads as a huge negative -- i.e. as "nothing was recorded" on a ride that
+    # filled the chip.
+    "H-wrap-not-loss": (SINCE, [
+        ("        if (current.pointer < previous.pointer) {",
+         "        if (false && current.pointer < previous.pointer) {"),
+    ]),
+
+    # §16.12: count sector headers as record payload, inflating every long-gap
+    # estimate in the reassuring direction.
+    "I-sector-headers": (SINCE, [
+        ("        val payload = (raw - headers * SectorHeader.SIZE).coerceAtLeast(0)",
+         "        val payload = raw"),
+    ]),
+
+    # §16.13: condemn a logger that had no position to write, which is the one
+    # distinction the trailhead proof exists to hold.
+    "J-proof-needs-fix": (PROOF, [
+        ("            return if (hadFix) Result.NothingWritten",
+         "            return if (true) Result.NothingWritten"),
     ]),
 
     # §16.4: drop what the earlier segments established.

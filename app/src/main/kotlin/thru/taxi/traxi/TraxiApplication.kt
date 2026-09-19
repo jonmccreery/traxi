@@ -2,6 +2,7 @@ package thru.taxi.traxi
 
 import thru.taxi.traxi.bt.CompanionPairing
 import thru.taxi.traxi.data.DumpRepository
+import thru.taxi.traxi.data.RecordingMarkStore
 import thru.taxi.traxi.data.TranscriptFile
 import thru.taxi.traxi.usb.UsbPermission
 import thru.taxi.traxi.session.SessionController
@@ -56,7 +57,9 @@ class AppContainer(application: Application) {
     val dumpRepository = DumpRepository(application)
     val pairing = CompanionPairing(application)
     val usb = UsbPermission(application)
-    val session = SessionController(application, pairing, dumpRepository, applicationScope)
+    val recordingMarks = RecordingMarkStore(application)
+    val session =
+        SessionController(application, pairing, dumpRepository, recordingMarks, applicationScope)
 
     /**
      * The on-disk mirror of the transcript.

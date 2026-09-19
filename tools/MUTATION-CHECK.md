@@ -19,6 +19,11 @@ It needs `GRADLE` (default `~/tools/gradle-8.11.1/bin/gradle`) and
 `ANDROID_HOME` (default `~/android-sdk`). Exit status is 0 when every mutation
 is caught, 1 when any survives.
 
+**Do not edit the mutated files while it runs.** It restores each file from a
+backup taken at startup, so any edit made during the run is silently reverted
+when it finishes — the tool reports "the tree was restored ... green" and it is
+telling the truth, just not about your version. Check `git diff` afterwards.
+
 A full pass takes roughly a minute per run, so ten iterations across six
 mutations is around an hour. Three iterations is enough to find a masked fix;
 ten is for when you want to see whether a test is intermittent.

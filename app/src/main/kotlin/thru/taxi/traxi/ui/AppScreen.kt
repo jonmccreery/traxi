@@ -18,7 +18,12 @@ import thru.taxi.traxi.session.ConnectionState
 import thru.taxi.traxi.session.DeviceInfo
 import thru.taxi.traxi.session.ParseSummary
 import thru.taxi.traxi.ui.theme.MonoStyle
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -31,6 +36,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -44,8 +50,12 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private enum class Tab(val label: String) {
-    DEVICE("Device"), LIVE("Live"), DUMPS("Dumps"), CONFIG("Config"), LOG("Log")
+private enum class Tab(val label: String, val icon: ImageVector) {
+    DEVICE("Device", NavIcons.Device),
+    LIVE("Live", NavIcons.Live),
+    DUMPS("Dumps", NavIcons.Dumps),
+    CONFIG("Config", NavIcons.Config),
+    LOG("Log", NavIcons.Log),
 }
 
 /**
@@ -132,9 +142,8 @@ private fun ProveRecordingCard(
                         // this project has actually had, and no other single
                         // check rules out all four.
                         Text(
-                            "That rules out all of it at once: the slide switch is on LOG, " +
-                                "logging is enabled in firmware, the receiver has a position, " +
-                                "and bytes are reaching the flash. Safe to set off.",
+                            "Switch on LOG, logging enabled, receiver has a position, bytes " +
+                                "reaching flash — all four at once. Safe to set off.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -145,10 +154,9 @@ private fun ProveRecordingCard(
                         // press is worth nothing -- so this says what it has
                         // shown and points at the run that would settle it.
                         Text(
-                            "If the logger beeped when you pressed it, this run has tied that " +
-                                "beep to a real write once. To trust it without the phone, run " +
-                                "the check again with Pause logging on: if it still beeps, the " +
-                                "beep only means the press registered.",
+                            "If it beeped, that beep covered one real write. Re-run with " +
+                                "logging paused: if it still beeps, it only means the " +
+                                "press registered.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -161,24 +169,22 @@ private fun ProveRecordingCard(
                             color = MaterialTheme.colorScheme.error,
                         )
                         Text(
-                            "You asked the logger to record a point, it had a position to " +
-                                "record, and the write pointer did not move. It is not " +
-                                "recording. Do not set off on this.",
+                            "It had a position, you asked for a point, the pointer did not " +
+                                "move. It is not recording — do not set off on this.",
                             style = MaterialTheme.typography.bodyMedium,
                         )
+                        NavSwitchNote(emphasis = true)
                         Text(
-                            "Check the slide switch is on LOG rather than NAV — no command " +
-                                "overrides the switch. If it is already on LOG, use Resume " +
-                                "logging on the Config tab and run this again.",
+                            "If it is already on LOG: Resume logging on the Config tab, " +
+                                "then run this again.",
                             style = MaterialTheme.typography.bodySmall,
                         )
                         // A failed run is the most informative calibration
                         // there is, and it costs nothing to point out: the beep
                         // just fired over a write that did not happen.
                         Text(
-                            "If the logger beeped anyway, that beep only means the press " +
-                                "registered — not that anything was recorded. Do not use it " +
-                                "as a recording check on the trail.",
+                            "If it beeped, that beep covered a write that never happened. " +
+                                "It means the press registered, nothing more.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                         )
@@ -193,8 +199,7 @@ private fun ProveRecordingCard(
                         // indoors, which is the healthiest possible reason for
                         // a pointer not to move.
                         Text(
-                            "${result.reason.replaceFirstChar { it.uppercase() }}. " +
-                                "This says nothing about whether the logger is recording.",
+                            "${result.reason.replaceFirstChar { it.uppercase() }}.",
                             style = MaterialTheme.typography.bodyMedium,
                         )
                     }
@@ -211,13 +216,12 @@ private fun ProveRecordingCard(
                     style = MaterialTheme.typography.titleMedium,
                 )
                 Text(
-                    "It writes one point immediately rather than waiting for the next " +
-                        "interval. Then tap below and the app will look for it.",
+                    "It writes one point immediately. Then tap below and the app looks " +
+                        "for it.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Text(
-                    "Note whether it beeps, and whether an LED flashes. This run will tell " +
-                        "you what that beep is actually worth.",
+                    "Note whether it beeps — this run tells you what that beep is worth.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -235,9 +239,8 @@ private fun ProveRecordingCard(
 
             else -> {
                 Text(
-                    "The check below is the only one that settles every question at " +
-                        "once, and it takes a couple of seconds instead of a couple of " +
-                        "log intervals. Do it at the trailhead, before you set off.",
+                    "Settles every question at once, in a couple of seconds. Do it at the " +
+                        "trailhead, before you set off.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Button(
@@ -263,10 +266,8 @@ private fun SinceLastSeenCard(verdict: RecordingSince.Verdict) {
     SectionCard("Since the app last looked") {
         when (verdict) {
             is RecordingSince.Verdict.NothingToCompare -> Text(
-                "This is the first reading of this logger's write pointer. From the " +
-                    "next connect on, this card reports how much the logger wrote " +
-                    "while the app was away — which is the part of the day that " +
-                    "nothing else here can see.",
+                "First reading of this logger's pointer. From the next connect on, " +
+                    "this card covers the time the app was away.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -289,17 +290,15 @@ private fun SinceLastSeenCard(verdict: RecordingSince.Verdict) {
                     "Nothing was written",
                     style = MaterialTheme.typography.titleMedium,
                 )
+                Row2("Pointer unmoved for", describeDuration(verdict.elapsedSeconds))
                 Text(
-                    "The write pointer is exactly where it was " +
-                        "${describeDuration(verdict.elapsedSeconds)} ago. If the logger " +
-                        "was switched off, or indoors without a fix, that is exactly " +
-                        "right. If it was on and outdoors in that time, none of it " +
-                        "was recorded.",
+                    "Off, or indoors without a fix — that is correct. On and outdoors " +
+                        "— none of it was recorded.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Text(
-                    "If it should have been recording: check the slide switch is on " +
-                        "LOG rather than NAV, then use Resume logging on the Config tab.",
+                    "If it should have been recording, the Device card below says " +
+                        "whether it is now.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -311,14 +310,12 @@ private fun SinceLastSeenCard(verdict: RecordingSince.Verdict) {
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.primary,
                 )
-                Text(
-                    "${describeDuration(verdict.recordedSeconds)} of recording, " +
-                        "${Bytes.describe(verdict.bytes)}, in the " +
-                        "${describeDuration(verdict.elapsedSeconds)} since the app last " +
-                        "read the pointer. This is the logger's own counter, measured " +
-                        "across the whole gap — not a sample taken while connected.",
-                    style = MaterialTheme.typography.bodyMedium,
+                Row2(
+                    "Recorded",
+                    "${describeDuration(verdict.recordedSeconds)} · " +
+                        Bytes.describe(verdict.bytes),
                 )
+                Row2("Since last read", describeDuration(verdict.elapsedSeconds))
                 // The gap counts every hour since the last connect, including
                 // the ones the logger spent in a drawer, so recorded time is
                 // *expected* to be less than elapsed time and a coverage
@@ -326,9 +323,8 @@ private fun SinceLastSeenCard(verdict: RecordingSince.Verdict) {
                 // how long it was switched on, so only the user can close this
                 // comparison -- the app's job is to hand them both numbers.
                 Text(
-                    "Compare that against how long the logger was actually switched " +
-                        "on. The gap counts every hour since the last connect, including " +
-                        "any it spent off.",
+                    "Compare against how long it was switched on: the gap counts the " +
+                        "hours it spent off, too.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -378,7 +374,7 @@ fun AppScreen(
                     NavigationBarItem(
                         selected = tab == entry,
                         onClick = { tab = entry },
-                        icon = {},
+                        icon = { Icon(entry.icon, contentDescription = null) },
                         label = { Text(entry.label) },
                     )
                 }
@@ -410,6 +406,21 @@ fun AppScreen(
 
 // ---------------- shared pieces ----------------
 
+/**
+ * Connection state, as an instrument light rather than a chip.
+ *
+ * It was an `AssistChip` with `enabled = false`, coloured by overriding
+ * `disabledLabelColor`: a status readout wearing a disabled control's clothes.
+ * Material draws a disabled chip at reduced opacity over whatever colour it is
+ * handed, so the one element on the bar that reports whether the app is talking
+ * to the logger was also the faintest thing on it.
+ *
+ * The dot carries the state and the word names it, which is what makes it
+ * readable at arm's length in bad light. The dot pulses only while connecting
+ * -- the single state here that means "wait" rather than "this is how things
+ * are" -- and the animation is not even created in the other four, so a settled
+ * connection is not recomposing this corner of the screen sixty times a second.
+ */
 @Composable
 private fun ConnectionChip(state: ConnectionState, simulated: Boolean) {
     val (label, colour) = when (state) {
@@ -417,15 +428,45 @@ private fun ConnectionChip(state: ConnectionState, simulated: Boolean) {
             (if (simulated) "Simulated" else "Connected") to MaterialTheme.colorScheme.primary
         is ConnectionState.Connecting -> "Connecting" to MaterialTheme.colorScheme.secondary
         is ConnectionState.Failed -> "Failed" to MaterialTheme.colorScheme.error
-        ConnectionState.Disconnected -> "Offline" to MaterialTheme.colorScheme.outline
+        // Not `outline`. That is the hairline colour, and this chip draws on
+        // the app bar's `surface` over its own 12%-tinted pill: measured there,
+        // `outline` is 1.07:1 in dark and 1.17:1 in light, which is not dim but
+        // absent. `onSurfaceVariant` gives 2.45:1 and 2.65:1.
+        //
+        // Still short of WCAG AA's 4.5:1, and deliberately so -- being offline
+        // is an ordinary state and should not shout as loudly as a live link.
+        // The number is written down rather than described as "legible" so the
+        // next person changing it knows what the trade actually was.
+        ConnectionState.Disconnected -> "Offline" to MaterialTheme.colorScheme.onSurfaceVariant
     }
-    AssistChip(
-        onClick = {},
-        enabled = false,
-        label = { Text(label) },
-        colors = AssistChipDefaults.assistChipColors(disabledLabelColor = colour),
-        modifier = Modifier.padding(end = 8.dp),
-    )
+
+    val dotAlpha = if (state is ConnectionState.Connecting) {
+        val transition = rememberInfiniteTransition(label = "connecting")
+        transition.animateFloat(
+            initialValue = 1f,
+            targetValue = 0.25f,
+            animationSpec = infiniteRepeatable(tween(650), RepeatMode.Reverse),
+            label = "pulse",
+        ).value
+    } else 1f
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .padding(end = 12.dp)
+            .clip(MaterialTheme.shapes.small)
+            .background(colour.copy(alpha = 0.12f))
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+    ) {
+        Box(
+            Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(colour.copy(alpha = dotAlpha))
+        )
+        Spacer(Modifier.width(7.dp))
+        Text(label, style = MaterialTheme.typography.labelSmall, color = colour)
+    }
 }
 
 @Composable
@@ -466,6 +507,69 @@ private fun Row2(label: String, value: String, mono: Boolean = true) {
 }
 
 /**
+ * A label whose value is too long to sit beside it.
+ *
+ * [Row2] gives the value whatever width the label leaves over, and the field
+ * list does not fit that column: eight names, fifty-five characters. On the
+ * hardware it broke inside a token, rendering "SPEED,R" above "CR,DISTANCE".
+ * Stacking hands the value the full width instead.
+ */
+@Composable
+private fun Row2Stacked(label: String, value: String) {
+    Column(
+        Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(value, style = MonoStyle)
+    }
+}
+
+/**
+ * Somewhere legal to break a comma-separated machine value.
+ *
+ * Zero-width spaces, so the line breaker may split after a comma and nowhere
+ * else. Width alone does not fix this -- the list is one unbroken token as far
+ * as the layout is concerned, so without these it still breaks mid-name, just
+ * further along the line.
+ */
+private fun String.breakableAtCommas(): String = replace(",", ",\u200B")
+
+/**
+ * The slide switch, said once.
+ *
+ * This instruction was written twelve times across the app in twelve slightly
+ * different wordings -- 290 words, a fifth of everything on screen -- and on
+ * the NOT RECORDING branch two of them landed fifty-four words apart on the
+ * same card. One composable means the wording cannot drift and the duplicate
+ * is impossible rather than merely unnoticed.
+ *
+ * It states the switch and what NAV does, and nothing else. Which remedy
+ * follows it is the caller's business, because that differs by card.
+ *
+ * Called only where the app is making a live accusation -- the NOT RECORDING
+ * verdict and a failed proof. Cards that report the past point at those rather
+ * than repeating this, so the note cannot land twice on one tab. The two
+ * remaining callers can only coincide when the user has just asked for a
+ * second opinion and got the same answer, which is a reasonable place to hear
+ * it twice.
+ */
+@Composable
+private fun NavSwitchNote(emphasis: Boolean = false) {
+    Text(
+        "The slide switch must be on LOG. Nothing in software overrides it — in NAV " +
+            "the logger reports \"logging\" and writes nothing.",
+        style = MaterialTheme.typography.bodySmall,
+        color = if (emphasis) MaterialTheme.colorScheme.error
+        else MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+/**
  * Speaks only when the phone is still allowed to suspend this app.
  *
  * A foreground service keeps the process alive but does not, on this phone,
@@ -491,15 +595,14 @@ private fun BatteryExemptionCard() {
 
     SectionCard("Android may suspend this app") {
         Text(
-            "Battery optimisation is still on for traxi. With it on, the phone " +
-                "suspends the app a few minutes after the screen goes off, which " +
-                "stalls the Bluetooth link without disconnecting it — the link looks " +
-                "alive while nothing arrives.",
+            "Battery optimisation is on: the phone suspends traxi a few minutes " +
+                "after the screen goes off. The link then looks alive while nothing " +
+                "arrives.",
             style = MaterialTheme.typography.bodyMedium,
         )
         Text(
-            "The logger keeps recording either way; this only affects what the phone " +
-                "can see and download.",
+            "The logger keeps recording either way — this only affects what the " +
+                "phone can see.",
             style = MaterialTheme.typography.bodySmall,
         )
         Button(
@@ -535,8 +638,8 @@ private fun PermissionCard(onRequest: () -> Unit) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Bluetooth permission needed", style = MaterialTheme.typography.titleMedium)
             Text(
-                "Traxi needs Bluetooth access to reach the logger. It does not " +
-                    "request location, and does not use Bluetooth to determine where you are.",
+                "Traxi needs Bluetooth to reach the logger. It does not request " +
+                    "location, or use Bluetooth to infer where you are.",
                 style = MaterialTheme.typography.bodyMedium,
             )
             Button(onRequest) { Text("Grant") }
@@ -595,15 +698,14 @@ private fun DeviceTab(
                         usbDevices.isNotEmpty()
                     ) {
                         Text(
-                            "Check the cable and that the logger is powered on. USB needs " +
-                                "no pairing, so this is a cable, power or protocol problem " +
-                                "rather than a permissions one.",
+                            "Check the cable, and that the logger is on. USB needs no " +
+                                "pairing, so this is not a permissions problem.",
                             style = MaterialTheme.typography.bodySmall,
                         )
                     } else {
                         Text(
-                            "The logger must be powered on and already paired in Android's " +
-                                "Bluetooth settings. Classic Bluetooth has no " +
+                            "The logger must be on and already paired in Android's " +
+                                "Bluetooth settings — Classic Bluetooth has no " +
                                 "unpaired-connect path.",
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -613,10 +715,9 @@ private fun DeviceTab(
                         // like whether they just power-cycled it.
                         staleAddress?.let { address ->
                             Text(
-                                "If the logger is powered on and in range, the pairing may " +
-                                    "have gone stale — this logger forgets its key when it " +
-                                    "loses power, while the phone keeps hers. Re-pairing " +
-                                    "fixes that, and will ask for PIN ${Bonding.KNOWN_PIN}.",
+                                "If it is on and in range: this logger forgets its key when " +
+                                    "it loses power, the phone does not. Re-pairing asks for " +
+                                    "PIN ${Bonding.KNOWN_PIN}.",
                                 style = MaterialTheme.typography.bodySmall,
                             )
                             OutlinedButton(
@@ -633,9 +734,8 @@ private fun DeviceTab(
             if (usbDevices.isNotEmpty()) {
                 SectionCard("Connected by cable") {
                     Text(
-                        "USB is about 65× faster than Bluetooth on this logger — a full " +
-                            "flash read takes under two minutes instead of three hours — " +
-                            "and needs no pairing.",
+                        "About 65× faster than Bluetooth: a full read takes under two " +
+                            "minutes instead of three hours. No pairing needed.",
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     usbDevices.forEach { usbDevice ->
@@ -664,13 +764,12 @@ private fun DeviceTab(
 
             SectionCard("Connect") {
                 Text(
-                    "Pick the logger through Android's own device chooser. The choice " +
-                        "is remembered, so later trips are one tap.",
+                    "Pick the logger through Android's chooser. The choice is " +
+                        "remembered, so later trips are one tap.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Text(
-                    "The logger must be powered on to appear — it does not advertise " +
-                        "otherwise. If asked for a PIN, it is " +
+                    "It must be powered on to appear. If asked for a PIN, it is " +
                         "${thru.taxi.traxi.bt.Bonding.KNOWN_PIN}.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -711,9 +810,9 @@ private fun DeviceTab(
                     }
                     if (showAll) {
                         Text(
-                            "Most of these are speakers or headphones. They accept a " +
-                                "connection and then fail the same way a dead logger " +
-                                "does, because they do not speak Serial Port Profile.",
+                            "Mostly speakers and headphones. They accept a connection, " +
+                                "then fail exactly as a dead logger does — no Serial " +
+                                "Port Profile.",
                             style = MaterialTheme.typography.bodySmall,
                         )
                         others.forEach { address ->
@@ -725,9 +824,9 @@ private fun DeviceTab(
 
             SectionCard("Work without the logger") {
                 Text(
-                    "Run the app against a flash image already on this phone. Everything " +
-                        "except the radio behaves identically, so a dump can be re-parsed " +
-                        "and re-exported with the device in a drawer.",
+                    "Run against a flash image already on this phone. Everything but the " +
+                        "radio behaves identically — re-parse and re-export with the " +
+                        "logger in a drawer.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 OutlinedButton(
@@ -774,11 +873,14 @@ private fun DeviceInfoCard(
 ) {
     SectionCard(if (simulated) "Simulated logger" else "Logger") {
         Text(info.displayModel, style = MaterialTheme.typography.titleLarge)
-        Row2("Transport", info.transportDescription)
-        Row2("Firmware", info.firmware)
-        Row2("Log format", "0x%08X".format(info.logFormat.bits))
-        Row2("Fields", info.logFormat.describe(), mono = true)
-        Row2("Interval", "${info.timeIntervalSeconds} s")
+
+        // The specification rows used to sit here, between the model name and
+        // the verdict. That put Transport, Firmware, Log format, Fields and
+        // Interval -- five rows that change about once a year -- above the one
+        // line this whole app exists to print, so "is it recording" was the
+        // seventh thing read on the card and the second screenful on a phone.
+        // They are still here, below, because they are worth having; they are
+        // just no longer in front of the answer.
 
         // The one status the user must not have to interpret: is it recording?
         // Decided by the write pointer actually advancing -- bytes landing in
@@ -831,7 +933,7 @@ private fun DeviceInfoCard(
                     )
                     Text(
                         "${Bytes.describe(recording.bytesSinceConnect)} written to flash " +
-                            "since connecting. This is the live write pointer, not a guess.",
+                            "since connecting.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     // The age of the fact, stated rather than implied. The
@@ -849,9 +951,8 @@ private fun DeviceInfoCard(
                 !hasFix -> {
                     Row2("Recording", "no fix — nothing to record")
                     Text(
-                        "The receiver has no position, so there is nothing for the " +
-                            "logger to write. This is normal indoors and is not a " +
-                            "fault; recording resumes on its own once it sees the sky.",
+                        "No position, so there is nothing to write. Normal indoors and " +
+                            "not a fault — recording resumes once it sees the sky.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -864,10 +965,9 @@ private fun DeviceInfoCard(
                         color = MaterialTheme.colorScheme.error,
                     )
                     Text(
-                        "There is a good fix and the write pointer still has not " +
-                            "moved — checked ${describeAgo(checkedAgo)}, after " +
-                            "%.0f s of watching. Fixes are being lost.".format(
-                                recording.lastProbeGapNanos / 1e9),
+                        ("Good fix, pointer unmoved after %.0f s. Checked %s. " +
+                            "Fixes are being lost.").format(
+                            recording.lastProbeGapNanos / 1e9, describeAgo(checkedAgo)),
                         style = MaterialTheme.typography.bodySmall,
                     )
                     // The switch comes first because it is the likelier cause
@@ -875,16 +975,9 @@ private fun DeviceInfoCard(
                     // in NAV the logger accepts an enable and reports 0x0102
                     // while writing nothing at all, so no software setting --
                     // and no reassuring status word -- overrides the slider.
+                    NavSwitchNote(emphasis = true)
                     Text(
-                        "Check the slide switch on the logger is set to LOG, not NAV. " +
-                            "In NAV it navigates but deliberately does not record, and " +
-                            "the app cannot override that — it will even report " +
-                            "\"logging\" while writing nothing.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Text(
-                        "If the switch is already on LOG, logging has been disabled in " +
-                            "firmware: use Resume logging on the Config tab.",
+                        "If it is already on LOG: Resume logging on the Config tab.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -945,16 +1038,14 @@ private fun DeviceInfoCard(
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.error,
                     )
+                    // The NAV note is already on screen, above: this branch only
+                    // reaches the user underneath the NOT RECORDING verdict, which
+                    // draws it. What is left here is the part that branch cannot
+                    // say -- that the device agrees it is not logging.
                     Text(
-                        "The logger reports logging disabled, there is a good fix, and " +
-                            "nothing is reaching flash. Use Resume logging on the Config tab.",
+                        "Logging reported off, good fix, nothing reaching flash. " +
+                            "Resume logging on the Config tab.",
                         style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Text(
-                        "If the slide switch is in NAV, that reads the same way and no " +
-                            "command will override it; move it to LOG.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
 
@@ -969,7 +1060,7 @@ private fun DeviceInfoCard(
                 it.faults.forEach { fault ->
                     Text(
                         "The logger reports that $fault — recording will not " +
-                            "resume by itself. See §13 in the engineering record.",
+                            "resume by itself.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.error,
                     )
@@ -984,14 +1075,22 @@ private fun DeviceInfoCard(
                     !recording.lastProbeAdvanced && hasFix
                 ) {
                     Text(
-                        "The logger reports logging, but nothing is reaching flash — " +
-                            "the switch is almost certainly in NAV.",
+                        "The logger itself claims logging is on, so the switch is the " +
+                            "likely cause.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
             }
         }
+
+        HorizontalDivider()
+
+        Row2("Transport", info.transportDescription)
+        Row2("Firmware", info.firmware)
+        Row2("Log format", "0x%08X".format(info.logFormat.bits))
+        Row2Stacked("Fields", info.logFormat.describe().breakableAtCommas())
+        Row2("Interval", "${info.timeIntervalSeconds} s")
 
         info.flash?.let { Row2("Flash", it.describe()) }
         info.writePointer?.let { Row2("Written", Bytes.describe(it)) }
@@ -1001,17 +1100,15 @@ private fun DeviceInfoCard(
                 modifier = Modifier.fillMaxWidth(),
             )
             Text(
-                "${Bytes.describePercent(fraction)} of flash used. This is a hint only — " +
-                    "in overlap mode a full log wraps and overwrites the oldest data, " +
-                    "so a download always reads the whole chip.",
+                "${Bytes.describePercent(fraction)} of flash used — a hint only. In " +
+                    "overlap mode a full log wraps, so a download always reads the " +
+                    "whole chip.",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
 
     }
 }
-
-// ---------------- dumps ----------------
 
 // ---------------- live ----------------
 
@@ -1032,8 +1129,7 @@ private fun LiveTab(
     if (connection !is ConnectionState.Connected) {
         SectionCard("Not connected") {
             Text(
-                "Live telemetry comes from the logger itself, so it needs an open " +
-                    "connection. Connect on the Device tab.",
+                "Live telemetry needs an open connection. Connect on the Device tab.",
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
@@ -1085,8 +1181,7 @@ private fun LinkHealthCard(health: LinkHealth) {
                 color = MaterialTheme.colorScheme.error,
             )
             Text(
-                "The link is no longer delivering data. The logger keeps recording on " +
-                    "its own regardless — nothing is being lost on the device. " +
+                "The logger keeps recording regardless — nothing is being lost. " +
                     "Disconnect and connect again to resume.",
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -1107,9 +1202,8 @@ private fun LinkHealthCard(health: LinkHealth) {
             color = MaterialTheme.colorScheme.error,
         )
         Text(
-            "The connection is still open but nothing is arriving. The logger is " +
-                "still recording — this is the phone's side of the link. If it does " +
-                "not recover, disconnect and connect again.",
+            "Still open, but nothing is arriving — this is the phone's side. The " +
+                "logger is still recording. If it does not recover, reconnect.",
             style = MaterialTheme.typography.bodySmall,
         )
     }
@@ -1212,8 +1306,8 @@ private fun FixCard(t: Telemetry) {
         // and a logger that stopped recording look identical from here; that is
         // exactly the section 12 failure, and it cost 1h40m of trail once.
         Text(
-            "This is the receiver, not the recorder. A good fix does not mean the " +
-                "logger is writing it down — the Device tab shows recording state.",
+            "The receiver, not the recorder: a good fix does not mean the logger is " +
+                "writing it down. The Device tab has that.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -1256,8 +1350,7 @@ private fun SkyCard(t: Telemetry) {
     SectionCard("Sky") {
         t.satellites.forEach { sat -> SatelliteBar(sat, sat.prn in t.usedPrns) }
         Text(
-            "PRN, elevation and signal-to-noise in dB. Bars in colour are the ones " +
-                "the fix is actually using.",
+            "PRN, elevation, signal-to-noise in dB. Coloured bars are in the fix.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -1340,6 +1433,8 @@ private fun utcStamp(millis: Long): String =
         .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
         .format(Date(millis))
 
+// ---------------- dumps ----------------
+
 @Composable
 private fun DumpsTab(
     container: AppContainer,
@@ -1391,8 +1486,8 @@ private fun DumpsTab(
             if (download.linkResets > 0) {
                 Row2("Link rebuilds", download.linkResets.toString())
                 Text(
-                    "The logger stopped answering and the link was rebuilt to get " +
-                        "past it. Nothing is lost — each pass resumes at the frontier.",
+                    "The logger stopped answering; the link was rebuilt. Nothing is " +
+                        "lost — each pass resumes at the frontier.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1669,13 +1764,9 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
         // the switch in NAV it claims `0x0102` over a frozen pointer (§15.2),
         // and a software pause does not move it at all (§16.10).
         Text(
-            "The device's own claim, read once when you connected, and it settles " +
-                "nothing on its own. It goes to \"NOT logging\" whenever the receiver " +
-                "has no fix — which is every cold connect — and back again a second " +
-                "after the sky comes into view, with no command sent. It also reads " +
-                "\"logging\" with the slide switch in NAV, over a pointer that never " +
-                "moves. Only the Device tab's recording indicator, which pairs the " +
-                "write pointer with the fix, can tell you anything.",
+            "Wrong in both directions: \"NOT logging\" on any cold connect, " +
+                "\"logging\" with the switch in NAV. Only the Device tab's recording " +
+                "indicator settles it.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -1723,18 +1814,14 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
                     color = MaterialTheme.colorScheme.error,
                 )
                 Text(
-                    "At this interval the logger holds about three weeks. In STOP mode " +
-                        "it writes nothing after that and does not resume on its own. " +
-                        "A flash format leaves this setting behind, which is why it can " +
-                        "be set without anyone choosing it.",
+                    "About three weeks at this interval, then it stops for good. A flash " +
+                        "format leaves this setting behind, so nobody need have chosen it.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
             Pmtk.RecordMethod.OVERLAP -> Text(
-                "A full log wraps and overwrites its oldest records, so recording " +
-                    "never stops on its own. Download the whole chip rather than " +
-                    "stopping at the write pointer — after a wrap the oldest data " +
-                    "lives past it.",
+                "A full log wraps over its oldest records, so recording never stops. " +
+                    "After a wrap the oldest data lives past the write pointer.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1745,9 +1832,8 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
                 // changes when this app changes it -- so it is read when
                 // someone asks to see it, not on every connect during a ride.
                 Text(
-                    "Not read yet. This setting only changes when you change it, so the " +
-                        "app does not spend a query on it every time it connects — asking " +
-                        "this logger is what destabilises its Bluetooth link.",
+                    "Not read yet: it only changes when you change it, and every query " +
+                        "costs — asking this logger is what destabilises its link.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1810,13 +1896,12 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
 
     SectionCard("Log format") {
         Row2("Current", "0x%08X".format(info.logFormat.bits))
-        Text(info.logFormat.describe(), style = MonoStyle)
+        Text(info.logFormat.describe().breakableAtCommas(), style = MonoStyle)
 
         HorizontalDivider()
         Text(
-            "Adding NSAT, HDOP and VDOP is the only way to get per-fix satellite " +
-                "geometry — no existing dump contains it. Records grow from 42 to 48 " +
-                "bytes, so the logger holds about 14% fewer hours.",
+            "Per-fix satellite geometry, which no existing dump has. Records grow " +
+                "42 → 48 bytes, costing about 14% of capacity.",
             style = MaterialTheme.typography.bodySmall,
         )
         Button(
@@ -1932,9 +2017,8 @@ private fun EraseCard(container: AppContainer, info: DeviceInfo, parentBusy: Boo
         }
 
         Text(
-            "This will destroy ${ready.fixes} fixes on the logger. ${ready.fileName} stays " +
-                "on this phone and is never deleted, but it is the only copy — export it " +
-                "first if you have not already.",
+            "This destroys ${ready.fixes} fixes on the logger. ${ready.fileName} stays " +
+                "on this phone — but it is then the only copy. Export it first.",
             style = MaterialTheme.typography.bodyMedium,
         )
 
@@ -1991,14 +2075,14 @@ private fun LogTab(container: AppContainer) {
 
     SectionCard("PMTK transcript") {
         Text(
-            "Every sentence exchanged with the logger. When something goes wrong at a " +
-                "trailhead this is the only diagnostic available, so it can be shared.",
+            "Every sentence exchanged with the logger — the only diagnostic there is " +
+                "at a trailhead, so it can be shared.",
             style = MaterialTheme.typography.bodySmall,
         )
         Text(
-            "Mirrored to a file as it is written, so it survives a crash, a reboot or " +
-                "an update — the view below shows this run, the shared file holds the " +
-                "history (${Bytes.describe(container.transcriptFile.sizeBytes())}).",
+            "Mirrored to a file as it is written, so it survives a crash. The view " +
+                "below is this run; the file holds the history " +
+                "(${Bytes.describe(container.transcriptFile.sizeBytes())}).",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

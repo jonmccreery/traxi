@@ -55,14 +55,38 @@ interface Transport : AutoCloseable {
      * Bluetooth-killing 12 s cadence, 10-16 ms each, no degradation across five
      * minutes. The command is not the problem; the radio path is.
      *
-     * Ten minutes was the first safe-by-a-wide-margin guess. A minute is the
-     * deliberate step back toward usefulness -- a recording indicator that
-     * refreshes twice an hour barely indicates anything -- taken now that a
-     * wedge is survivable rather than fatal: the link rebuilds itself and a
-     * transfer resumes from the frontier. If it destabilises, this is the
-     * number to move.
+     * **Back to ten minutes, 2026-09-25.** `977a757` lowered this to 60 s on
+     * 2026-09-08 and ended its own message with *"if it destabilises Bluetooth,
+     * this is the one number to move."* It did, and this is that move.
+     *
+     * Two things made the reduction look safe and neither held.
+     *
+     * It was licensed on *"a wedge is survivable rather than fatal: the link
+     * rebuilds itself and a transfer resumes from the frontier."* §11 records
+     * that `downloadWithLinkRecovery` **had never run against hardware** --
+     * nothing had ever wedged while it was watching. It first ran on
+     * 2026-09-25 and failed at the rebuild, so the premise was untested when it
+     * was spent.
+     *
+     * And it was applied to the *default*, which is the only place Bluetooth
+     * reads it from: `BluetoothSppTransport` has never overridden this, by
+     * design -- the default is the slow-link value and fast transports opt
+     * down, exactly as `blockReadIdleTimeoutMillis` above still does. So a
+     * change described as "check recording once a minute" was, on the one
+     * transport that matters, a **tenfold increase in how often the app talks
+     * to a device that §15 measured as losing its link when talked to.** §15
+     * item 3 has said "Bluetooth 10 min, USB 12 s" throughout; the code has
+     * disagreed since the day after it was written.
+     *
+     * The early probe is unaffected -- `startTelemetry` takes
+     * `min(firstProbe, steady)` and still confirms recording about twenty
+     * seconds in. This only changes the steady cadence, which is what the
+     * record always described.
+     *
+     * If usefulness needs raising again: raise it on a transport that has been
+     * measured to tolerate it, not on the default that Bluetooth inherits.
      */
-    val writePointerProbeIntervalMillis: Long get() = 60_000
+    val writePointerProbeIntervalMillis: Long get() = 600_000
 
     val isOpen: Boolean
 

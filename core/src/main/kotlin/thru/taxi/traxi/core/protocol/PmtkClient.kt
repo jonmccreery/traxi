@@ -246,6 +246,16 @@ class PmtkClient(
     suspend fun queryLogStatus(): String = queryConfig(Pmtk.ConfigField.LOG_STATUS)
 
     /**
+     * Flash-full behaviour, or null if the device answers unrecognisably.
+     *
+     * Informational like the flash id, so a firmware that will not answer it
+     * must not block an otherwise usable session.
+     */
+    suspend fun queryRecordMethod(): Pmtk.RecordMethod? =
+        runCatching { Pmtk.RecordMethod.parse(queryConfig(Pmtk.ConfigField.RECORD_METHOD)) }
+            .getOrNull()
+
+    /**
      * Flash identity, decoded from the JEDEC RDID the device returns.
      *
      * @return the decoded id, or null if the device answers with something

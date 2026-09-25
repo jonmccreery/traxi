@@ -2877,8 +2877,67 @@ aiming at. It is an exact prediction, not padding, and it leaves the estimate
 free to count honestly to zero. *(An earlier write-up of this called it padding
 and a source of overshoot; watching the fetch finish disproved that.)*
 
-Not fixed in code — recorded here so the next person does not rediscover it.
+**Fixed.** The arithmetic moved out of `SessionController` into
+`TransferEstimate`, which is pure and now has eight tests, because this is the
+second time it has been wrong in the same way and neither time could a test
+notice. `rebase` moves the baseline forward for as long as nothing has been
+appended, and freezes it at the first real byte — so an ordinary mid-transfer
+stall is still charged to the rate, which is correct: a link that goes quiet for
+a minute really has put the finish a minute further away. `K-eta-rebase` in
+`tools/mutation-check.py` restores the frozen baseline, to keep a test standing
+between the two.
 
+
+### 16.17 The setting nobody could see
+
+`RECORD_METHOD` — config field 6, what the logger does when the flash fills —
+has been in `Pmtk.ConfigField` since the enum was written and **queried by
+nothing, ever**. Through §12, §13 and every section since, the app has connected
+to this device hundreds of times without once asking.
+
+It matters because §13 recorded, from observation rather than documentation,
+that a format resets it:
+
+| Field | After a format |
+|---|---|
+| `RCD METHOD` | **2 = STP** (was OVP) — restore with `$PMTK182,1,6,1` |
+
+So the device that went through the 2026-09-06 SPI-level recovery may have been
+sitting in STOP ever since, and nothing in this project could have shown it. In
+STOP mode a full chip is the end of recording until someone intervenes. Against
+21 days of capacity at a 10 s interval and a four-to-six month trail, that is
+§12 with a longer fuse: it looks deliberate, it makes no sound, and it is
+discovered when the data does not exist.
+
+`data/dump_v2.log` prints `Recording method on memory full: (1) OVERLAP` from a
+2026-09-04 mtkbabel run — but that is *before* the format, so it settles
+nothing about the state since.
+
+#### What was added
+
+`Pmtk.RecordMethod` decodes the two values, `PmtkClient.queryRecordMethod`
+reads them, and the Config tab draws the setting as its own card with both
+writes offered explicitly. Three decisions worth keeping:
+
+- **An unreadable value parses to null, never to OVERLAP.** Defaulting would
+  invent a reassuring answer about the one setting whose entire hazard is that
+  it ends recording quietly. `L-record-method-guess` keeps a test on that.
+- **A dropped reply on refresh keeps the last known value**, rather than
+  replacing a real reading with an absence and flickering the warning off.
+- **Neither mode is applied automatically.** STOP is almost certainly wrong for
+  this user, and the app still does not write it for them: quietly correcting
+  device configuration on connect is precisely how §12 happened, and "connecting
+  never writes" is an invariant with a test behind it.
+
+STOP is drawn as a standing fault in error colour, with what it costs, because
+on a logger meant to run for months it is not a preference — it is the recording
+ending on a date nobody chose.
+
+#### Still open
+
+- **What it is actually set to on this device.** The card will say the moment
+  the app next connects. The dump cannot answer it; this setting is not in the
+  flash image.
 
 ### The rule
 

@@ -12,6 +12,7 @@ import thru.taxi.traxi.core.format.Quality
 import thru.taxi.traxi.core.format.RecordingAudit
 import thru.taxi.traxi.core.format.MarkProof
 import thru.taxi.traxi.core.format.RecordingSince
+import thru.taxi.traxi.core.protocol.TransferEstimate
 import thru.taxi.traxi.data.RecordingMarkStore
 import thru.taxi.traxi.core.protocol.EraseGate
 import thru.taxi.traxi.core.protocol.FlashDownloader
@@ -64,6 +65,15 @@ data class DeviceInfo(
     val flash: Pmtk.FlashId?,
     /** Next write address in bytes. A progress hint, never a download bound. */
     val writePointer: Long?,
+    /**
+     * Flash-full behaviour, or null if the device did not answer.
+     *
+     * Queried at connect because a format silently leaves it on
+     * [Pmtk.RecordMethod.STOP] (§13), and a logger in STOP mode stops recording
+     * for good when the chip fills. Nothing in this app asked for it until
+     * §16.17, so nobody has ever been able to see it.
+     */
+    val recordMethod: Pmtk.RecordMethod?,
 ) {
     /** Best available name for the hardware. */
     val displayModel: String
@@ -373,8 +383,14 @@ class SessionController(
     // clump at each block start, so it spikes exactly where a fresh sector
     // begins. Elapsed time against file position has neither problem: every
     // cost is inside it, including retries and rebuilt links.
-    private var etaStartNanos = 0L
-    private var etaStartBytes = 0
+    /**
+     * What the whole-run rate is measured from.
+     *
+     * Owned by [TransferEstimate], which moves it forward while nothing has
+     * been appended -- the wrap probe pins the file position, and charging its
+     * 165 seconds to the transfer is §16.16.
+     */
+    private var etaBaseline: TransferEstimate.Baseline? = null
 
     // Where the running download is expected to end, for the ETA. The pointer
     // target is right for an unwrapped log (the read stops just past the write
@@ -696,6 +712,7 @@ class SessionController(
         val status = runCatching { c.queryLogStatus() }.getOrDefault("unavailable")
         val flash = c.queryFlashId()
         val pointer = c.queryWritePointer()
+        val method = c.queryRecordMethod()
 
         if (!simulated && t.description.startsWith("bluetooth ")) {
             connectedAddress = t.description.substringAfterLast(' ')
@@ -717,6 +734,7 @@ class SessionController(
                 needsWeekRollover = firmware.needsWeekRollover,
                 flash = flash,
                 writePointer = pointer,
+                recordMethod = method,
             )
         )
 
@@ -792,8 +810,7 @@ class SessionController(
         rateLastNanos = System.nanoTime()
         rateEmaBps = 0.0
         rateSamples = 0
-        etaStartNanos = 0L
-        etaStartBytes = 0
+        etaBaseline = null
 
         val info = (_connection.value as? ConnectionState.Connected)?.info
         val block = FlashDownloader.DEFAULT_BLOCK_SIZE
@@ -841,8 +858,6 @@ class SessionController(
             // of measuring against a starting gun.
             rateLastNanos = now
             rateSamples = 1
-            etaStartNanos = now
-            etaStartBytes = p.bytesDownloaded
         } else if (dt > 0 && db > 0) {
             val inst = db / dt
             rateEmaBps = if (rateEmaBps == 0.0) inst else 0.4 * inst + 0.6 * rateEmaBps
@@ -855,24 +870,27 @@ class SessionController(
         // neither figure is known -- there is nothing left to estimate honestly.
         val target = etaPointerTargetBytes?.takeIf { p.bytesDownloaded < it }
             ?: etaFlashTargetBytes?.takeIf { p.bytesDownloaded < it }
-        // Built on whole-run progress, not the twitchy EMA, so a burst at a
-        // sector boundary cannot talk the estimate down and the between-block
-        // overhead is counted rather than ignored. It settles as the run goes
-        // on instead of swinging with every sector.
+        // Whole-run progress, not the twitchy EMA, so a burst at a sector
+        // boundary cannot talk the estimate down and the between-block overhead
+        // is counted rather than ignored.
         //
-        // Zero advance is a real state, not a divide-by-zero to dodge: during
-        // the wrap probe the file position is deliberately pinned, and there is
-        // genuinely nothing to estimate from until the extend begins.
-        val elapsed = (now - etaStartNanos) / 1e9
-        val advanced = p.bytesDownloaded - etaStartBytes
-        val progressBps = if (elapsed > 0 && advanced > 0) advanced / elapsed else 0.0
-        // Still withheld until a few arrivals have been seen: one interval over
-        // a bursty link is not a throughput, and a wrong number shown
-        // confidently is worse than none -- it is the figure someone decides
-        // whether to wait on.
-        val eta = if (target != null && progressBps > 0 && rateSamples >= MIN_RATE_SAMPLES) {
-            ((target - p.bytesDownloaded) / progressBps).toInt()
-        } else null
+        // The baseline moves forward for as long as nothing has actually been
+        // appended. During the wrap probe the file position is deliberately
+        // pinned, so without this the transfer opens with the probe's ~165
+        // seconds already on the clock and no bytes against them, and spends
+        // the whole run paying that off -- 27.1 minutes shown against a true
+        // 13.5 on 2026-09-24. Once one byte lands the baseline freezes, so an
+        // ordinary stall is still charged to the rate, which is correct.
+        // See [TransferEstimate] and §16.16.
+        etaBaseline = TransferEstimate.rebase(etaBaseline, now, p.bytesDownloaded)
+        val eta = TransferEstimate.secondsRemaining(
+            baseline = etaBaseline,
+            nowNanos = now,
+            bytesDownloaded = p.bytesDownloaded,
+            target = target,
+            samples = rateSamples,
+            minSamples = MIN_RATE_SAMPLES,
+        )
 
         _download.value = _download.value.copy(
             bytesDownloaded = p.bytesDownloaded,
@@ -1963,6 +1981,40 @@ class SessionController(
     }
 
     /**
+     * Set what the logger does when the flash fills.
+     *
+     * A config write like the others, so it goes through [withLoggingPaused]
+     * and its restore guarantee. Offered rather than applied: §13 records that
+     * a format leaves this on STOP, and a logger silently switched to STOP is
+     * exactly the failure this project exists to catch -- but which of the two
+     * a user wants is theirs to choose, and quietly rewriting device
+     * configuration on connect is how §12 happened.
+     */
+    fun writeRecordMethod(method: Pmtk.RecordMethod, onDone: () -> Unit = {}) {
+        val c = client ?: run { _message.value = "Not connected"; onDone(); return }
+        if (isBusy(onDone)) return
+        launchExclusive {
+            try {
+                withLoggingPaused(c) {
+                    c.writeConfig(Pmtk.ConfigField.RECORD_METHOD, method.code.toString())
+                }
+                _message.value = when (method) {
+                    Pmtk.RecordMethod.OVERLAP ->
+                        "Set to OVERLAP — a full log now wraps instead of stopping"
+                    Pmtk.RecordMethod.STOP ->
+                        "Set to STOP — recording will end when the flash is full"
+                }
+                refreshConfig()
+            } catch (e: Exception) {
+                _message.value = "Could not set the recording method: ${e.message}"
+                noticeIfLinkDied()
+            } finally {
+                onDone()
+            }
+        }
+    }
+
+    /**
      * Write the log format register.
      *
      * The only way to obtain NSAT/HDOP/VDOP, which are absent from every
@@ -2022,12 +2074,18 @@ class SessionController(
         val status = runCatching { c.queryLogStatus() }.getOrDefault(previous)
         val statusAt =
             if (status === previous) current.info.logStatusAtNanos else System.nanoTime()
+        // Null means "the device did not answer this time", never "OVERLAP":
+        // keep the last known value rather than replacing a real reading with
+        // an absence, which would make the STOP warning flicker off on a single
+        // dropped reply.
+        val method = c.queryRecordMethod() ?: current.info.recordMethod
         _connection.value = ConnectionState.Connected(
             current.info.copy(
                 logStatusAtNanos = statusAt,
                 logFormat = format,
                 timeIntervalSeconds = interval,
                 logStatus = status,
+                recordMethod = method,
             )
         )
     }

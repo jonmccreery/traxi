@@ -244,6 +244,50 @@ object Pmtk {
         }
     }
 
+    /**
+     * What the logger does when the flash fills, from `PMTK182,3,6`.
+     *
+     * The field the app never asked for, through §12, §13 and everything after.
+     * It matters because **a format resets it to [STOP]** -- observed, not
+     * documented, and recorded in §13's table -- and on this device a full chip
+     * in STOP mode is the end of recording until someone intervenes. Against a
+     * four-to-six month trail and 21 days of capacity at the interval this user
+     * wants, that is the §12 failure with a longer fuse: deliberate-looking,
+     * silent, and discovered when the data does not exist.
+     *
+     * [OVERLAP] is what a logger you intend to keep using should be set to. It
+     * wraps and overwrites the oldest records, which is survivable -- and which
+     * is why a download must always read the whole chip rather than stopping at
+     * the write pointer.
+     */
+    enum class RecordMethod(val code: Int) {
+        /** Wrap and overwrite the oldest records. `PMTK182,1,6,1`. */
+        OVERLAP(1),
+
+        /** Stop recording when full. `PMTK182,1,6,2`. What a format leaves behind. */
+        STOP(2);
+
+        fun describe(): String = when (this) {
+            OVERLAP -> "OVERLAP — wraps and overwrites the oldest records"
+            STOP -> "STOP — recording ends when the flash is full"
+        }
+
+        companion object {
+            /**
+             * Parse the raw field, or null if it is not one of the two known
+             * values.
+             *
+             * Null rather than a default: guessing OVERLAP would be a
+             * reassuring answer invented about the one setting whose whole
+             * point is that it silently ends recording.
+             */
+            fun parse(raw: String): RecordMethod? {
+                val value = raw.trim().toIntOrNull() ?: return null
+                return entries.firstOrNull { it.code == value }
+            }
+        }
+    }
+
     /** A `PMTK001` acknowledgement. */
     data class Ack(val command: String, val subcommand: String?, val flag: Int) {
         val isSuccess: Boolean get() = flag == FLAG_SUCCESS

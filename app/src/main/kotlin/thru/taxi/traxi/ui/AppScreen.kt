@@ -1705,6 +1705,67 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
         ) { Text("Pause logging") }
     }
 
+    // Flash-full behaviour. Never queried by this app until now, and §13
+    // recorded that a format silently leaves it on STOP -- so on a device that
+    // has been through the §13 recovery, the setting that ends recording for
+    // good is both wrong by default and invisible. It is drawn as its own card
+    // rather than a row because the STOP case is a standing fault, not a
+    // preference.
+    SectionCard("When the flash fills") {
+        val method = info.recordMethod
+        Row2("Current", method?.describe() ?: "unknown — the logger did not answer")
+
+        when (method) {
+            Pmtk.RecordMethod.STOP -> {
+                Text(
+                    "RECORDING WILL STOP WHEN FULL",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                Text(
+                    "At this interval the logger holds about three weeks. In STOP mode " +
+                        "it writes nothing after that and does not resume on its own. " +
+                        "A flash format leaves this setting behind, which is why it can " +
+                        "be set without anyone choosing it.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+            Pmtk.RecordMethod.OVERLAP -> Text(
+                "A full log wraps and overwrites its oldest records, so recording " +
+                    "never stops on its own. Download the whole chip rather than " +
+                    "stopping at the write pointer — after a wrap the oldest data " +
+                    "lives past it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            null -> Text(
+                "The logger did not answer this query, so this setting is unknown " +
+                    "rather than assumed. Reconnect to read it again.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        // Both written explicitly, and neither applied automatically. The app
+        // has never silently changed device configuration and §12 is why.
+        Button(
+            onClick = {
+                busy = true
+                container.session.writeRecordMethod(Pmtk.RecordMethod.OVERLAP) { busy = false }
+            },
+            enabled = !busy && method != Pmtk.RecordMethod.OVERLAP,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Set to OVERLAP — keep recording when full") }
+        OutlinedButton(
+            onClick = {
+                busy = true
+                container.session.writeRecordMethod(Pmtk.RecordMethod.STOP) { busy = false }
+            },
+            enabled = !busy && method != Pmtk.RecordMethod.STOP,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Set to STOP — preserve the oldest data") }
+    }
+
     SectionCard("Log interval") {
         Row2("Current", "${info.timeIntervalSeconds} s")
         OutlinedTextField(

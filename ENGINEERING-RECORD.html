@@ -3197,7 +3197,69 @@ blocks. The read stopped at <code>0x080000</code>, byte for byte the target the 
 aiming at. It is an exact prediction, not padding, and it leaves the estimate
 free to count honestly to zero. <em>(An earlier write-up of this called it padding
 and a source of overshoot; watching the fetch finish disproved that.)</em></p>
-<p>Not fixed in code — recorded here so the next person does not rediscover it.</p>
+<p><strong>Fixed.</strong> The arithmetic moved out of <code>SessionController</code> into
+<code>TransferEstimate</code>, which is pure and now has eight tests, because this is the
+second time it has been wrong in the same way and neither time could a test
+notice. <code>rebase</code> moves the baseline forward for as long as nothing has been
+appended, and freezes it at the first real byte — so an ordinary mid-transfer
+stall is still charged to the rate, which is correct: a link that goes quiet for
+a minute really has put the finish a minute further away. <code>K-eta-rebase</code> in
+<code>tools/mutation-check.py</code> restores the frozen baseline, to keep a test standing
+between the two.</p>
+<h3>16.17 The setting nobody could see</h3>
+<p><code>RECORD_METHOD</code> — config field 6, what the logger does when the flash fills —
+has been in <code>Pmtk.ConfigField</code> since the enum was written and <strong>queried by
+nothing, ever</strong>. Through §12, §13 and every section since, the app has connected
+to this device hundreds of times without once asking.</p>
+<p>It matters because §13 recorded, from observation rather than documentation,
+that a format resets it:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>After a format</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RCD METHOD</code></td>
+<td><strong>2 = STP</strong> (was OVP) — restore with <code>$PMTK182,1,6,1</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>So the device that went through the 2026-09-06 SPI-level recovery may have been
+sitting in STOP ever since, and nothing in this project could have shown it. In
+STOP mode a full chip is the end of recording until someone intervenes. Against
+21 days of capacity at a 10 s interval and a four-to-six month trail, that is
+§12 with a longer fuse: it looks deliberate, it makes no sound, and it is
+discovered when the data does not exist.</p>
+<p><code>data/dump_v2.log</code> prints <code>Recording method on memory full: (1) OVERLAP</code> from a
+2026-09-04 mtkbabel run — but that is <em>before</em> the format, so it settles
+nothing about the state since.</p>
+<h4>What was added</h4>
+<p><code>Pmtk.RecordMethod</code> decodes the two values, <code>PmtkClient.queryRecordMethod</code>
+reads them, and the Config tab draws the setting as its own card with both
+writes offered explicitly. Three decisions worth keeping:</p>
+<ul>
+<li><strong>An unreadable value parses to null, never to OVERLAP.</strong> Defaulting would
+  invent a reassuring answer about the one setting whose entire hazard is that
+  it ends recording quietly. <code>L-record-method-guess</code> keeps a test on that.</li>
+<li><strong>A dropped reply on refresh keeps the last known value</strong>, rather than
+  replacing a real reading with an absence and flickering the warning off.</li>
+<li><strong>Neither mode is applied automatically.</strong> STOP is almost certainly wrong for
+  this user, and the app still does not write it for them: quietly correcting
+  device configuration on connect is precisely how §12 happened, and "connecting
+  never writes" is an invariant with a test behind it.</li>
+</ul>
+<p>STOP is drawn as a standing fault in error colour, with what it costs, because
+on a logger meant to run for months it is not a preference — it is the recording
+ending on a date nobody chose.</p>
+<h4>Still open</h4>
+<ul>
+<li><strong>What it is actually set to on this device.</strong> The card will say the moment
+  the app next connects. The dump cannot answer it; this setting is not in the
+  flash image.</li>
+</ul>
 <h3>The rule</h3>
 <p>Three, and they are all the same rule seen from different angles.</p>
 <p><strong>A property of the data must be stored with the data.</strong> Damage was a property

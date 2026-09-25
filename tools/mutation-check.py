@@ -71,6 +71,8 @@ OUTCOME = "app/src/main/kotlin/thru/taxi/traxi/session/FetchOutcome.kt"
 PMTK = "core/src/main/kotlin/thru/taxi/traxi/core/protocol/Pmtk.kt"
 SINCE = "core/src/main/kotlin/thru/taxi/traxi/core/format/RecordingSince.kt"
 PROOF = "core/src/main/kotlin/thru/taxi/traxi/core/format/MarkProof.kt"
+ETA = "core/src/main/kotlin/thru/taxi/traxi/core/protocol/TransferEstimate.kt"
+PMTKQ = "core/src/main/kotlin/thru/taxi/traxi/core/protocol/Pmtk.kt"
 
 # name -> (file, [(old, new), ...]). Each entry reverts exactly one fix.
 MUTATIONS = {
@@ -140,6 +142,20 @@ MUTATIONS = {
     "J-proof-needs-fix": (PROOF, [
         ("            return if (hadFix) Result.NothingWritten",
          "            return if (true) Result.NothingWritten"),
+    ]),
+
+    # §16.16: freeze the estimate baseline at the first chunk again, so the
+    # wrap probe's pinned stretch is charged to the transfer rate.
+    "K-eta-rebase": (ETA, [
+        ("        if (bytesDownloaded <= previous.bytes) return Baseline(nowNanos, bytesDownloaded)",
+         "        if (false) return Baseline(nowNanos, bytesDownloaded)"),
+    ]),
+
+    # §16.17: guess OVERLAP when the record method is unreadable, inventing a
+    # reassuring answer about the setting that ends recording silently.
+    "L-record-method-guess": (PMTKQ, [
+        ("                return entries.firstOrNull { it.code == value }",
+         "                return entries.firstOrNull { it.code == value } ?: OVERLAP"),
     ]),
 
     # §16.4: drop what the earlier segments established.

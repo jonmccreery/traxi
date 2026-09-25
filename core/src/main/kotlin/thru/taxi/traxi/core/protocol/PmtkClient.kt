@@ -220,9 +220,17 @@ class PmtkClient(
     }
 
     /** Raw value of a config field, from `PMTK182,3,<id>,<value>`. */
-    suspend fun queryConfig(field: Pmtk.ConfigField): String {
+    suspend fun queryConfig(
+        field: Pmtk.ConfigField,
+        timeoutMillis: Long = defaultTimeoutMillis,
+        retries: Int = defaultRetries,
+    ): String {
         val id = field.id.toString()
-        val sentence = exchange(Pmtk.queryConfig(field)) {
+        val sentence = exchange(
+            Pmtk.queryConfig(field),
+            timeoutMillis = timeoutMillis,
+            retries = retries,
+        ) {
             it.matches("PMTK182", "3", id)
         }
         return sentence[3]
@@ -271,8 +279,27 @@ class PmtkClient(
      * A progress hint only. In OVERLAP mode data before a wrap lives past this
      * pointer, so a download must never stop here.
      */
-    suspend fun queryWritePointer(): Long? = runCatching {
-        queryConfig(Pmtk.ConfigField.WRITE_POINTER).trim().toLong(16)
+    /**
+     * Next write address in bytes, or null if the device did not answer.
+     *
+     * A progress hint only. In OVERLAP mode data before a wrap lives past this
+     * pointer, so a download must never stop here.
+     *
+     * **The retry budget is the caller's business**, because this is the one
+     * query §15 names as the link-killer and the cost of retrying it is not the
+     * same everywhere. The telemetry loop takes the default and can afford to:
+     * it only fires into a link that is demonstrably carrying bytes, and a
+     * missed sample costs one row. `openWith` cannot: there it blocks the whole
+     * connect, and on 2026-09-24 three retries held a session for twelve
+     * seconds while the link died underneath it, discarding six valid fixes.
+     * One attempt on a short budget makes a wedged link cost a second instead.
+     */
+    suspend fun queryWritePointer(
+        timeoutMillis: Long = defaultTimeoutMillis,
+        retries: Int = defaultRetries,
+    ): Long? = runCatching {
+        queryConfig(Pmtk.ConfigField.WRITE_POINTER, timeoutMillis, retries)
+            .trim().toLong(16)
     }.getOrNull()
 
     /**

@@ -3289,6 +3289,52 @@ three times, in sections finished the same evening. It is that a rule which
 depends on the person editing remembering it is not a rule, and the fix is a
 test that says the reason out loud.</p>
 </blockquote>
+<h3>16.19 Listening before asking, and what an unanswered probe should cost</h3>
+<p>2026-09-24, from a session where the Live tab reported <em>"waiting for the first
+fix"</em> over a receiver holding a ten-satellite DGPS lock.</p>
+<pre><code>21:59:03.790 &gt;&gt; $PMTK182,2,8        the connect-time write-pointer query
+21:59:06.795 retry 1/3
+21:59:08.629 &lt;&lt; last NMEA byte      the radio stops here
+21:59:09.805 retry 2/3
+21:59:12.820 retry 3/3
+</code></pre>
+<p>Between 21:59:03 and 21:59:08 the app received six <code>GPGGA</code> sentences at quality
+2 on nine to ten satellites, every checksum valid, none malformed — and
+discarded all six. <code>c.onSentence</code>, the handler that counts a fix, was installed
+by <code>startTelemetry</code>, which runs <em>after</em> the interrogation finishes. Normally
+that window is half a second. Here the unanswered pointer query stretched it to
+twelve seconds, the link died inside it, and telemetry started against a socket
+that would never deliver another byte.</p>
+<p>So the tab was truthful about its own session and wrong about the receiver.</p>
+<p>Three changes, and the shape of each is the same: <strong>do the free thing first,
+and bound the expensive one.</strong></p>
+<p><strong>Listening starts before the questions.</strong> <code>attachTelemetry</code> is split out and
+called as soon as the firmware answer is in — the rollover flag is the only
+thing the assembler needs, and everything after it is queries. Attaching is not
+starting: the read loop is still launched at the old point, because a loop
+competing with <code>openWith</code> for the read lock would take bytes belonging to a
+query in flight. This only makes the app hear what is already arriving, which
+§15 is explicit about being free.</p>
+<p>The <code>attach</code> flag is a parameter rather than a <code>c.onSentence == null</code> check.
+The latter works only because <code>stopTelemetry</code> nulls it first, which is true
+today and is not a property any caller states.</p>
+<p><strong>A connect that establishes no baseline says so.</strong> The <code>markFor</code>-returns-null
+branch wrote nothing at all, so the one connect worth having a record of left no
+trace. That is what turned this diagnosis from five lines into a long one.</p>
+<p><strong>The retry budget belongs to the caller.</strong> <code>queryWritePointer</code> now takes
+<code>timeoutMillis</code> and <code>retries</code>. The telemetry loop keeps the default and can
+afford to — it only fires into a link demonstrably carrying bytes, and a missed
+sample costs one row. <code>openWith</code> takes one attempt at 2 s, because there it
+blocks the whole connect and a healthy answer on this device takes 76–110 ms. A
+wedge now costs two seconds rather than twelve.</p>
+<p>Option C — moving the baseline off the connect path entirely, taking it from
+the first telemetry probe at ~20 s — was considered and declined. It would drop
+the connect to five queries, but the request does not disappear: the loop asks
+every 60 s regardless, so the saving is one request per session, against losing
+the <code>RecordingSince</code> mark for any session shorter than the first probe. The
+damage was never the request existing. It was the request blocking.</p>
+<p><code>WritePointerBudgetTest</code> pins that the budget is honoured — a default silently
+ignoring the argument would restore the twelve seconds with nothing to show.</p>
 <h3>The rule</h3>
 <p>Three, and they are all the same rule seen from different angles.</p>
 <p><strong>A property of the data must be stored with the data.</strong> Damage was a property

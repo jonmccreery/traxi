@@ -2973,6 +2973,65 @@ to catch is not live on this device and may never have been.
 > depends on the person editing remembering it is not a rule, and the fix is a
 > test that says the reason out loud.
 
+### 16.19 Listening before asking, and what an unanswered probe should cost
+
+2026-09-24, from a session where the Live tab reported *"waiting for the first
+fix"* over a receiver holding a ten-satellite DGPS lock.
+
+```
+21:59:03.790 >> $PMTK182,2,8        the connect-time write-pointer query
+21:59:06.795 retry 1/3
+21:59:08.629 << last NMEA byte      the radio stops here
+21:59:09.805 retry 2/3
+21:59:12.820 retry 3/3
+```
+
+Between 21:59:03 and 21:59:08 the app received six `GPGGA` sentences at quality
+2 on nine to ten satellites, every checksum valid, none malformed — and
+discarded all six. `c.onSentence`, the handler that counts a fix, was installed
+by `startTelemetry`, which runs *after* the interrogation finishes. Normally
+that window is half a second. Here the unanswered pointer query stretched it to
+twelve seconds, the link died inside it, and telemetry started against a socket
+that would never deliver another byte.
+
+So the tab was truthful about its own session and wrong about the receiver.
+
+Three changes, and the shape of each is the same: **do the free thing first,
+and bound the expensive one.**
+
+**Listening starts before the questions.** `attachTelemetry` is split out and
+called as soon as the firmware answer is in — the rollover flag is the only
+thing the assembler needs, and everything after it is queries. Attaching is not
+starting: the read loop is still launched at the old point, because a loop
+competing with `openWith` for the read lock would take bytes belonging to a
+query in flight. This only makes the app hear what is already arriving, which
+§15 is explicit about being free.
+
+The `attach` flag is a parameter rather than a `c.onSentence == null` check.
+The latter works only because `stopTelemetry` nulls it first, which is true
+today and is not a property any caller states.
+
+**A connect that establishes no baseline says so.** The `markFor`-returns-null
+branch wrote nothing at all, so the one connect worth having a record of left no
+trace. That is what turned this diagnosis from five lines into a long one.
+
+**The retry budget belongs to the caller.** `queryWritePointer` now takes
+`timeoutMillis` and `retries`. The telemetry loop keeps the default and can
+afford to — it only fires into a link demonstrably carrying bytes, and a missed
+sample costs one row. `openWith` takes one attempt at 2 s, because there it
+blocks the whole connect and a healthy answer on this device takes 76–110 ms. A
+wedge now costs two seconds rather than twelve.
+
+Option C — moving the baseline off the connect path entirely, taking it from
+the first telemetry probe at ~20 s — was considered and declined. It would drop
+the connect to five queries, but the request does not disappear: the loop asks
+every 60 s regardless, so the saving is one request per session, against losing
+the `RecordingSince` mark for any session shorter than the first probe. The
+damage was never the request existing. It was the request blocking.
+
+`WritePointerBudgetTest` pins that the budget is honoured — a default silently
+ignoring the argument would restore the twelve seconds with nothing to show.
+
 ### The rule
 
 Three, and they are all the same rule seen from different angles.

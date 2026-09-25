@@ -705,13 +705,25 @@ class SessionController(
         client = c
 
         val firmware = c.queryFirmware()
+        // Start listening before the rest of the interrogation, not after it.
+        // The rollover flag is the only thing the assembler needs and it is in
+        // hand now; everything below is queries, and every sentence arriving
+        // during them used to be discarded. See [attachTelemetry].
+        attachTelemetry(c, firmware.needsWeekRollover)
         val format = c.queryLogFormat()
         val interval = c.queryTimeIntervalSeconds()
         // The rest are informational. A firmware that does not answer one of
         // them must not block a session that is otherwise perfectly usable.
         val status = runCatching { c.queryLogStatus() }.getOrDefault("unavailable")
         val flash = c.queryFlashId()
-        val pointer = c.queryWritePointer()
+        // One attempt, short budget. This is §15's query, and here it blocks
+        // the connect: the default 3 x 3 s held a session for twelve seconds on
+        // 2026-09-24 while the link died underneath it, and the baseline it was
+        // waiting for was never going to arrive. A healthy answer takes 76-110
+        // ms on this device, so 2 s is generous and a wedge now costs 2 s
+        // instead of 12. The telemetry loop keeps the full budget -- it only
+        // probes a link that is carrying bytes, and a missed sample costs a row.
+        val pointer = c.queryWritePointer(timeoutMillis = 2_000, retries = 1)
 
         if (!simulated && t.description.startsWith("bluetooth ")) {
             connectedAddress = t.description.substringAfterLast(' ')
@@ -784,6 +796,18 @@ class SessionController(
             transcript.note("since the app last saw this logger: ${_sinceLastSeen.value}")
         } else {
             _sinceLastSeen.value = null
+            // Say so. This branch is reached when the pointer query went
+            // unanswered, which is exactly the connect worth having a record
+            // of -- and until now it wrote nothing at all, so a session that
+            // failed to establish a baseline left no trace. On 2026-09-24 that
+            // turned a five-line diagnosis into a long one.
+            if (!simulated) {
+                transcript.note(
+                    "no recording baseline: the logger did not answer the write-pointer " +
+                        "query, so this session cannot report what was written since the " +
+                        "last one, and the stored mark is left untouched"
+                )
+            }
         }
 
         // Tell Android this session is user-visible work. Without it the app is
@@ -803,7 +827,7 @@ class SessionController(
                 )
             }
 
-        startTelemetry(c, firmware.needsWeekRollover)
+        startTelemetry(c, firmware.needsWeekRollover, attach = false)
     }
 
     /**
@@ -1001,7 +1025,25 @@ class SessionController(
         )
     }
 
-    private fun startTelemetry(c: PmtkClient, needsRollover: Boolean) {
+    /**
+     * Begin counting what the logger is already saying.
+     *
+     * Split out of [startTelemetry] and called as soon as the firmware answer
+     * is in, because until the handler is attached every sentence is parsed,
+     * checksummed and **thrown away**. Normally that window is half a second
+     * and nobody notices. On 2026-09-24 the connect-time write-pointer query
+     * went unanswered and stretched it to twelve seconds, across which the app
+     * received six valid DGPS fixes on ten satellites, discarded all of them,
+     * and then reported "waiting for the first fix" over a wedged link. The
+     * receiver had never been in doubt.
+     *
+     * Attaching is not starting: the read loop is still launched later by
+     * [startTelemetry], because a loop competing with `openWith` for the read
+     * lock would take bytes belonging to a query in flight. This only makes the
+     * app *listen* to what is already arriving, which §15 is explicit about
+     * being free.
+     */
+    private fun attachTelemetry(c: PmtkClient, needsRollover: Boolean) {
         val assembler = TelemetryAssembler(
             if (needsRollover) GpsRollover.AXN_130B else GpsRollover.NONE
         )
@@ -1019,6 +1061,21 @@ class SessionController(
                 if (t.hasPosition && (t.fixQuality ?: 0) > 0) noteFixArrived()
             }
         }
+    }
+
+    /**
+     * @param attach whether to attach the sentence handler and reset the live
+     *   counters. False only from `openWith`, which has already attached so
+     *   that fixes arriving during the interrogation are counted; re-attaching
+     *   there would reset the very state that change exists to preserve.
+     *   Every other caller is rebuilding a link and wants the reset.
+     *
+     *   This is a parameter rather than a `c.onSentence == null` check because
+     *   the latter quietly depends on `stopTelemetry` having run first, which
+     *   is true today and is not a property any caller states.
+     */
+    private fun startTelemetry(c: PmtkClient, needsRollover: Boolean, attach: Boolean = true) {
+        if (attach) attachTelemetry(c, needsRollover)
 
         telemetryJob?.cancel()
         telemetryJob = scope.launch {

@@ -2939,6 +2939,40 @@ ending on a date nobody chose.
   the app next connects. The dump cannot answer it; this setting is not in the
   flash image.
 
+### 16.18 The connect budget, enforced instead of remembered
+
+§16.17 added a seventh query to `openWith` to read the record method. It was
+described in a summary as "queried at connect" and never raised as what it
+actually was: a request added to the path that runs before every ride, against
+the section that says requests are what this logger's radio runs out of. The
+session it shipped in lost its link twenty-five seconds after connecting. One
+sample settles nothing about that particular drop — the same failure is in the
+log from 2026-09-16, on a build predating all of this — but the request was not
+worth making, and it is gone.
+
+The part worth keeping is why nothing objected. The existing safety rail (prep
+doc §8, "connecting never writes") **hand-rolls its own query list** and has
+never read `openWith`. It could not have noticed a query being added, only a
+write.
+
+`ConnectBudgetTest` reads the real function. It pins the six requests a connect
+may make, names what each one earns, and fails the build with the reason when
+the set changes. Verified by putting the seventh query back: it fails, naming
+it. It is a source-level check because `openWith` needs a `Context` and this
+module has no Robolectric, and a guard that cannot run is not a guard.
+
+The record method is now read on demand from the Config tab — one request,
+behind a tap, on a screen someone is looking at. It only ever changes when this
+app changes it, so there was never a reason to ask on every connect.
+
+**And it answered: `PMTK182,3,6,1` — OVERLAP.** The STOP trap §16.17 was built
+to catch is not live on this device and may never have been.
+
+> The lesson is not "be careful with queries". That was already written down,
+> three times, in sections finished the same evening. It is that a rule which
+> depends on the person editing remembering it is not a rule, and the fix is a
+> test that says the reason out loud.
+
 ### The rule
 
 Three, and they are all the same rule seen from different angles.

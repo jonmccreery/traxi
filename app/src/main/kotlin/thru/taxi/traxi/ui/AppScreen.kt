@@ -1738,16 +1738,35 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            null -> Text(
-                "The logger did not answer this query, so this setting is unknown " +
-                    "rather than assumed. Reconnect to read it again.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            null -> {
+                // Not read automatically, and the card says so rather than
+                // quietly looking empty. §15: every request is spent from a
+                // budget this logger runs out of, and this setting only
+                // changes when this app changes it -- so it is read when
+                // someone asks to see it, not on every connect during a ride.
+                Text(
+                    "Not read yet. This setting only changes when you change it, so the " +
+                        "app does not spend a query on it every time it connects — asking " +
+                        "this logger is what destabilises its Bluetooth link.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Button(
+                    onClick = {
+                        busy = true
+                        container.session.readRecordMethod { busy = false }
+                    },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Read the setting") }
+            }
         }
 
         // Both written explicitly, and neither applied automatically. The app
         // has never silently changed device configuration and §12 is why.
+        // Hidden until the setting has been read, so nobody writes a mode
+        // blind and spends two requests discovering it was already set.
+        if (method != null) {
         Button(
             onClick = {
                 busy = true
@@ -1764,6 +1783,7 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
             enabled = !busy && method != Pmtk.RecordMethod.STOP,
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Set to STOP — preserve the oldest data") }
+        }
     }
 
     SectionCard("Log interval") {

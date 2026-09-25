@@ -712,7 +712,6 @@ class SessionController(
         val status = runCatching { c.queryLogStatus() }.getOrDefault("unavailable")
         val flash = c.queryFlashId()
         val pointer = c.queryWritePointer()
-        val method = c.queryRecordMethod()
 
         if (!simulated && t.description.startsWith("bluetooth ")) {
             connectedAddress = t.description.substringAfterLast(' ')
@@ -733,8 +732,21 @@ class SessionController(
                 logStatusAtNanos = System.nanoTime(),
                 needsWeekRollover = firmware.needsWeekRollover,
                 flash = flash,
+                // **Not queried here.** §15 is unambiguous that requests are
+                // what this logger's Bluetooth firmware runs out of, and this
+                // connect sequence already spends six. The record method cannot
+                // change unless this app changes it -- `writeRecordMethod` and
+                // a format are the only things that touch it, and both refresh
+                // it themselves -- so paying a request for it on every connect,
+                // during every ride, buys a value that was already known.
+                //
+                // Added to the connect path on 2026-09-24 without weighing it
+                // against §15, which was a mistake; the session it shipped in
+                // lost its link 25 seconds later. That is one sample and proves
+                // nothing on its own, but the request was not worth making
+                // either way. Read on demand from the Config tab instead.
+                recordMethod = null,
                 writePointer = pointer,
-                recordMethod = method,
             )
         )
 
@@ -1990,6 +2002,30 @@ class SessionController(
      * a user wants is theirs to choose, and quietly rewriting device
      * configuration on connect is how §12 happened.
      */
+    /**
+     * Read the flash-full setting, once, because the user asked to see it.
+     *
+     * Deliberately not on the connect path and not on a timer. One request,
+     * behind a tap, on a screen someone is looking at -- which is the only
+     * shape §15 leaves room for.
+     */
+    fun readRecordMethod(onDone: () -> Unit = {}) {
+        val c = client ?: run { _message.value = "Not connected"; onDone(); return }
+        if (isBusy(onDone)) return
+        launchExclusive {
+            val method = runCatching { c.queryRecordMethod() }.getOrNull()
+            val current = _connection.value as? ConnectionState.Connected
+            if (method != null && current != null) {
+                _connection.value =
+                    ConnectionState.Connected(current.info.copy(recordMethod = method))
+            } else if (method == null) {
+                _message.value = "The logger did not answer that query"
+                noticeIfLinkDied()
+            }
+            onDone()
+        }
+    }
+
     fun writeRecordMethod(method: Pmtk.RecordMethod, onDone: () -> Unit = {}) {
         val c = client ?: run { _message.value = "Not connected"; onDone(); return }
         if (isBusy(onDone)) return

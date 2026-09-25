@@ -2598,6 +2598,288 @@ tell the user to trust it.**
   the ceremony is not.
 
 
+### 16.14 The status word, third time: §15.2 was right and I should have left it alone
+
+2026-09-21, from a user report of the app contradicting itself on screen — the
+Device tab showing **LOGGING IS SWITCHED OFF** in red while also reporting
+bytes written. Both were true. The alarm was mine, added in §16.11, and it was
+wrong.
+
+#### The reading that settles it
+
+```
+07:19:31.516 << $GPRMC,121931.000,V        no fix
+07:19:31.650 << $PMTK182,3,7,256           0x0100
+07:19:31.920 << $PMTK182,3,8,0005D2F0
+07:19:32.557 << $GPRMC,121932.000,A        fix arrives, one second later
+07:19:52     << $PMTK182,3,8,0005D390      +160  (a 16-byte marker + 3 records)
+07:20:52     << $PMTK182,3,8,0005D4B0      +288  full rate
+07:21:52     << $PMTK182,3,8,0005D5D0      +288
+```
+
+**No host command anywhere in that sequence.** Nothing was disabled; the word
+went clear because the receiver had nothing to log, and came back on its own.
+
+And with the fix state lined up against every `0x0100` this project has ever
+recorded, the pattern is total:
+
+| When | Status | GPRMC |
+|---|---|---|
+| 2026-09-07 22:50:57 | 256 | `V` |
+| 2026-09-07 22:51:22 | 256 | `V` |
+| 2026-09-19 13:17:38 | 256 | `V` |
+| 2026-09-19 21:38:23 | 256 | `V` |
+| 2026-09-21 07:19:31 | 256 | `V` |
+
+Five for five, and every `0x0102` taken with a fix held.
+
+#### What made §16.11 overturn it, and why that was not enough
+
+One observation: at 13:17:47 on 2026-09-19, `PMTK182,4` was acknowledged and
+the word went `256` -> `258` with GPRMC void on both sides. That is real, and
+it does show the word responds to an explicit enable. What it does **not**
+license is the converse — reading a bare `0x0100` as "disabled" — and §16.11
+took exactly that step.
+
+Worse, the 21:38 connect on the 19th, which looked like the second confirmed
+disarm, does not survive its own timeline either:
+
+```
+21:38:23  status 256, GPRMC V, pointer 0x00057650
+21:38:44  pointer 0x00057650        frozen -- no fix, nothing to write
+21:39:02  GPRMC A                   fix arrives
+21:39:30  PMTK182,4 pressed         28 seconds too late to prove anything
+```
+
+The fix landed half a minute before the Resume press. The device was very
+probably about to record on its own and the press confounded it. That case was
+counted as evidence for a fault; it is evidence of nothing.
+
+#### The cost
+
+The unguarded alarm shipped on 2026-09-19 and produced a false alarm on real
+hardware within two days, on a logger that was writing at full rate twenty
+seconds later. That is precisely the failure the first pass declined to risk
+and then talked itself into:
+
+> **No alarm was added for a clear logging bit**, and that is deliberate. It is
+> the single most common reading on a connect, it is benign in that context,
+> and a red banner on every indoor connect is how the one indicator that must
+> never cry wolf stops being believed. *(§16.11, first version — correct, and
+> then discarded.)*
+
+It is now guarded by the same condition the NAV warning uses: reported off,
+**and** a fix present, **and** a conclusive window, **and** the pointer frozen.
+Under that guard it cannot fire on a logger that is writing.
+
+#### And the user's original report may have been this all along
+
+The complaint that opened all of this was *"the last two times I've connected,
+it's in 'not logged' mode."* On the build they were running, that is the Config
+tab's Status row, rendered straight from `PMTK182,3,7`. Read in the first
+second of a connect — which is when it is always read, and always before the
+receiver has reacquired — it says `NOT logging` on a perfectly healthy device,
+every single time. *Reliably*, which is the word the user used.
+
+No fault has been demonstrated on this device since the 2026-09-06 recovery.
+The 32-hour gap with 96 bytes written, the stop at ~15:15 on the 19th — both
+are a logger that was switched off, which is what a logger in a drawer does.
+
+#### The row is gone from the live card, which is what should have happened first
+
+The guard above stops the alarm. It does nothing about the row, and the user
+said so immediately: *"that logging line never told me when at all. It reads,
+like anything else without a time attached, like a live status report."*
+
+Exactly right, and the first repair — stamping it with an age — was the wrong
+instinct. **An undated line is not ambiguous about time; it asserts the present
+tense.** Annotating a false claim is not the same as withdrawing it, and once
+dated the value does not earn its place anyway: this section's own conclusion is
+that the word can neither condemn a logger nor clear one, so on the card whose
+entire job is that verdict it can only compete with the reading that can.
+
+So the raw bit is no longer drawn on the Device tab. It stays on the Config tab,
+dated, where it is a settings readout on the screen used to change settings.
+What remains on the live card is the part that is actionable and does not
+flicker with fix state: the standing faults, and the NAV warning, both of which
+require a measurement before they say anything.
+
+Worth noticing as a pattern rather than three separate mistakes: every pass at
+this bit **added** something — decode more of it, alarm on it, date it. None
+asked whether it belonged on that screen. The fix was subtraction, and it was
+available from the first pass.
+
+#### The device was never the odd one here
+
+Bit 1 is documented as *auto_log by criteria ON/OFF*, and every reading in this
+record fits it meaning **"the logging criteria are currently being applied"** —
+which requires a fix. No fix, no criteria, bit clear; fix and armed, bit set; an
+explicit `PMTK182,4` sets it directly; NAV claims it while the switch blocks the
+write. That is coherent firmware behaviour and it never varied. All three
+reversals above were about how the app read and presented it.
+
+#### The rule this keeps proving
+
+Three passes on one bit, each one a confident conclusion from a handful of
+readings, each one wrong in a different direction, and the position the project
+held before any of them — §15.2's *"`0x0100` is ambiguous and always will be"*
+— correct throughout.
+
+The discriminator was never in the word. It is the write pointer paired with
+the fix state, which is what the Device tab computed all along and what every
+one of these detours came back to.
+
+#### Still open
+
+- The flash journal still has not been read; the 2026-09-06 recovery's
+  correctness rests on inference. `tools/logstops.py` is ready and validated
+  and needs ~217 KB off the device.
+- `RECORD_METHOD` (field 6) is still never queried by the app, and a format
+  leaves it on STOP. Unrelated to this, still a silent-loss trap.
+
+
+### 16.15 The flash journal, finally read — and what a fetch costs while it runs
+
+2026-09-24. The 217 KB that had never come off the device since 15 September
+were fetched over Bluetooth, with the phone touching the logger this time. It
+completed cleanly and the journal answers, in one pass, every question §12
+through §16.14 kept deferring.
+
+#### The fetch
+
+```
+resuming at 0x00020000, frontier 0x00028180
+blocks 0x20000 … 0x70000, each 65536/65536, 32 chunks, ~165 s, 0.4 KB/s
+stopping: 2 consecutive unwritten blocks at 0x00080000
+524,288 bytes, last real byte 0x05F300
+```
+
+No holes, no retries, no link cycles. The contrast with 19 September — three
+attempts at block `0x00000000`, `0/65536` every time, then an RFCOMM rebuild
+that failed outright — is entirely down to range. Same command, same device.
+**Ask where the hardware is before blaming the firmware.**
+
+#### The verdict
+
+```
+7,952 fixes · 174 log-status markers · 83 disable / 91 enable
+unanswered stops:    0
+checksum failures:   0
+bad sector headers:  0
+```
+
+**Zero unanswered stops.** The §12 fingerprint — a `DISABLE` that nothing
+answers before the next one — does not appear anywhere in the device's own
+record since the 2026-09-06 recovery. The recovery took. There was never a
+second silent failure to find, and §16.14's suspicion that the whole affair was
+a display artefact is now supported by the flash rather than by argument.
+
+Recording quality since the 16th, measured against the configured 10 s:
+
+| Session (UTC) | Minutes | Fixes | Density | Worst inner gap |
+|---|---|---|---|---|
+| 09-16 03:02 → 12:13 | 551 | 3,305 | 100.0% | 25 s |
+| 09-19 18:22 → 18:40 | 18 | 111 | 101.6% | 10 s |
+| 09-19 19:50 → 21:23 | 93 | 559 | 100.1% | 13 s |
+| 09-20 02:39 → 04:01 | 82 | 491 | 99.5% | 45 s |
+| 09-21 12:19 → 12:39 | 20 | 120 | 100.8% | 10 s |
+
+A flawless nine-hour overnight on the 16th. The ragged sessions in the image —
+densities of 20% to 86%, inner gaps up to 935 s — are all 6 to 9 September, the
+recovery and bench-testing days, and are a receiver indoors rather than a logger
+at fault.
+
+The interval has been 10 s throughout: `CHANGE_PERIOD 50` then `100` on
+2026-09-06, and `100` again at 04:34:48 UTC on the 16th, which is §16.10's
+interval write appearing in flash at exactly the second the transcript records
+it. Two independent records of the same event agreeing is the strongest
+validation the parser has had.
+
+#### A Bluetooth fetch suspends logging while it runs
+
+The new finding, and the expensive one. Fix timestamps across the start of the
+download:
+
+```
+01:47:02 … 01:53:32   a fix every 10 s, 39 consecutive, metronomic
+01:53:37              first block read issued
+01:56:21   +169 s
+01:59:03   +162 s
+02:01:45   +162 s
+02:04:32   +167 s
+```
+
+Those intervals are the block read durations. **One fix per block instead of one
+per ten seconds** — 4 fixes where 114 were due, a 96% loss across the 19 minutes
+the fetch ran. The device writes it down itself: a `DISABLE`/`ENABLE` pair, 16
+bytes apart with nothing between, at 01:53:32, 01:56:21 and 01:59:03 — the
+logger standing its write engine down for each flash read and bringing it back
+between blocks.
+
+This was not known, and it changes the transport calculus well beyond patience:
+
+- a full 5.4 MB image over Bluetooth is 3.5 hours (§11) and now also costs
+  **essentially all recording for those 3.5 hours**;
+- USB does the same job in 95 seconds, so it costs about 95 seconds of logging;
+- an incremental fetch is cheap in both senses, which is a second reason to keep
+  the frontier close rather than letting a fetch grow into a full re-read.
+
+None of this is a fault. It is a single-threaded flash controller doing the only
+thing it can with one bus. But a fetch is no longer free, and **a fetch started
+mid-ride is data loss**, which nothing in the app currently says.
+
+#### Still open
+
+- **The app does not warn that fetching costs recording.** The Dumps tab offers
+  "Fetch new" with no indication that the logger stops writing while it works.
+  That is exactly the shape §12 was about: a deliberate action with a silent
+  cost. It should say so, and say roughly how much.
+- `RECORD_METHOD` (field 6) is **still never queried**, and a format leaves it on
+  STOP. It is not in the flash image either, so this dump could not settle it.
+  One query. Last untested silent-loss path.
+
+### 16.16 The download estimate pays off a debt it took on before it started
+
+Asked while the fetch above was running: why does the time-left figure open very
+high and fall for the whole run?
+
+`progressBps` is a whole-run average — `advanced / elapsed` — chosen over an EMA
+so a burst at a sector boundary cannot talk the estimate down (`932b1fd`). An
+average carries its history, so the estimate can only approach the truth from
+above, by amortisation. That much is by design.
+
+What is not by design: **`etaStartNanos` is armed at the first chunk of the wrap
+probe, and the probe's file position is deliberately pinned.** The transfer
+therefore opens with 165 seconds on the clock and zero bytes against them, and
+spends the rest of the run paying that off.
+
+| Block | Elapsed | Avg rate | Shown | True | Factor |
+|---|---|---|---|---|---|
+| 0x20000 | 325.7 s | 201 B/s | 27.1 min | 13.5 min | 2.01× |
+| 0x30000 | 489.0 s | 268 B/s | 16.3 min | 10.8 min | 1.51× |
+| 0x40000 | 652.1 s | 302 B/s | 10.9 min | 8.1 min | 1.34× |
+| 0x50000 | 815.1 s | 322 B/s | 6.8 min | 5.4 min | 1.26× |
+
+The rate column climbs 201 → 322 B/s while every block sustains about 405 B/s,
+within 2% of every other. It is not measuring the radio.
+
+**This is `d070013` one scope out.** That commit — *"Do not time the first chunk
+against the starting gun"* — fixed the same shape inside a block, where the
+request round trip and the flash read produced a rate an order of magnitude low.
+The wrap probe reintroduced it around the whole transfer. Re-arming
+`etaStartNanos`/`etaStartBytes` at `"resuming download at …"` would have shown
+13.4 min against a truth of 13.5, on the first figure rather than the last.
+
+One thing that looked like a second cause is not: the `+ 2` blocks in
+`etaPointerTargetBytes` and `unwrittenSectorsToStop = 2` are the same two
+blocks. The read stopped at `0x080000`, byte for byte the target the estimate was
+aiming at. It is an exact prediction, not padding, and it leaves the estimate
+free to count honestly to zero. *(An earlier write-up of this called it padding
+and a source of overshoot; watching the fetch finish disproved that.)*
+
+Not fixed in code — recorded here so the next person does not rediscover it.
+
+
 ### The rule
 
 Three, and they are all the same rule seen from different angles.

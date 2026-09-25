@@ -121,18 +121,24 @@ object Pmtk {
      * state the user must be able to *see*. A logger that is not recording
      * looks exactly like one that is, until the trip is over.
      *
-     * **`0x0100` means logging is disabled, and it is worth shouting about.**
-     * Settled on the hardware 2026-09-19: the word flipped `0x0100` ->
-     * `0x0102` the instant `PMTK182,4` was acknowledged, with GPRMC reading
-     * void either side of it, and the logger then sat enabled-but-frozen for
-     * four more minutes until a fix arrived. So the bit follows the *enable
-     * flag*, not the fix: an armed logger waiting for the sky reports `0x0102`,
-     * and only a disabled one reports `0x0100`. §16.11.
+     * **`0x0100` settles nothing, in either direction.** §15.2 said so, this
+     * KDoc overturned it twice on small samples, and the hardware overturned
+     * the overturning both times. The final state of the evidence, §16.14:
      *
-     * What the bit still cannot do is confirm the *good* news. With the switch
-     * in NAV it reports `0x0102` over a frozen pointer (§15.2), and a software
-     * pause does not move it at all (§16.10). Trust it when it says no; verify
-     * with the write pointer when it says yes.
+     *  - all five `0x0100` readings this project has ever taken, 2026-09-07 to
+     *    2026-09-21, were answered while GPRMC read void. The word goes clear
+     *    when the receiver has nothing to log;
+     *  - on 2026-09-21 the fix arrived one second after such a reading and the
+     *    pointer climbed at full rate with **no host command**, so nothing had
+     *    been disabled;
+     *  - yet §12's genuine outage also read `0x0100`, with eight satellites and
+     *    a frozen pointer. The same number, the opposite meaning;
+     *  - and `0x0102` is no better: NAV reports it over a frozen pointer
+     *    (§15.2) and a software pause does not move it (§16.10).
+     *
+     * So do not alarm on this word, and do not be reassured by it. The
+     * discriminator is the write pointer paired with the fix state, which is
+     * what the Device tab computes and what this has always come back to.
      */
     @JvmInline
     value class LogStatus(val bits: Int) {

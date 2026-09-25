@@ -894,33 +894,60 @@ private fun DeviceInfoCard(
             // the opposite of the truth: with the switch in NAV it reports
             // 0x0102 "logging" while the write pointer never moves. Only the
             // pointer above says whether anything is being recorded.
+            // The raw logging bit is **not drawn here**, and its absence is the
+            // fix rather than an omission.
+            //
+            // This card answers one question in the present tense -- is it
+            // recording -- and every other line in it is live: the pointer is
+            // probed on a timer and states its own age. The status word is read
+            // once at connect and after a config write, never again, so beside
+            // them it reads as a live claim and is not one. On 2026-09-21 it sat
+            // saying "NOT logging" over a climbing byte count for a whole
+            // session, because it had been captured in the one second before the
+            // receiver reacquired.
+            //
+            // Dating it was the first attempt and it was the wrong instinct:
+            // an undated line is not ambiguous about time, it asserts *now*, and
+            // annotating a false claim is not the same as removing it. Nor is
+            // the value worth the space once dated -- §16.14 concludes it cannot
+            // condemn a logger or clear one, so on the card whose whole job is
+            // that verdict it can only compete with the reading that can.
+            //
+            // It stays on the Config tab, dated, where it belongs: a settings
+            // readout on the screen you use to change settings. What survives
+            // here is the part that is genuinely actionable and does not flicker
+            // with fix state -- the standing faults below, and the NAV warning,
+            // both of which require a measurement before they say anything.
             reported?.let {
-                Row2("Reported", it.describe())
-
-                // Logging disabled, said out loud. An earlier pass declined to
-                // draw this, on a reading of `data/` that had every `0x0100`
-                // landing while the receiver held no fix -- so it looked like
-                // the ordinary indoor-connect state and alarming on it looked
-                // like crying wolf. That reading was wrong, and the hardware
-                // said so on 2026-09-19: the word flipped to `0x0102` the
-                // moment PMTK182,4 was acked, with no fix either side of it,
-                // and the logger had genuinely been disabled across two
-                // connects. An armed logger waiting for the sky says `0x0102`.
-                // Only a disabled one says this. §16.11.
+                // Logging reported off, and **only** said out loud once a
+                // measurement agrees. The guard is the same one the NAV
+                // warning below uses, and it is here because an unguarded
+                // version shipped and cried wolf on the hardware within two
+                // days: it fired at 07:19:31 on 2026-09-21 against a logger
+                // that was writing at full rate twenty seconds later.
                 //
-                // No probe is required and none is waited for. The cost of
-                // being wrong here is one harmless button press; the cost of
-                // staying quiet is the trip.
-                if (!it.isLoggingEnabled) {
+                // Every `0x0100` this project has ever recorded -- five of
+                // them, 2026-09-07 through 2026-09-21 -- was answered while
+                // GPRMC read void. On the last one the fix arrived one second
+                // after the reading and the pointer climbed at 288 bytes a
+                // minute with no host command at all, so nothing had been
+                // disabled. The word goes clear when the receiver has nothing
+                // to log, which is the state every cold connect is in.
+                //
+                // §15.2 said `0x0100` is ambiguous and always will be, and it
+                // was right; §16.11 overturned that twice and was wrong twice.
+                // The pointer outranks the word. See §16.14.
+                if (!it.isLoggingEnabled && looked && conclusive &&
+                    !recording.lastProbeAdvanced && hasFix
+                ) {
                     Text(
                         "LOGGING IS SWITCHED OFF",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.error,
                     )
                     Text(
-                        "The logger reports logging disabled. This state persists — it " +
-                            "survives a power cycle, and the device does not reliably " +
-                            "clear it on its own. Use Resume logging on the Config tab.",
+                        "The logger reports logging disabled, there is a good fix, and " +
+                            "nothing is reaching flash. Use Resume logging on the Config tab.",
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Text(
@@ -1606,7 +1633,15 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
 
     SectionCard("Recording") {
         val status = Pmtk.LogStatus.parse(info.logStatus)
+        var now by remember { mutableStateOf(System.nanoTime()) }
+        LaunchedEffect(Unit) { while (true) { now = System.nanoTime(); delay(1_000) } }
         Row2("Status", status?.describe() ?: info.logStatus)
+        Text(
+            "Read ${describeAgo((now - info.logStatusAtNanos) / 1e9)}. This row is not " +
+                "refreshed while connected.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
         // Standing faults come first and in error colour, because they are the
         // one thing in this word that is unambiguous. A cleared logging bit is
@@ -1634,13 +1669,13 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
         // the switch in NAV it claims `0x0102` over a frozen pointer (§15.2),
         // and a software pause does not move it at all (§16.10).
         Text(
-            "The device's own claim, and it is only trustworthy in one direction. " +
-                "\"NOT logging\" is real — a logger that is merely waiting for a fix " +
-                "still reports \"logging\" — so treat it as a fault and use Resume " +
-                "logging. \"Logging\" proves nothing on its own: it reads the same " +
-                "with the slide switch in NAV, and it does not change when logging " +
-                "is paused. Only the Device tab's recording indicator, which reads " +
-                "the write pointer, can confirm anything is actually being written.",
+            "The device's own claim, read once when you connected, and it settles " +
+                "nothing on its own. It goes to \"NOT logging\" whenever the receiver " +
+                "has no fix — which is every cold connect — and back again a second " +
+                "after the sky comes into view, with no command sent. It also reads " +
+                "\"logging\" with the slide switch in NAV, over a pointer that never " +
+                "moves. Only the Device tab's recording indicator, which pairs the " +
+                "write pointer with the fix, can tell you anything.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

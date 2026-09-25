@@ -47,6 +47,18 @@ data class DeviceInfo(
     val logFormat: LogFormat,
     val timeIntervalSeconds: Double,
     val logStatus: String,
+    /**
+     * When [logStatus] was read, as `System.nanoTime()`.
+     *
+     * Carried with the value because the value is only ever read at connect and
+     * after a config write -- never on a timer -- so by mid-session it can be
+     * hours old while the UI renders it in the present tense. That is not
+     * hypothetical: it put "NOT logging" on screen beside a live byte count on
+     * 2026-09-21, and the word had been captured in the one second before the
+     * receiver reacquired (§16.14). A property of the data, stored with the
+     * data -- the rule §16 ends on.
+     */
+    val logStatusAtNanos: Long,
     val needsWeekRollover: Boolean,
     /** Decoded flash identity, or null if the device answered unrecognisably. */
     val flash: Pmtk.FlashId?,
@@ -701,6 +713,7 @@ class SessionController(
                 logFormat = format,
                 timeIntervalSeconds = interval,
                 logStatus = status,
+                logStatusAtNanos = System.nanoTime(),
                 needsWeekRollover = firmware.needsWeekRollover,
                 flash = flash,
                 writePointer = pointer,
@@ -2001,9 +2014,17 @@ class SessionController(
         // Re-read the log status too. Without this the recording indicator kept
         // whatever it said at connect, so pausing or resuming logging changed
         // the device and not the one row in the UI that reports it.
-        val status = runCatching { c.queryLogStatus() }.getOrDefault(current.info.logStatus)
+        // Keep the reading and its age together. On the failure path the old
+        // value is retained, so the old *timestamp* must be too -- stamping a
+        // kept value with `now` would relabel a stale reading as fresh, which
+        // is the exact lie this field exists to prevent.
+        val previous = current.info.logStatus
+        val status = runCatching { c.queryLogStatus() }.getOrDefault(previous)
+        val statusAt =
+            if (status === previous) current.info.logStatusAtNanos else System.nanoTime()
         _connection.value = ConnectionState.Connected(
             current.info.copy(
+                logStatusAtNanos = statusAt,
                 logFormat = format,
                 timeIntervalSeconds = interval,
                 logStatus = status,

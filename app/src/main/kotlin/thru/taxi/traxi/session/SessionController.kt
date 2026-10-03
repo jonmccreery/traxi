@@ -22,6 +22,7 @@ import thru.taxi.traxi.core.protocol.PmtkClient
 import thru.taxi.traxi.core.protocol.RingTranscript
 import thru.taxi.traxi.core.protocol.Telemetry
 import thru.taxi.traxi.core.protocol.TelemetryAssembler
+import thru.taxi.traxi.core.protocol.WritePointerSchedule
 import thru.taxi.traxi.core.transport.SimulatedLoggerTransport
 import thru.taxi.traxi.core.transport.Transport
 import thru.taxi.traxi.usb.UsbSerialTransport
@@ -166,7 +167,59 @@ data class RecordingActivity(
      * moved 30 s after connecting, and is perfectly healthy.
      */
     val lastProbeGapNanos: Long = 0L,
-)
+    /**
+     * How long the receiver had held a fix, unbroken, when the pointer was
+     * last read; 0 if it had none.
+     *
+     * A frozen pointer accuses the logger only if there was something to
+     * write, and that has to be judged *at the moment of the reading*. The
+     * card used to pair an old reading with the fix state of the present: on
+     * 2026-10-02 the pointer was read 20 s after connect, before the sky was
+     * acquired; the fix arrived at 2m13s, and the card then showed NOT
+     * RECORDING for eight minutes over a logger writing every fix. Nothing
+     * had been measured under a fix at all.
+     */
+    val lastProbeFixedNanos: Long = 0L,
+) {
+    /** What the Device tab may honestly say, from the last reading alone. */
+    enum class Verdict {
+        /** Not looked yet, or looked too soon to judge. */
+        CHECKING,
+        RECORDING,
+        /** Frozen, but there was no fix to write. Not a fault. */
+        NO_FIX,
+        /** Frozen with no fix when read; a fix has come since. Not yet judged. */
+        FIX_SINCE_LAST_CHECK,
+        /** Frozen across a full window in which the receiver held a fix. */
+        NOT_RECORDING,
+    }
+
+    /**
+     * The window a frozen reading actually covers *with a fix*: the shorter
+     * of the gap since the previous reading and how long the fix had held.
+     */
+    val frozenUnderFixNanos: Long
+        get() = minOf(lastProbeGapNanos, lastProbeFixedNanos)
+
+    /**
+     * @param logIntervalSeconds the logger's own log interval.
+     * @param hasFixNow whether the receiver has a fix at present. It only
+     *   chooses between the two blameless readings; it never turns a
+     *   reading into an accusation, because it was not true when the
+     *   pointer was read.
+     */
+    fun verdict(logIntervalSeconds: Double, hasFixNow: Boolean): Verdict {
+        val window = (logIntervalSeconds * 1.5 * 1e9).toLong()
+        return when {
+            lastProbeAtNanos == 0L -> Verdict.CHECKING
+            lastProbeAdvanced -> Verdict.RECORDING
+            lastProbeGapNanos <= window -> Verdict.CHECKING
+            frozenUnderFixNanos > window -> Verdict.NOT_RECORDING
+            hasFixNow -> Verdict.FIX_SINCE_LAST_CHECK
+            else -> Verdict.NO_FIX
+        }
+    }
+}
 
 /**
  * Whether bytes are arriving, as distinct from whether a link exists.
@@ -355,6 +408,8 @@ class SessionController(
 
     /** When the current session connected, the first sample's starting edge. */
     private var connectedAtNanos: Long = 0L
+    /** Start of the current unbroken run of fixes; 0 when there is none. */
+    private var fixRunSinceNanos: Long = 0L
 
     // Download throughput meter. Rate is smoothed because chunks arrive in
     // bursts -- ~30 ms apart over USB, several seconds apart over Bluetooth.
@@ -981,6 +1036,8 @@ class SessionController(
     /** Record that a position fix just arrived, for the Live heartbeat. */
     private fun noteFixArrived() {
         val now = System.nanoTime()
+        val prev = _liveActivity.value.lastFixAtNanos
+        if (prev == 0L || now - prev >= FIX_RECENT_NANOS) fixRunSinceNanos = now
         val rate: Double
         synchronized(fixTimestamps) {
             fixTimestamps.addLast(now)
@@ -1022,6 +1079,13 @@ class SessionController(
             lastProbeAtNanos = now,
             lastProbeAdvanced = advanced,
             lastProbeGapNanos = if (since != 0L) now - since else 0L,
+            lastProbeFixedNanos = _liveActivity.value.lastFixAtNanos.let { fixAt ->
+                if (fixAt != 0L && now - fixAt < FIX_RECENT_NANOS && fixRunSinceNanos != 0L) {
+                    now - fixRunSinceNanos
+                } else {
+                    0L
+                }
+            },
         )
     }
 
@@ -1049,6 +1113,7 @@ class SessionController(
         )
         synchronized(fixTimestamps) { fixTimestamps.clear() }
         _liveActivity.value = LiveActivity()
+        fixRunSinceNanos = 0L
         _linkHealth.value = LinkHealth()
         c.onSentence = { sentence ->
             if (assembler.accept(sentence)) _telemetry.value = assembler.current
@@ -1101,7 +1166,11 @@ class SessionController(
                 ?.info?.timeIntervalSeconds ?: 10.0).coerceAtLeast(1.0) * 1e9).toLong()
             val firstProbeNanos =
                 maxOf(logIntervalNanos * 2, MIN_FIRST_WRITE_PROBE_NANOS)
-            var probeIntervalNanos = minOf(firstProbeNanos, steadyProbeNanos)
+            // ...counted from the first fix, not from connect: nothing is
+            // written without one, so a pre-flight fired under an empty sky
+            // spends its request on a pointer that cannot move. Learned by
+            // listening; see [WritePointerSchedule].
+            var probedYet = false
             while (isActive) {
                 // A read while another operation holds the lock would take
                 // bytes belonging to that operation.
@@ -1151,11 +1220,19 @@ class SessionController(
                 // link still surfaces -- through the ACL-disconnect broadcast
                 // (watchLink), which is the real signal, not a guess from silence.
                 val now = System.nanoTime()
-                if (now - lastProbeNanos >= probeIntervalNanos && bytesSincePump > 0) {
+                val due = WritePointerSchedule.isDue(
+                    nowNanos = now,
+                    lastProbeNanos = lastProbeNanos,
+                    firstFixNanos = fixRunSinceNanos.takeIf { it != 0L },
+                    probedYet = probedYet,
+                    preflightNanos = firstProbeNanos,
+                    steadyNanos = steadyProbeNanos,
+                )
+                if (due && bytesSincePump > 0) {
                     lastProbeNanos = now
                     bytesSincePump = 0
                     // After the first, settle to whatever this link tolerates.
-                    probeIntervalNanos = steadyProbeNanos
+                    probedYet = true
                     val ptr = try {
                         readLock.withLock { c.queryWritePointer() }
                     } catch (e: kotlinx.coroutines.CancellationException) {
@@ -1197,6 +1274,7 @@ class SessionController(
         client?.onSentence = null
         _telemetry.value = null
         _liveActivity.value = LiveActivity()
+        fixRunSinceNanos = 0L
         _recording.value = RecordingActivity()
         _linkHealth.value = LinkHealth()
         // The verdict describes the interval this session closed, so it goes
@@ -2206,9 +2284,9 @@ class SessionController(
     /**
      * Floor on the pre-flight write-pointer probe.
      *
-     * The pre-flight itself is timed at twice the configured log interval --
-     * the earliest point a healthy log is certain to have advanced past the
-     * connect-time baseline. This floor only stops a very short interval from
+     * The pre-flight itself is timed at twice the configured log interval
+     * after the first fix -- the earliest point a healthy log is certain to
+     * have advanced past the connect-time baseline. This floor only stops a very short interval from
      * turning that into a query within a second or two of connecting, when the
      * link is at its least settled.
      *

@@ -899,33 +899,30 @@ private fun DeviceInfoCard(
             // of its life stale -- and decayed into shouting NOT RECORDING at a
             // logger that was recording perfectly. A false alarm here is worse
             // than no alarm: it is the one reading the user is asked to trust.
-            val looked = recording.lastProbeAtNanos != 0L
-            // A no-movement verdict only means something across a window longer
-            // than the log interval; below that, a healthy logger has genuinely
-            // written nothing yet.
-            val conclusive = recording.lastProbeGapNanos >
-                (info.timeIntervalSeconds * 1.5 * 1e9).toLong()
             val checkedAgo = (now - recording.lastProbeAtNanos) / 1e9
             // A frozen pointer means nothing without knowing whether the
             // receiver had anything to write. Indoors this logger holds no fix
             // for hours and correctly records nothing; calling that "not
             // recording" is a false alarm on the one reading that must never
-            // cry wolf.
+            // cry wolf. Whether it *had* a fix is judged when the pointer was
+            // read, inside [RecordingActivity.verdict]; the fix state of the
+            // present only picks the wording of a blameless reading.
             val hasFix = activity.lastFixAtNanos != 0L &&
                 (now - activity.lastFixAtNanos) < FIX_RECENT_NANOS
-            when {
+            val verdict = recording.verdict(info.timeIntervalSeconds, hasFix)
+            when (verdict) {
                 // Says how long the wait is rather than leaving it open-ended:
                 // the pre-flight probe lands about two log intervals after
                 // connecting, and a silent "checking…" that might mean anything
                 // is its own small alarm.
-                !looked || (!recording.lastProbeAdvanced && !conclusive) ->
+                RecordingActivity.Verdict.CHECKING ->
                     Row2(
                         "Recording",
                         "checking… (about %.0f s)".format(
                             (info.timeIntervalSeconds * 2).coerceAtLeast(10.0)),
                     )
 
-                recording.lastProbeAdvanced -> {
+                RecordingActivity.Verdict.RECORDING -> {
                     Text(
                         "RECORDING",
                         style = MaterialTheme.typography.titleMedium,
@@ -948,7 +945,7 @@ private fun DeviceInfoCard(
 
                 // Nothing was written, and nothing was available to write. Not
                 // a fault, and deliberately not styled as one.
-                !hasFix -> {
+                RecordingActivity.Verdict.NO_FIX -> {
                     Row2("Recording", "no fix — nothing to record")
                     Text(
                         "No position, so there is nothing to write. Normal indoors and " +
@@ -958,7 +955,22 @@ private fun DeviceInfoCard(
                     )
                 }
 
-                else -> {
+                // The last reading was taken with no fix, so it could not have
+                // moved; the fix came after. Nothing has been measured under a
+                // fix yet, and the card says exactly that until the next
+                // scheduled reading does -- it does not ask for one.
+                RecordingActivity.Verdict.FIX_SINCE_LAST_CHECK -> {
+                    Row2("Recording", "not checked since the fix")
+                    Text(
+                        ("Last checked %s, before the fix — nothing to write then. " +
+                            "The next scheduled check will confirm.").format(
+                            describeAgo(checkedAgo)),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+
+                RecordingActivity.Verdict.NOT_RECORDING -> {
                     Text(
                         "NOT RECORDING",
                         style = MaterialTheme.typography.titleMedium,
@@ -967,7 +979,7 @@ private fun DeviceInfoCard(
                     Text(
                         ("Good fix, pointer unmoved after %.0f s. Checked %s. " +
                             "Fixes are being lost.").format(
-                            recording.lastProbeGapNanos / 1e9, describeAgo(checkedAgo)),
+                            recording.frozenUnderFixNanos / 1e9, describeAgo(checkedAgo)),
                         style = MaterialTheme.typography.bodySmall,
                     )
                     // The switch comes first because it is the likelier cause
@@ -1030,8 +1042,8 @@ private fun DeviceInfoCard(
                 // §15.2 said `0x0100` is ambiguous and always will be, and it
                 // was right; §16.11 overturned that twice and was wrong twice.
                 // The pointer outranks the word. See §16.14.
-                if (!it.isLoggingEnabled && looked && conclusive &&
-                    !recording.lastProbeAdvanced && hasFix
+                if (!it.isLoggingEnabled &&
+                    verdict == RecordingActivity.Verdict.NOT_RECORDING
                 ) {
                     Text(
                         "LOGGING IS SWITCHED OFF",
@@ -1066,13 +1078,14 @@ private fun DeviceInfoCard(
                     )
                 }
 
-                // `looked && conclusive` is the whole guard, and leaving it out
-                // was a bug: lastProbeAdvanced is false before any probe has
+                // NOT_RECORDING is the whole guard. Leaving out "has it looked"
+                // was a bug once: lastProbeAdvanced is false before any probe has
                 // run, so connecting to a healthy logger in LOG mode fired this
-                // in red immediately, on no evidence whatsoever. An accusation
-                // needs a measurement behind it, not the absence of one.
-                if (it.isLoggingEnabled && looked && conclusive &&
-                    !recording.lastProbeAdvanced && hasFix
+                // in red immediately, on no evidence whatsoever. Pairing a reading
+                // taken before the fix with a fix that came after was the same
+                // bug again. An accusation needs a measurement behind it.
+                if (it.isLoggingEnabled &&
+                    verdict == RecordingActivity.Verdict.NOT_RECORDING
                 ) {
                     Text(
                         "The logger itself claims logging is on, so the switch is the " +

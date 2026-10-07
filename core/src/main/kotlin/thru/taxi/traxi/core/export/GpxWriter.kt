@@ -33,14 +33,21 @@ class GpxWriter(
             .withZone(java.time.ZoneOffset.UTC)
 
     fun write(fixes: List<Fix>, out: Writer, trackName: String = "MTK log") {
-        val positioned = fixes.filter { it.hasPosition }
+        // A non-finite coordinate is not a place and has no GPX spelling.
+        val positioned = fixes.filter {
+            it.hasPosition && it.latitude!!.isFinite() && it.longitude!!.isFinite()
+        }
         val waypoints = positioned.filter { it.isWaypoint }
         val segments = Quality.segment(positioned, gapSeconds)
 
         out.write("""<?xml version="1.0" encoding="UTF-8"?>${'\n'}""")
         out.write(
             """<gpx version="1.1" creator="$creator" """ +
-                """xmlns="http://www.topografix.com/GPX/1/1">${'\n'}"""
+                """xmlns="http://www.topografix.com/GPX/1/1" """ +
+                // The extensions below use this prefix. Undeclared, it made
+                // every export malformed XML, which strict readers reject
+                // outright -- and a per-day GPX exists to be shared.
+                """xmlns:btd="$EXTENSION_NAMESPACE">${'\n'}"""
         )
 
         for (fix in waypoints) writeWaypoint(fix, out)
@@ -61,8 +68,10 @@ class GpxWriter(
 
     private fun writePoint(tag: String, fix: Fix, out: Writer) {
         // Full precision, deliberately. See the class comment.
-        out.write("""<$tag lat="${fix.latitude}" lon="${fix.longitude}">""")
-        fix.height?.let { out.write("<ele>$it</ele>") }
+        out.write("""<$tag lat="${plain(fix.latitude!!)}" lon="${plain(fix.longitude!!)}">""")
+        // NaN or infinite flash has no xsd:decimal spelling; omit the element
+        // rather than write a file a validating reader rejects whole.
+        fix.height?.takeIf { it.isFinite() }?.let { out.write("<ele>${plain(it)}</ele>") }
         out.write("<time>${timestamps.format(fix.instant)}</time>")
 
         if (tag == "wpt") out.write("<sym>Flag</sym>")
@@ -79,8 +88,8 @@ class GpxWriter(
             }
         }
         fix.satellitesInUse?.let { out.write("<sat>$it</sat>") }
-        fix.hdop?.let { out.write("<hdop>${it / 100.0}</hdop>") }
-        fix.vdop?.let { out.write("<vdop>${it / 100.0}</vdop>") }
+        fix.hdop?.let { out.write("<hdop>${plain(it / 100.0)}</hdop>") }
+        fix.vdop?.let { out.write("<vdop>${plain(it / 100.0)}</vdop>") }
 
         if (includeExtensions && (fix.speed != null || fix.rcr != null)) {
             out.write("<extensions>")
@@ -91,7 +100,19 @@ class GpxWriter(
         out.write("</$tag>\n")
     }
 
+    /**
+     * The same shortest round-trip digits Kotlin prints, without the exponent.
+     * `0.00005.toString()` is `5.0E-5`, which `xsd:decimal` does not accept --
+     * and the equator, the prime meridian and sea level are all real places.
+     */
+    private fun plain(d: Double): String = java.math.BigDecimal(d.toString()).toPlainString()
+    private fun plain(f: Float): String = java.math.BigDecimal(f.toString()).toPlainString()
+
     private fun escape(s: String): String = s
         .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         .replace("\"", "&quot;")
+
+    companion object {
+        const val EXTENSION_NAMESPACE = "urn:thru.taxi.traxi:gpx-extensions:1"
+    }
 }

@@ -290,6 +290,13 @@ data class EraseState(
 data class MarkProofState(
     val awaitingPress: Boolean = false,
     val baseline: Long? = null,
+    /**
+     * When the baseline was taken. The ceremony waits on a human, so this gap
+     * is minutes rather than the couple of seconds the two queries take, and
+     * the interval timer writes throughout it -- which is what decides whether
+     * the press can be told apart from ordinary logging.
+     */
+    val baselineAtNanos: Long? = null,
     val busy: Boolean = false,
     val result: MarkProof.Result? = null,
 )
@@ -2010,7 +2017,11 @@ class SessionController(
                     )
                 )
             } else {
-                MarkProofState(awaitingPress = true, baseline = ptr)
+                MarkProofState(
+                    awaitingPress = true,
+                    baseline = ptr,
+                    baselineAtNanos = System.nanoTime(),
+                )
             }
             onDone()
         }
@@ -2026,6 +2037,7 @@ class SessionController(
     fun confirmMarkProof(onDone: () -> Unit = {}) {
         val c = client ?: run { _message.value = "Not connected"; onDone(); return }
         val baseline = _markProof.value.baseline
+        val baselineAt = _markProof.value.baselineAtNanos
         _markProof.value = _markProof.value.copy(busy = true)
         launchExclusive {
             val ptr = runCatching { c.queryWritePointer() }.getOrNull()
@@ -2044,6 +2056,11 @@ class SessionController(
                             ?.info?.logFormat?.recordSizeWithChecksum() ?: 0
                     }.getOrDefault(0),
                     hadFix = hadFix,
+                    elapsedSeconds = baselineAt?.let {
+                        (System.nanoTime() - it) / 1_000_000_000.0
+                    },
+                    intervalSeconds = (_connection.value as? ConnectionState.Connected)
+                        ?.info?.timeIntervalSeconds?.takeIf { it > 0 },
                 )
             )
             transcript.note("mark-button proof: ${_markProof.value.result}")

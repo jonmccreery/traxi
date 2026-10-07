@@ -2,6 +2,7 @@ package thru.taxi.traxi.core.format
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -16,6 +17,108 @@ import kotlin.test.assertTrue
 class MarkProofTest {
 
     private val record = LogFormat.WITH_SATELLITE_QUALITY.recordSizeWithChecksum()
+
+    // ---- can the press be told apart from the interval timer? ----
+    //
+    // Recorded on the hardware 2026-09-25: the card sat waiting on a human for
+    // four minutes at a 10 s interval, 21 records landed, and it announced that
+    // the beep "covered one real write". Twenty-one is what the timer writes on
+    // its own across that window. The proof of recording was sound; the beep
+    // claim was not, and nothing in the code could tell the two apart.
+
+    @Test
+    fun `a wait longer than the interval cannot isolate the press`() {
+        val v = MarkProof.of(
+            before = 0L,
+            after = 21L * record,
+            recordBytes = record,
+            hadFix = true,
+            elapsedSeconds = 240.0,
+            intervalSeconds = 10.0,
+        )
+        assertIs<MarkProof.Result.Proven>(v)
+        // Recording is still proven: the bytes are real and the count stands.
+        assertEquals(21L, v.records)
+        // The timer alone accounts for 24 ticks, plus one for phase.
+        assertEquals(25L, v.explainedByInterval)
+        assertFalse(v.markIsolated, "21 records is what the timer writes anyway")
+    }
+
+    @Test
+    fun `more than the timer can explain does isolate the press`() {
+        val v = MarkProof.of(
+            before = 0L,
+            after = 4L * record,
+            recordBytes = record,
+            hadFix = true,
+            elapsedSeconds = 20.0,   // two ticks, plus one for phase
+            intervalSeconds = 10.0,
+        )
+        assertIs<MarkProof.Result.Proven>(v)
+        assertEquals(3L, v.explainedByInterval)
+        assertTrue(v.markIsolated, "a fourth record the timer cannot account for")
+    }
+
+    @Test
+    fun `the phase allowance is what stops a false isolation at the boundary`() {
+        // 240 s at 10 s is 24 ticks, but a window out of phase at both ends
+        // fits 25. Without the allowance a 25-record advance would be read as
+        // "one more than the timer could write" and credited to the press --
+        // the exact over-claim this arithmetic exists to prevent, arriving at
+        // the one count where it is most believable.
+        val v = MarkProof.of(
+            before = 0L,
+            after = 25L * record,
+            recordBytes = record,
+            hadFix = true,
+            elapsedSeconds = 240.0,
+            intervalSeconds = 10.0,
+        )
+        assertIs<MarkProof.Result.Proven>(v)
+        assertEquals(25L, v.records)
+        assertFalse(v.markIsolated, "25 records still fits a timer out of phase")
+
+        // One more, and it no longer does.
+        val next = MarkProof.of(
+            before = 0L,
+            after = 26L * record,
+            recordBytes = record,
+            hadFix = true,
+            elapsedSeconds = 240.0,
+            intervalSeconds = 10.0,
+        )
+        assertIs<MarkProof.Result.Proven>(next)
+        assertTrue(next.markIsolated, "26 is past everything the timer explains")
+    }
+
+    @Test
+    fun `an unknown interval never counts as a timer that wrote nothing`() {
+        // The dangerous reading. Treating "unknown" as zero hands the whole
+        // advance to the press and restores exactly the claim this prevents.
+        for (pair in listOf(null to 10.0, 240.0 to null, 240.0 to 0.0, -1.0 to 10.0)) {
+            val v = MarkProof.of(
+                before = 0L,
+                after = 21L * record,
+                recordBytes = record,
+                hadFix = true,
+                elapsedSeconds = pair.first,
+                intervalSeconds = pair.second,
+            )
+            assertIs<MarkProof.Result.Proven>(v)
+            assertEquals(null, v.explainedByInterval, "for $pair")
+            assertFalse(v.markIsolated, "unknown must not be read as isolated, for $pair")
+        }
+    }
+
+    @Test
+    fun `callers that know neither figure still get a verdict`() {
+        // Every existing caller and test omits both arguments; the proof of
+        // recording must not depend on them.
+        val v = MarkProof.of(0L, record.toLong(), record, hadFix = true)
+        assertIs<MarkProof.Result.Proven>(v)
+        assertEquals(1L, v.records)
+        assertEquals(null, v.explainedByInterval)
+    }
 
     @Test
     fun `one record's advance proves the whole chain`() {

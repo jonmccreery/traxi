@@ -153,10 +153,31 @@ private fun ProveRecordingCard(
                         // implication on its own -- a beep that fires on every
                         // press is worth nothing -- so this says what it has
                         // shown and points at the run that would settle it.
+                        // The beep claim is the weakest thing on this card and
+                        // the only one that can be wrong while RECORDING --
+                        // PROVEN is right. It holds only when more landed than
+                        // the interval timer can account for, and with a human
+                        // in the loop it usually cannot: on 2026-09-25 the wait
+                        // ran four minutes at a 10 s interval and every one of
+                        // the 21 records was the timer's. The card now does that
+                        // arithmetic instead of asserting through it.
+                        val explained = result.explainedByInterval
                         Text(
-                            "If it beeped, that beep covered one real write. Re-run with " +
-                                "logging paused: if it still beeps, it only means the " +
-                                "press registered.",
+                            when {
+                                result.markIsolated ->
+                                    "If it beeped, that beep covered a write the timer " +
+                                        "cannot explain. Re-run with logging paused: a " +
+                                        "beep then means only the press registered."
+
+                                explained != null ->
+                                    ("The interval timer explains up to %,d of those on " +
+                                        "its own, so the beep is not tied to your press. " +
+                                        "Re-run with logging paused.").format(explained)
+
+                                else ->
+                                    "Re-run with logging paused to learn what the beep is " +
+                                        "worth: a beep then means only the press registered."
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

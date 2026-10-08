@@ -55,6 +55,17 @@ class CdtDaysTest {
     }
 
     @Test
+    fun `the five rides are their own tracks`() {
+        // Measured 2026-10-07: 16, 4, 3, 20 and 29 minutes at up to 123 km/h,
+        // 99 km in all -- including the ride into town on 2025-08-20 that
+        // once booked 44 km of walking.
+        val rides = carve.days.flatMap { it.rides }
+        assertEquals(5, rides.size)
+        assertTrue(rides.any { it.start.toString().startsWith("2025-08-20") && it.stats.rawMetres > 35_000 })
+        assertEquals(99.0, carve.days.sumOf { it.rideStats.rawMetres } / 1000, 1.0)
+    }
+
+    @Test
     fun `cleaned distance never exceeds raw`() {
         for (day in carve.days) {
             assertTrue(day.stats.cleanedMetres <= day.stats.rawMetres + 1e-6, "day ${day.number}")

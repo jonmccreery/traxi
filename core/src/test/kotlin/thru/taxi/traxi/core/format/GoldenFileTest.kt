@@ -237,9 +237,12 @@ class GoldenFileTest {
     @Test
     fun `quality filter removes the unusable fixes without touching the rest`() {
         val filtered = Quality.filter(result.fixes)
-        // 13 NO_FIX (one of which is the sentinel) + 8 ESTIMATED.
+        // 13 NO_FIX (one of which is the sentinel) + 8 ESTIMATED. Three of the
+        // twelve are button presses a real fix places within 100 m, and are
+        // kept; three more carry the chip's stale stored position and are not.
         assertEquals(1, filtered.rejected[Quality.Rejection.SENTINEL])
-        assertEquals(12, filtered.rejected[Quality.Rejection.NO_FIX])
+        assertEquals(9, filtered.rejected[Quality.Rejection.NO_FIX])
+        assertEquals(3, filtered.rescuedMarks)
         assertEquals(8, filtered.rejected[Quality.Rejection.ESTIMATED])
         assertTrue(filtered.kept.size > result.fixes.size - 100)
     }

@@ -36,9 +36,33 @@ object Quality {
     data class Filtered(
         val kept: List<Fix>,
         val rejected: Map<Rejection, Int>,
+        /** Button presses flagged NO_FIX but kept by [MarkRescue]; already in [kept]. */
+        val rescuedMarks: Int = 0,
     ) {
         val rejectedCount: Int get() = rejected.values.sum()
     }
+
+    /**
+     * When a button press flagged NO_FIX is still believed.
+     *
+     * A press is the only data in the log a person chose to make, and the chip
+     * often has no solution at the moment of it -- 7 of the reference dump's
+     * 1,419 marks are NO_FIX. So a NO_FIX press is kept when a believed fix
+     * within [maxSeconds], before or after, puts the walker within [maxMetres]
+     * of it.
+     *
+     * Either side, because the first press of a morning comes before the
+     * first fix: the previous one is last night's. Not the previous fix
+     * alone, because those morning presses carry the chip's stored position,
+     * which matches last night to the metre and is no witness at all -- three
+     * on the reference dump sit 1.0-1.5 km from the first real fix 20-211 s
+     * later. Of the seven, three pass (23-52 m out); the stale three and the
+     * 90N sentinel do not.
+     */
+    data class MarkRescue(
+        val maxMetres: Double = 100.0,
+        val maxSeconds: Long = 300,
+    )
 
     /**
      * Apply sentinel masking, quality masking, and spike rejection.
@@ -48,26 +72,56 @@ object Quality {
      * 90.0 - and testing height alone would reject 16 genuine elevations that
      * merely round to 150.0 when formatted to one decimal.
      */
-    fun filter(fixes: List<Fix>, config: SpikeConfig = SpikeConfig()): Filtered {
+    fun filter(
+        fixes: List<Fix>,
+        config: SpikeConfig = SpikeConfig(),
+        rescue: MarkRescue = MarkRescue(),
+    ): Filtered {
         val rejected = mutableMapOf<Rejection, Int>()
         fun reject(r: Rejection) { rejected[r] = (rejected[r] ?: 0) + 1 }
 
-        val surviving = fixes.filter { fix ->
+        fun believed(fix: Fix) = fix.hasPosition && !fix.isSentinel &&
+            fix.quality != FixQuality.NO_FIX && fix.quality != FixQuality.ESTIMATED
+
+        val surviving = mutableListOf<Fix>()
+        var rescued = 0
+        for ((i, fix) in fixes.withIndex()) {
             when {
-                !fix.hasPosition -> { reject(Rejection.NO_POSITION); false }
-                fix.isSentinel -> { reject(Rejection.SENTINEL); false }
-                fix.quality == FixQuality.NO_FIX -> { reject(Rejection.NO_FIX); false }
-                fix.quality == FixQuality.ESTIMATED -> { reject(Rejection.ESTIMATED); false }
-                else -> true
+                !fix.hasPosition -> reject(Rejection.NO_POSITION)
+                fix.isSentinel -> reject(Rejection.SENTINEL)
+                fix.quality == FixQuality.NO_FIX ->
+                    if (fix.isWaypoint && witnessed(fixes, i, ::believed, rescue)) {
+                        surviving += fix; rescued++
+                    } else {
+                        reject(Rejection.NO_FIX)
+                    }
+                fix.quality == FixQuality.ESTIMATED -> reject(Rejection.ESTIMATED)
+                else -> surviving += fix
             }
         }
 
         val spikes = findElevationSpikes(surviving, config)
-        if (spikes.isEmpty()) return Filtered(surviving, rejected)
+        if (spikes.isEmpty()) return Filtered(surviving, rejected, rescued)
 
         rejected[Rejection.ELEVATION_SPIKE] = spikes.size
         val kept = surviving.filterIndexed { i, _ -> i !in spikes }
-        return Filtered(kept, rejected)
+        return Filtered(kept, rejected, rescued - spikes.count { surviving[it].quality == FixQuality.NO_FIX })
+    }
+
+    /** Whether the nearest believed fix on either side vouches for [fixes]`[i]`. */
+    private fun witnessed(
+        fixes: List<Fix>,
+        i: Int,
+        believed: (Fix) -> Boolean,
+        rescue: MarkRescue,
+    ): Boolean {
+        val mark = fixes[i]
+        val before = (i - 1 downTo 0).firstOrNull { believed(fixes[it]) }?.let { fixes[it] }
+        val after = (i + 1 until fixes.size).firstOrNull { believed(fixes[it]) }?.let { fixes[it] }
+        return listOfNotNull(before, after).any {
+            kotlin.math.abs(it.epochSeconds - mark.epochSeconds) <= rescue.maxSeconds &&
+                thru.taxi.traxi.core.analysis.DayCarver.metres(it, mark) <= rescue.maxMetres
+        }
     }
 
     /** Indices in [fixes] whose elevation departs too far from the local median. */

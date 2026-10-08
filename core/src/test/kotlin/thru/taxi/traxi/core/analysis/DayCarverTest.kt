@@ -12,11 +12,13 @@ class DayCarverTest {
     private val t0 = 1_750_000_000L          // an arbitrary daytime start
 
     /** ~1.11 m of latitude per 1e-5 degree. */
-    private fun fix(t: Long, lat: Double, lon: Double = -105.0, h: Float = 3000f, rcr: Int = 1) =
-        Fix(
-            utcRaw = 0, epochSeconds = t, valid = FixQuality.DGPS.code,
-            latitude = lat, longitude = lon, height = h, rcr = rcr,
-        )
+    private fun fix(
+        t: Long, lat: Double, lon: Double = -105.0, h: Float = 3000f, rcr: Int = 1,
+        speed: Float? = null,
+    ) = Fix(
+        utcRaw = 0, epochSeconds = t, valid = FixQuality.DGPS.code,
+        latitude = lat, longitude = lon, height = h, rcr = rcr, speed = speed,
+    )
 
     /** A straight walk north at ~1.1 m/s, one fix per 10 s. */
     private fun walk(from: Long, seconds: Long, lat0: Double = 40.0): List<Fix> =
@@ -81,6 +83,38 @@ class DayCarverTest {
         val solarMidnight = java.time.Instant.ofEpochSecond(t0).atOffset(java.time.ZoneOffset.UTC)
             .toLocalDate().plusDays(1).atTime(7, 0).toEpochSecond(java.time.ZoneOffset.UTC)
         assertEquals(walked.first { it.epochSeconds >= solarMidnight }.instant, days[1].start)
+    }
+
+    @Test
+    fun `a car ride is its own track and none of the walking`() {
+        val before = walk(t0, hour)
+        // Ten minutes at 90 km/h, with the logger's speed field saying so,
+        // and a 40 s stoplight in the middle that must not end the ride.
+        val start = before.last()
+        val ride = (1..60).map { i ->
+            val light = i in 30..33
+            fix(start.epochSeconds + i * 10, start.latitude!! + (if (i < 30) i else i - 4) * 2.25e-3,
+                speed = if (light) 0f else 90f)
+        }
+        val after = walk(ride.last().epochSeconds + 10, hour, lat0 = ride.last().latitude!!)
+        val day = DayCarver.carve(before + ride + after).days.single()
+
+        assertEquals(
+            listOf(DayCarver.Mode.FOOT, DayCarver.Mode.VEHICLE, DayCarver.Mode.FOOT),
+            day.segments.map { it.mode },
+        )
+        assertTrue(day.gaps.isEmpty(), "getting in a car is not a gap")
+        assertEquals(ride, day.rides.single().fixes)
+        assertTrue(day.rideStats.rawMetres > 13_000, "ride ${day.rideStats.rawMetres}")
+        assertTrue(day.stats.rawMetres < 10_000, "walking ${day.stats.rawMetres}")
+    }
+
+    @Test
+    fun `a spike is not a ride`() {
+        val before = walk(t0, 600)
+        val spike = fix(before.last().epochSeconds + 10, 41.0)
+        val after = walk(spike.epochSeconds + 10, 600, lat0 = before.last().latitude!! + 1e-4)
+        assertTrue(DayCarver.carve(before + spike + after).days.single().rides.isEmpty())
     }
 
     @Test

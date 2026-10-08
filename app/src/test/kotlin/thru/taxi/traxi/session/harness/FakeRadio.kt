@@ -139,15 +139,19 @@ class FakeRadio(
     override fun releaseForeground() { foregroundHeld = false }
 }
 
-class MemoryMarks(var mark: RecordingSince.Mark? = null) : MarkStore {
-    override fun last(): RecordingSince.Mark? = mark
-    override fun put(mark: RecordingSince.Mark) { this.mark = mark }
+/** Per-logger marks, plus the single [legacy] mark older versions kept. */
+class MemoryMarks(var legacy: RecordingSince.Mark? = null) : MarkStore {
+    val marks = mutableMapOf<String, RecordingSince.Mark>()
+    override fun last(deviceKey: String) = marks[deviceKey]
+    override fun put(mark: RecordingSince.Mark) { marks[mark.deviceKey] = mark }
+    override fun claimLegacy() = legacy.also { legacy = null }
 }
 
-class MemoryMethods : MethodStore {
+class MemoryMethods(val legacy: MutableMap<String, RecordMethodStore.Reading> = mutableMapOf()) : MethodStore {
     val readings = mutableMapOf<String, RecordMethodStore.Reading>()
     override fun get(deviceKey: String) = readings[deviceKey]
     override fun put(deviceKey: String, reading: RecordMethodStore.Reading) {
         readings[deviceKey] = reading
     }
+    override fun claimLegacy(legacyKey: String) = legacy.remove(legacyKey)
 }

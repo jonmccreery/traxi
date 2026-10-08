@@ -865,12 +865,33 @@ class SessionController(
         // and the *next* successful connect still spans the whole of it.
         // Overwriting it with "unknown" would discard the baseline at exactly
         // the moment the link is misbehaving.
-        markDeviceKey = if (simulated) null else "${firmware.modelName}/${firmware.release}"
-        _rememberedRecordMethod.value = markDeviceKey?.let { recordMethods.get(it) }
+        //
+        // **Which logger this is** is the Bluetooth address. Until 2026-10-07 it
+        // was model and firmware, which a second BT-Q1000XT -- bought as a
+        // backup that week -- reports identically, so swapping units would have
+        // compared one's write pointer against the other's. Over USB the
+        // logger offers no per-unit identity at all, so a USB session keeps
+        // the model/firmware key and cannot tell two units apart.
+        val legacyKey = "${firmware.modelName}/${firmware.release}"
+        markDeviceKey = when {
+            simulated -> null
+            connectedAddress != null -> "bt:$connectedAddress"
+            else -> legacyKey
+        }
+        _rememberedRecordMethod.value = markDeviceKey?.let { key ->
+            recordMethods.get(key)
+                ?: recordMethods.claimLegacy(legacyKey)?.also { recordMethods.put(key, it) }
+        }
         val mark = RecordingSince.markFor(pointer, markDeviceKey, System.currentTimeMillis())
         if (mark != null) {
+            // The one mark older versions kept is claimed by the first session
+            // that can use it, once. That is the logger that was in use when
+            // this shipped; the backup unit arrives later and starts fresh.
+            val previous = marks.last(mark.deviceKey)
+                ?: marks.claimLegacy()?.takeIf { it.deviceKey == legacyKey }
+                    ?.copy(deviceKey = mark.deviceKey)
             _sinceLastSeen.value = RecordingSince.compare(
-                previous = marks.last(),
+                previous = previous,
                 current = mark,
                 recordBytes = runCatching { format.recordSizeWithChecksum() }.getOrDefault(0),
                 intervalSeconds = interval,

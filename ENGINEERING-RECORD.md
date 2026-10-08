@@ -1840,6 +1840,32 @@ One correction found on the way: the pointer check at 21:03:32, 0.3 s after
 that evening's download, was not the downloader's — it never reads the
 pointer. It was the read loop's overdue check, finding 3, observed live.
 
+### 15.7 Two loggers: state is keyed by the unit, not the model
+
+2026-10-07: a second, new-in-box BT-Q1000XT was bought as a backup. Per-logger
+state — the "since last looked" mark and the remembered flash-full setting —
+was keyed by `model/firmware` (`BT-Q1000XT/AXN_1.30-B_1.3_C01`), which two
+identical units share, and the mark store held **one** mark in all. Swapping
+units would have compared one logger's write pointer against the other's, and
+each connect would have overwritten the other's baseline. Nothing written to
+either device; the harm was a confident wrong answer about capture.
+
+**Now:** a Bluetooth session is keyed `bt:<address>`, the one thing that is
+unique per unit, and both stores keep one entry per key. USB offers no per-unit
+identity on this logger (the device reports a product name only), so a USB
+session keeps the model/firmware key and cannot tell two units apart.
+
+**Migration:** the single mark and any flash-full reading stored by earlier
+versions are claimed once, by the first session that can use them, and
+removed as they are — so they go to the logger in use when this shipped, and
+the backup starts fresh. If the backup were somehow the first to connect after
+the update, it would inherit the old unit's baseline once; the next connect of
+either corrects it.
+
+Tests: two loggers with the same firmware keep separate baselines across a
+swap and back; the legacy mark and reading are each claimed once.
+Mutations `S`–`U`.
+
 ## 16. The audit — seven holes found by reading, not by losing anything
 
 Found 2026-09-15 by going through the whole tree looking for them, after

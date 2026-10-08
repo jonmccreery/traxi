@@ -55,14 +55,19 @@ class LinkRaceTest {
     }
 
     /** A session wired to the fakes, connected and streaming fixes. */
-    private inner class Rig(val test: TestScope, marks: MemoryMarks = MemoryMarks()) {
+    private inner class Rig(
+        val test: TestScope,
+        marks: MemoryMarks = MemoryMarks(),
+        methods: MemoryMethods = MemoryMethods(),
+        val address: String = this@LinkRaceTest.address,
+    ) {
         val dir: File = Files.createTempDirectory("traxi-race").toFile()
         val radio = FakeRadio(test.testScheduler, test.backgroundScope, flash, block * dataBlocks - 0x400)
         val session = SessionController(
             radio,
             DumpRepository(dir, dir, StandardTestDispatcher(test.testScheduler)),
             marks,
-            MemoryMethods(),
+            methods,
             test.backgroundScope,
         )
 
@@ -87,7 +92,7 @@ class LinkRaceTest {
         val notes: List<String> get() = session.transcript.snapshot()
 
         fun connect() {
-            session.connect(address)
+            session.connect(this.address)
             advanceUntil(60_000) { session.connection.value is ConnectionState.Connected }
             assertIs<ConnectionState.Connected>(session.connection.value, "connect")
         }
@@ -274,7 +279,7 @@ class LinkRaceTest {
         val earlier = RecordingSince.Mark(
             pointer = 0x10000, atMillis = 1L, deviceKey = "BT-Q1000XT/AXN_1.30-B_1.3_C01",
         )
-        val rig = Rig(this, MemoryMarks(earlier))
+        val rig = Rig(this, MemoryMarks(legacy = earlier))
         rig.connect()
         assertNotNull(rig.session.sinceLastSeen.value, "connect should compare against the mark")
         rig.onBlockRequest(nth = 2) { it.silence() }
@@ -283,6 +288,66 @@ class LinkRaceTest {
 
         assertEquals(1, rig.session.download.value.linkResets)
         assertNotNull(rig.session.sinceLastSeen.value, "the rebuild forgot the session")
+    }
+
+    // ---------------- two loggers ----------------
+    //
+    // 2026-10-07: a second, identical BT-Q1000XT was bought as a backup. Both
+    // report the same model and firmware, which was the key per-logger state
+    // was filed under -- and the store held one mark in all.
+
+    private val legacyKey = "BT-Q1000XT/AXN_1.30-B_1.3_C01"
+
+    @Test
+    fun `two loggers with the same firmware keep separate baselines`() = runTest {
+        val marks = MemoryMarks()
+        val methods = MemoryMethods()
+        val first = Rig(this, marks, methods, address = "00:1C:88:22:15:98")
+        first.connect()
+        first.session.disconnect(); first.advance(30_000)
+
+        // The backup: never seen before, whatever the first one wrote.
+        val backup = Rig(this, marks, methods, address = "00:1C:88:AA:BB:CC")
+        backup.connect()
+        assertEquals(RecordingSince.Verdict.NothingToCompare, backup.session.sinceLastSeen.value)
+        backup.session.disconnect(); backup.advance(30_000)
+
+        // And the first still has its own baseline after the backup was used.
+        val again = Rig(this, marks, methods, address = "00:1C:88:22:15:98")
+        again.connect()
+        val verdict = again.session.sinceLastSeen.value
+        assertTrue(
+            verdict is RecordingSince.Verdict.Wrote || verdict is RecordingSince.Verdict.WroteNothing,
+            "the first logger lost its baseline to the backup: $verdict",
+        )
+    }
+
+    @Test
+    fun `the mark from before the update is claimed once, by the first Bluetooth connect`() = runTest {
+        val old = RecordingSince.Mark(pointer = 0x10000, atMillis = 1L, deviceKey = legacyKey)
+        val marks = MemoryMarks(legacy = old)
+        val rig = Rig(this, marks)
+        rig.connect()
+
+        assertIs<RecordingSince.Verdict.Wrote>(rig.session.sinceLastSeen.value)
+        assertEquals(null, marks.legacy, "claimed, so the backup cannot inherit it too")
+        assertNotNull(marks.last("bt:$address"))
+    }
+
+    @Test
+    fun `the remembered flash-full setting follows the logger, not the model`() = runTest {
+        val reading = thru.taxi.traxi.data.RecordMethodStore.Reading(
+            thru.taxi.traxi.core.protocol.Pmtk.RecordMethod.OVERLAP, 1L,
+        )
+        val methods = MemoryMethods(legacy = mutableMapOf(legacyKey to reading))
+        val first = Rig(this, methods = methods)
+        first.connect()
+        assertEquals(reading, first.session.rememberedRecordMethod.value)
+        first.session.disconnect(); first.advance(30_000)
+
+        val backup = Rig(this, methods = methods, address = "00:1C:88:AA:BB:CC")
+        backup.connect()
+        assertEquals(null, backup.session.rememberedRecordMethod.value)
     }
 
     // ---------------- the edges of recovery ----------------

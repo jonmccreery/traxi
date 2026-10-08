@@ -198,6 +198,25 @@ MUTATIONS = {
         ("        stopTelemetry(endSession = false)", "        stopTelemetry()"),
     ]),
 
+    # §15.7: key per-logger state by model and firmware again, which a second
+    # identical BT-Q1000XT shares.
+    "S-model-key": (SESSION, [
+        ('            connectedAddress != null -> "bt:$connectedAddress"\n', ''),
+    ]),
+
+    # §15.7: forget the mark older versions kept, so the update costs the
+    # logger in use its baseline.
+    "T-legacy-mark": (SESSION, [
+        ("                ?: marks.claimLegacy()?.takeIf { it.deviceKey == legacyKey }\n"
+         "                    ?.copy(deviceKey = mark.deviceKey)\n", ""),
+    ]),
+
+    # §15.7: forget the flash-full reading older versions kept.
+    "U-legacy-method": (SESSION, [
+        ("                ?: recordMethods.claimLegacy(legacyKey)?.also { recordMethods.put(key, it) }\n",
+         ""),
+    ]),
+
     # §16.4: drop what the earlier segments established.
     "F-continued-by": (DOWNLOADER, [
         ("""        fun continuedBy(continued: Result): Result = continued.copy(

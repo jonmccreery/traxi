@@ -1,5 +1,6 @@
 package thru.taxi.traxi.core.export
 
+import thru.taxi.traxi.core.analysis.DayCarver
 import thru.taxi.traxi.core.format.Fix
 import thru.taxi.traxi.core.format.FixQuality
 import thru.taxi.traxi.core.format.Quality
@@ -21,6 +22,8 @@ import java.time.format.DateTimeFormatter
  *  - **Button-pressed fixes become waypoints, not track points.** 1,419
  *    records carry `RCR = BUTTON`; flattening them into the track discards the
  *    only user-authored data in the file.
+ *  - **Rides are a second track**, named "<name> (rides)", found by the same
+ *    rule as [DayCarver]: a walk with a car ride inside it is not a walk.
  */
 class GpxWriter(
     private val creator: String = "Traxi",
@@ -38,7 +41,17 @@ class GpxWriter(
             it.hasPosition && it.latitude!!.isFinite() && it.longitude!!.isFinite()
         }
         val waypoints = positioned.filter { it.isWaypoint }
-        val segments = Quality.segment(positioned, gapSeconds)
+        val walks = mutableListOf<List<Fix>>()
+        val rides = mutableListOf<List<Fix>>()
+        for (segment in Quality.segment(positioned, gapSeconds)) {
+            var from = 0
+            for (ride in DayCarver.rideRanges(segment, DayCarver.Config())) {
+                if (ride.first > from) walks += segment.subList(from, ride.first)
+                rides += segment.subList(ride.first, ride.last + 1)
+                from = ride.last + 1
+            }
+            if (from < segment.size) walks += segment.subList(from, segment.size)
+        }
 
         out.write("""<?xml version="1.0" encoding="UTF-8"?>${'\n'}""")
         out.write(
@@ -52,14 +65,20 @@ class GpxWriter(
 
         for (fix in waypoints) writeWaypoint(fix, out)
 
-        out.write("<trk><name>${escape(trackName)}</name>\n")
+        writeTrack(trackName, walks, out)
+        if (rides.isNotEmpty()) writeTrack("$trackName (rides)", rides, out)
+        out.write("</gpx>\n")
+        out.flush()
+    }
+
+    private fun writeTrack(name: String, segments: List<List<Fix>>, out: Writer) {
+        out.write("<trk><name>${escape(name)}</name>\n")
         for (segment in segments) {
             out.write("<trkseg>\n")
             for (fix in segment) writePoint("trkpt", fix, out)
             out.write("</trkseg>\n")
         }
-        out.write("</trk>\n</gpx>\n")
-        out.flush()
+        out.write("</trk>\n")
     }
 
     private fun writeWaypoint(fix: Fix, out: Writer) {

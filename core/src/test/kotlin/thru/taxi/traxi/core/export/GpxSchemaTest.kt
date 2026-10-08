@@ -15,6 +15,7 @@ import javax.xml.XMLConstants
 import javax.xml.transform.stream.StreamSource
 import javax.xml.validation.SchemaFactory
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.fail
 
 /**
@@ -27,6 +28,8 @@ import kotlin.test.fail
  * (fetched 2026-10-07) so this runs offline.
  */
 class GpxSchemaTest {
+
+    private val GPX = "http://www.topografix.com/GPX/1/1"
 
     private val schema = SchemaFactory.newInstance(XMLConstants.W3C_XML_SCHEMA_NS_URI)
         .newSchema(javaClass.getResource("/gpx/gpx-1.1.xsd")!!)
@@ -63,6 +66,27 @@ class GpxSchemaTest {
         assumeTrue("golden dump not found at ${file.absolutePath}", file.isFile)
         val parsed = MtkLogParser.parse(file.readBytes(), GpsRollover.AXN_130B)
         assertValid(export(Quality.filter(parsed.fixes).kept, file.name), "cdt_v2.bin")
+    }
+
+    @Test
+    fun `a car ride is written as its own track, and both validate`() {
+        val walk1 = (0..30).map { fix(it, lat = 40.0 + it * 1e-4) }
+        val ride = (31..60).map { fix(it, lat = 40.003 + (it - 30) * 2.25e-3).copy(speed = 90f) }
+        val walk2 = (61..90).map { fix(it, lat = 40.07 + (it - 60) * 1e-4) }
+        val gpx = export(walk1 + ride + walk2, name = "Day 9")
+        assertValid(gpx, "walk, ride, walk")
+
+        val doc = javax.xml.parsers.DocumentBuilderFactory.newInstance()
+            .apply { isNamespaceAware = true }.newDocumentBuilder()
+            .parse(gpx.byteInputStream())
+        val tracks = doc.getElementsByTagNameNS(GPX, "trk")
+        assertEquals(2, tracks.length)
+        fun points(i: Int) = (tracks.item(i) as org.w3c.dom.Element)
+            .getElementsByTagNameNS(GPX, "trkpt").length
+        assertEquals(61, points(0), "both walks")
+        assertEquals(30, points(1), "the ride")
+        assertEquals("Day 9 (rides)", (tracks.item(1) as org.w3c.dom.Element)
+            .getElementsByTagNameNS(GPX, "name").item(0).textContent)
     }
 
     @Test

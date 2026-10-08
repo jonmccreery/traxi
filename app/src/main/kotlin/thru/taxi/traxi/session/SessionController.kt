@@ -1333,6 +1333,10 @@ class SessionController(
     }
 
     fun disconnect() {
+        // Said in the transcript, because silence there reads as a link that
+        // may still be up: on 2026-10-07 a deliberate disconnect left the last
+        // line a GPS sentence, indistinguishable from a link gone quiet.
+        transcript.note("disconnected by the user")
         scope.launch {
             cancelDownload()
             disconnectQuietly()

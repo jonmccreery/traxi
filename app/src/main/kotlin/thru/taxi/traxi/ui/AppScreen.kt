@@ -45,6 +45,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import thru.taxi.traxi.session.LinkHealth
 import thru.taxi.traxi.session.LiveActivity
+import thru.taxi.traxi.core.protocol.TranscriptLog
 import thru.taxi.traxi.session.RecordingActivity
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -2158,33 +2159,151 @@ private fun EraseCard(container: AppContainer, info: DeviceInfo, parentBusy: Boo
 
 // ---------------- transcript ----------------
 
+/**
+ * The transcript, readable while it is still being written.
+ *
+ * Rebuilt 2026-10-07. The old view redrew the newest 300 lines, newest first,
+ * every 0.7 s: on a connected logger the NMEA stream alone is several lines a
+ * second, so whatever was being read slid away before it could be read, and
+ * nothing but this run could be seen. Now it behaves like a terminal: oldest
+ * at the top, it follows new lines only while you are at the bottom, and
+ * scrolling up -- or Pause -- holds the view still. Earlier runs come from the
+ * file the transcript is already mirrored to.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LogTab(container: AppContainer) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var lines by remember { mutableStateOf(container.session.transcript.snapshot()) }
+    val ring = container.session.transcript
+
+    /** Null is the live view of this run; otherwise an earlier run from the file. */
+    var source by remember { mutableStateOf<TranscriptLog.Run?>(null) }
+    var earlier by remember { mutableStateOf<List<TranscriptLog.Run>>(emptyList()) }
+    var picking by remember { mutableStateOf(false) }
+    var hideNmea by remember { mutableStateOf(true) }
+    var paused by remember { mutableStateOf(false) }
+    var follow by remember { mutableStateOf(true) }
+    var latest by remember { mutableStateOf(ring.snapshot()) }
+    var held by remember { mutableStateOf(latest) }
 
     LaunchedEffect(Unit) {
         while (true) {
-            lines = container.session.transcript.snapshot()
-            kotlinx.coroutines.delay(700)
+            latest = ring.snapshot()
+            // Held while paused or scrolled up. The ring also drops its oldest
+            // lines as it fills, so updating under a reader would shift the
+            // text they are reading even with no new line in view.
+            if (!paused && follow) held = latest
+            delay(700)
         }
     }
 
-    SectionCard("PMTK transcript") {
+    val raw = source?.lines ?: held
+    val shown = remember(raw, hideNmea) {
+        if (hideNmea) raw.filterNot(TranscriptLog::isNmea) else raw
+    }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+
+    // Follow only while at the bottom: a drag that leaves the end stops it, a
+    // drag back to the end resumes it.
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }
+            .collect { (scrolling, more) -> if (scrolling) follow = !more }
+    }
+    LaunchedEffect(shown.size, shown.lastOrNull(), source) {
+        if ((source != null || follow) && shown.isNotEmpty()) {
+            listState.scrollToItem(shown.lastIndex)
+        }
+    }
+
+    val save = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.CreateDocument("text/plain"),
+    ) { uri ->
+        if (uri != null) scope.launch {
+            val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.openOutputStream(uri)?.use {
+                        it.write(container.transcriptFile.readAll().toByteArray())
+                    } != null
+                }.getOrDefault(false)
+            }
+            android.widget.Toast.makeText(
+                context, if (ok) "Transcript saved" else "Could not save the transcript",
+                android.widget.Toast.LENGTH_SHORT,
+            ).show()
+        }
+    }
+
+    SectionCard("Transcript") {
         Text(
-            "Every sentence exchanged with the logger — the only diagnostic there is " +
-                "at a trailhead, so it can be shared.",
-            style = MaterialTheme.typography.bodySmall,
-        )
-        Text(
-            "Mirrored to a file as it is written, so it survives a crash. The view " +
-                "below is this run; the file holds the history " +
+            "Every sentence exchanged with the logger, and the app's own notes. " +
+                "Written to a file as it happens, so it survives a crash " +
                 "(${Bytes.describe(container.transcriptFile.sizeBytes())}).",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+
+        Box {
+            OutlinedButton(
+                onClick = {
+                    scope.launch {
+                        val runs = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            TranscriptLog.runs(container.transcriptFile.readAll())
+                        }
+                        // The last run in the file is this one, which Live shows.
+                        earlier = runs.dropLast(1).asReversed()
+                        picking = true
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(source?.let { "Run started ${it.startedAt ?: "before the first marker"}" }
+                    ?: "Live — this run")
+            }
+            DropdownMenu(expanded = picking, onDismissRequest = { picking = false }) {
+                DropdownMenuItem(
+                    text = { Text("Live — this run") },
+                    onClick = { source = null; follow = true; picking = false },
+                )
+                if (earlier.isEmpty()) {
+                    DropdownMenuItem(text = { Text("No earlier runs in the file") }, onClick = {}, enabled = false)
+                }
+                earlier.forEach { run ->
+                    DropdownMenuItem(
+                        text = {
+                            Text("%s · %,d lines".format(
+                                run.startedAt ?: "before the first marker", run.lines.size))
+                        },
+                        onClick = { source = run; picking = false },
+                    )
+                }
+            }
+        }
+
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                selected = hideNmea,
+                onClick = { hideNmea = !hideNmea },
+                label = { Text("Hide NMEA") },
+            )
+            if (source == null) {
+                FilterChip(
+                    selected = paused,
+                    onClick = {
+                        paused = !paused
+                        if (!paused) { follow = true; held = latest }
+                    },
+                    label = { Text(if (paused) "Paused" else "Pause") },
+                )
+            }
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton({
+                val stamp = java.time.LocalDateTime.now()
+                    .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmm"))
+                save.launch("traxi-transcript-$stamp.txt")
+            }) { Text("Save") }
             TextButton({
                 scope.launch {
                     // The file, not the in-memory ring: the whole point is to
@@ -2208,29 +2327,52 @@ private fun LogTab(container: AppContainer) {
                     )
                 }
             }) { Text("Share") }
+            Spacer(Modifier.weight(1f))
             TextButton({
-                container.session.transcript.clear()
+                ring.clear()
                 container.transcriptFile.clear()
-                lines = emptyList()
+                latest = emptyList(); held = emptyList(); source = null
             }) {
-                Text("Clear")
+                Text("Clear", color = MaterialTheme.colorScheme.error)
             }
         }
     }
 
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp)) {
-            if (lines.isEmpty()) {
+            val waiting = source == null && (paused || !follow) &&
+                latest.lastOrNull() != held.lastOrNull()
+            if (source == null && (paused || !follow)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (waiting) "Held — newer lines waiting" else "Held",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton({
+                        paused = false; follow = true; held = latest
+                    }) { Text("Jump to newest") }
+                }
+            }
+            if (shown.isEmpty()) {
                 Text("Nothing yet.", style = MaterialTheme.typography.bodyMedium)
             }
-            // Newest first: the interesting line is almost always the last one.
-            lines.asReversed().take(300).forEach { line ->
-                Text(
-                    line,
-                    style = MonoStyle.copy(fontFamily = FontFamily.Monospace),
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            // Its own scroll, bounded, inside the page's: a fixed height is
+            // what lets it hold a position while the page scrolls around it.
+            androidx.compose.foundation.lazy.LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height((androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp * 0.6f).dp),
+            ) {
+                items(shown.size) { i ->
+                    Text(
+                        shown[i],
+                        style = MonoStyle.copy(fontFamily = FontFamily.Monospace),
+                        modifier = Modifier.padding(vertical = 1.dp),
+                    )
+                }
             }
         }
     }

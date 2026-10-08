@@ -1386,13 +1386,16 @@ private fun PositionCard(t: Telemetry) {
         Row2("Latitude", "%.5f°  %s".format(kotlin.math.abs(lat), if (lat >= 0) "N" else "S"))
         Row2("Longitude", "%.5f°  %s".format(kotlin.math.abs(lon), if (lon >= 0) "E" else "W"))
         t.altitudeMeters?.let {
-            Row2("Altitude", "%.1f m  ·  %.0f ft".format(it, it * 3.28084))
+            Row2("Altitude", "%.0f ft  ·  %.1f m".format(it * 3.28084, it))
         }
+        // The receiver reports knots (NMEA RMC); shown as mph first, then km/h.
         t.speedKnots?.let {
-            Row2("Speed", "%.1f km/h  ·  %.1f kn".format(it * 1.852, it))
+            Row2("Speed", "%.1f mph  ·  %.1f km/h".format(it * 1.150779, it * 1.852))
         }
         t.courseDeg?.let { Row2("Course", "%.0f°".format(it)) }
-        t.utcMillis?.let { Row2("UTC", utcStamp(it)) }
+        // The receiver's own clock, from its sentences, with the 1024-week
+        // rollover correction -- not the phone's time.
+        t.utcMillis?.let { Row2("GPS time (UTC)", utcStamp(it)) }
         Text(
             "Decimal degrees, WGS 84 — the same datum the logged fixes use.",
             style = MaterialTheme.typography.bodySmall,

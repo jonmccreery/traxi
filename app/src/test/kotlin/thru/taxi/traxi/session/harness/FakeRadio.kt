@@ -129,7 +129,7 @@ class FakeRadio(
 
     override fun isLinkUp(address: String): Boolean = aclUp
 
-    override suspend fun openBluetooth(address: String): Transport {
+    override suspend fun openBluetooth(address: String, note: (String) -> Unit): Transport {
         delay(1_500)   // an RFCOMM connect is not instant, and the gap matters
         if (!loggerOn) {
             failedOpens += nowMillis

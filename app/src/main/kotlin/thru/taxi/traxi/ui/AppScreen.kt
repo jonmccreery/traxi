@@ -731,8 +731,34 @@ private fun DeviceTab(
         }
 
         is ConnectionState.Connecting -> SectionCard("Connecting") {
+            // Said, not implied: a connect to a logger whose radio is not
+            // answering can take two minutes (§ BluetoothSppTransport), and a
+            // card that only spins through that reads as a hang.
+            val stage by session.connectStage.collectAsState()
+            val started = remember(connection) { System.nanoTime() }
+            var now by remember { mutableStateOf(System.nanoTime()) }
+            LaunchedEffect(Unit) { while (true) { now = System.nanoTime(); delay(1_000) } }
+            val seconds = ((now - started) / 1e9).toInt()
+
             Text(connection.target, style = MonoStyle)
             LinearProgressIndicator(Modifier.fillMaxWidth())
+            Row2(stage ?: "Starting…", "$seconds s")
+            if (seconds >= 20) {
+                Text(
+                    "The logger is slow to answer. A connect can take up to about two " +
+                        "minutes before the last approach is tried.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (seconds >= 60) {
+                Text(
+                    "If a pairing prompt appears, the PIN is ${Bonding.KNOWN_PIN} — the logger " +
+                        "forgets its pairing when switched off. If this runs past two " +
+                        "minutes, slide the logger off for 10 s, back on, and connect again.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
 
         else -> {
@@ -870,12 +896,17 @@ private fun DeviceTab(
                 }
             }
 
-            SectionCard("Work without the logger") {
+            SectionCard("No logger to hand") {
                 Text(
-                    "Run against a flash image already on this phone. Everything but the " +
-                        "radio behaves identically — re-parse and re-export with the " +
-                        "logger in a drawer.",
+                    "Open your latest dump as a stand-in logger to download, parse, " +
+                        "export or rehearse an erase. Nothing reaches a real device.",
                     style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    "No GPS stream, recording checks or Bluetooth timing — those need " +
+                        "the logger itself.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 OutlinedButton(
                     onClick = {
@@ -895,7 +926,7 @@ private fun DeviceTab(
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Simulate from a saved dump") }
+                ) { Text("Open latest dump as a logger") }
             }
         }
     }

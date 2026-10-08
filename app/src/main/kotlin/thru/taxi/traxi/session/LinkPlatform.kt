@@ -47,8 +47,11 @@ interface LinkPlatform {
     /** Whether the radio link to [address] is up; null if it cannot be told. */
     fun isLinkUp(address: String): Boolean?
 
-    /** Open an RFCOMM transport to [address]; throws if it cannot. */
-    suspend fun openBluetooth(address: String): Transport
+    /**
+     * Open an RFCOMM transport to [address]; throws if it cannot. [note] hears
+     * each connect strategy as it is tried, and how it failed.
+     */
+    suspend fun openBluetooth(address: String, note: (String) -> Unit = {}): Transport
 
     /** Call [onLost] whenever the radio link to [address] drops. */
     fun watchLink(address: String, onLost: () -> Unit)

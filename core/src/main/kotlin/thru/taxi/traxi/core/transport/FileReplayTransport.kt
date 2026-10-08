@@ -172,6 +172,23 @@ class SimulatedLoggerTransport(
         return n
     }
 
+    companion object {
+        /**
+         * Where a real logger holding [image] would report its write pointer:
+         * just past the last written byte.
+         *
+         * The simulator used to report the CDT dump's pointer whatever it was
+         * serving, so any other dump looked as if it stopped short of the
+         * logger's frontier -- and the erase gate, which requires a dump to
+         * cover the pointer, refused every rehearsal on it.
+         */
+        fun writtenExtent(image: ByteArray): Int {
+            var i = image.size
+            while (i > 0 && image[i - 1] == 0xFF.toByte()) i--
+            return i
+        }
+    }
+
     // ---------------- protocol emulation ----------------
 
     private fun reply(payload: String) {

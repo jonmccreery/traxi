@@ -27,6 +27,8 @@ import java.util.UUID
 class BluetoothSppTransport(
     private val device: BluetoothDevice,
     private val serviceUuid: UUID = SPP_UUID,
+    /** Told which strategy is being tried and how each failed, as it happens. */
+    private val note: (String) -> Unit = {},
 ) : Transport {
 
     private var socket: BluetoothSocket? = null
@@ -57,6 +59,8 @@ class BluetoothSppTransport(
                 continue
             } ?: continue
 
+            note("connect: trying ${strategy.name}")
+            val started = System.nanoTime()
             try {
                 s.connect()
                 socket = s
@@ -66,6 +70,11 @@ class BluetoothSppTransport(
             } catch (e: IOException) {
                 runCatching { s.close() }
                 lastFailure = IOException("${strategy.name}: ${e.message}", e)
+                note(
+                    "connect: %s failed after %.0f s: %s".format(
+                        strategy.name, (System.nanoTime() - started) / 1e9, e.message,
+                    )
+                )
                 // A half-open link from a previous session -- an app killed
                 // without closing its socket, which this logger does not notice
                 // because it serves one SPP client -- fails here. Give the
@@ -169,8 +178,13 @@ class BluetoothSppTransport(
          *    here -- `sdptool browse` confirms this device serves SPP on
          *    channel 1.
          *
-         * Trying all three costs a few seconds on failure and turns a dead end
-         * into a connection, which is the right trade at a trailhead.
+         * Trying all three turns a dead end into a connection, which is the
+         * right trade at a trailhead -- but it is not always quick. The first
+         * two look the service up over SDP, and a logger whose radio is not
+         * answering lets each lookup run to the stack's 60 s timeout, so a
+         * connect to it takes two minutes before the fallback is reached
+         * (2026-10-08). Each attempt is reported through `note` as it happens,
+         * so that wait is visible rather than a silent "Connecting".
          */
         @SuppressLint("MissingPermission")
         private val STRATEGIES = listOf(

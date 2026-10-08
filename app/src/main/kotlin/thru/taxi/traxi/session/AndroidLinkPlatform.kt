@@ -50,8 +50,8 @@ class AndroidLinkPlatform(
     override fun isLinkUp(address: String): Boolean? =
         runCatching { AclLink.isConnected(device(address)) }.getOrNull()
 
-    override suspend fun openBluetooth(address: String): Transport =
-        BluetoothSppTransport(device(address)).also { it.open() }
+    override suspend fun openBluetooth(address: String, note: (String) -> Unit): Transport =
+        BluetoothSppTransport(device(address), note = note).also { it.open() }
 
     override fun watchLink(address: String, onLost: () -> Unit) {
         stopWatching()

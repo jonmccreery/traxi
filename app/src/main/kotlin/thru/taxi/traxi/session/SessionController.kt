@@ -548,6 +548,28 @@ class SessionController(
     var isSimulated: Boolean = false
         private set
 
+    private val _connectStage = MutableStateFlow<String?>(null)
+
+    /**
+     * What a Bluetooth connect is doing right now, in words, or null.
+     *
+     * A connect to a logger whose radio is not answering ran two minutes on
+     * 2026-10-08 -- two 60 s service lookups before the fallback -- under a
+     * card that said only "Connecting", and was taken for a hang. The stages
+     * are said as they happen.
+     */
+    val connectStage: StateFlow<String?> = _connectStage.asStateFlow()
+
+    private fun connectNote(message: String) {
+        transcript.note(message)
+        _connectStage.value = when {
+            "trying secure" in message -> "Asking the logger for its serial port…"
+            "trying insecure" in message -> "No answer. Asking again…"
+            "trying channel 1" in message -> "Connecting straight to the logger's serial port…"
+            else -> _connectStage.value
+        }
+    }
+
     private val _loggingConfirmAt = MutableStateFlow<Long?>(null)
 
     /**
@@ -603,6 +625,7 @@ class SessionController(
             _connection.value = ConnectionState.Connecting(address)
             disconnectQuietly()
             try {
+                _connectStage.value = "Checking the pairing…"
                 // Bond before opening a socket. Choosing a device in the
                 // companion chooser associates it but does not pair it, and an
                 // RFCOMM connect to an unpaired device fails with an opaque
@@ -637,6 +660,7 @@ class SessionController(
                 // with it any wedged session state -- which is how a reconnect
                 // four seconds after a disconnect got silence from a logger
                 // that was streaming NMEA. See [AclLink].
+                _connectStage.value = "Waiting for the previous link to close…"
                 platform.awaitLinkDown(address, transcript::note)
 
                 // **The pairing is never destroyed automatically.**
@@ -662,7 +686,7 @@ class SessionController(
                 //
                 // So: offer it, and let the person holding the phone decide.
                 val opened = try {
-                    platform.openBluetooth(address)
+                    platform.openBluetooth(address, ::connectNote)
                 } catch (first: Exception) {
                     if (platform.looksStale(address)) {
                         transcript.note(
@@ -675,6 +699,7 @@ class SessionController(
                 }
 
                 stalePairingSuspectedFor = null
+                _connectStage.value = "Reading the logger's settings…"
                 openWith(opened, simulated = false)
             } catch (e: Exception) {
                 disconnectQuietly()
@@ -682,7 +707,7 @@ class SessionController(
             }
         // However this ends -- success, failure, an early return, cancellation
         // -- the claim is released here rather than on any one path out.
-        }.invokeOnCompletion { connectAttempt.set(false) }
+        }.invokeOnCompletion { connectAttempt.set(false); _connectStage.value = null }
     }
 
     /**
@@ -769,7 +794,11 @@ class SessionController(
             _connection.value = ConnectionState.Connecting("simulator")
             disconnectQuietly()
             try {
-                val t = SimulatedLoggerTransport(image, chunkSize = 0x800)
+                val t = SimulatedLoggerTransport(
+                    image,
+                    chunkSize = 0x800,
+                    writePointer = SimulatedLoggerTransport.writtenExtent(image),
+                )
                 t.open()
                 openWith(t, simulated = true)
             } catch (e: Exception) {
@@ -1800,7 +1829,7 @@ class SessionController(
         platform.awaitLinkDown(address, transcript::note)
 
         return try {
-            val t = platform.openBluetooth(address)
+            val t = platform.openBluetooth(address, transcript::note)
             transport = t
             val c = PmtkClient(t, transcript, clock = ::monotonicMillis)
             client = c

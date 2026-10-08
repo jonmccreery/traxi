@@ -1419,9 +1419,31 @@ class SessionController(
         linkWatcher = null
     }
 
+    /**
+     * Set while [downloadWithLinkRecovery] runs a Bluetooth transfer. A link
+     * loss in that window belongs to the recovery loop, not to [onLinkLost].
+     *
+     * Without this the two fought. The ACL watcher tore the session down on
+     * any disconnect -- cancel set, address forgotten, state Failed -- so a
+     * logger that dropped its radio mid-download (2026-10-07, 4.6 s after a
+     * block request) ended the transfer instead of having it resumed. And the
+     * silence recovery's own [cycleLink] closes the old link on purpose, which
+     * raises the same broadcast and would tear down the session it is in the
+     * middle of rebuilding.
+     */
+    @Volatile private var transferOwnsLink = false
+
+    /** The ACL dropped while [transferOwnsLink]; cleared by each rebuild. */
+    @Volatile private var linkDroppedMidTransfer = false
+
     /** Tear the session down and say so, from wherever the loss was noticed. */
     private fun onLinkLost(reason: String) {
         if (_connection.value !is ConnectionState.Connected) return
+        if (transferOwnsLink) {
+            linkDroppedMidTransfer = true
+            transcript.note("link lost during the transfer: $reason")
+            return
+        }
         transcript.note("link lost: $reason")
         cancelRequested = true
         disconnectQuietly()
@@ -1781,59 +1803,97 @@ class SessionController(
         firstPass: suspend (PmtkClient) -> FlashDownloader.Result,
     ): FlashDownloader.Result {
         val start = client ?: throw IllegalStateException("Not connected")
-        var result = firstPass(start)
-        var cycles = 0
+        val owned = linkCycleApplies()
+        transferOwnsLink = owned
+        linkDroppedMidTransfer = false
+        try {
+            var result = firstPass(start)
+            var cycles = 0
 
-        while (
-            result.stoppedUnanswered &&
-            !cancelRequested &&
-            cycles < MAX_LINK_CYCLES &&
-            linkCycleApplies()
-        ) {
-            val before = result.image.size
-            val c = cycleLink() ?: break
-            cycles++
-            _download.value = _download.value.copy(linkResets = cycles)
+            while (
+                (result.stoppedUnanswered || droppedDuring(result)) &&
+                !cancelRequested &&
+                cycles < MAX_LINK_CYCLES &&
+                linkCycleApplies()
+            ) {
+                val before = result.image.size
+                if (linkDroppedMidTransfer) {
+                    // A reconnect made the instant the logger drops can land on a
+                    // link the phone has not finished tearing down, and inherit
+                    // the state that dropped it (§15.1). Let both sides settle.
+                    _message.value = "The logger dropped the link — reconnecting to resume"
+                    transcript.note(
+                        "waiting ${DROP_SETTLE_MILLIS / 1000} s before rebuilding the link"
+                    )
+                    delay(DROP_SETTLE_MILLIS)
+                    if (cancelRequested) break
+                }
+                val c = cycleLink() ?: break
+                // cycleLink closes the old link itself; that broadcast is not news.
+                linkDroppedMidTransfer = false
+                cycles++
+                _download.value = _download.value.copy(linkResets = cycles)
 
-            // The frontier is block-aligned: only whole blocks are ever written
-            // to the image, so this is a legal resume offset by construction.
-            val continued = FlashDownloader(c).download(
-                existing = result.image,
-                resumeFrom = result.image.size,
-                onProgress = ::applyDownloadProgress,
-                shouldContinue = { !cancelRequested },
-                // The fresh link is the best chance this transfer will get of
-                // recovering what the wedged one dropped, so hand the earlier
-                // segments' holes over to be re-read rather than merely carried.
-                // Whatever survives comes back in `continued.damagedRanges`.
-                priorDamage = result.damagedRanges,
-            )
-
-            // Carry the earlier segments' work forward. The rule lives in
-            // [FlashDownloader.Result.continuedBy] rather than here, so that
-            // what a link cycle must preserve is stated once and can be tested
-            // without a Context and a Bluetooth stack. See §16.4.
-            result = result.continuedBy(continued)
-
-            if (result.image.size <= before) {
-                transcript.note(
-                    "link cycle $cycles recovered no further bytes; " +
-                        "stopping with ${Bytes.describe(result.image.size)}"
+                // The frontier is block-aligned: only whole blocks are ever written
+                // to the image, so this is a legal resume offset by construction.
+                val continued = FlashDownloader(c).download(
+                    existing = result.image,
+                    resumeFrom = result.image.size,
+                    onProgress = ::applyDownloadProgress,
+                    shouldContinue = { !cancelRequested },
+                    // The fresh link is the best chance this transfer will get of
+                    // recovering what the wedged one dropped, so hand the earlier
+                    // segments' holes over to be re-read rather than merely carried.
+                    // Whatever survives comes back in `continued.damagedRanges`.
+                    priorDamage = result.damagedRanges,
                 )
-                break
-            }
-            transcript.note(
-                "link cycle $cycles recovered " +
-                    Bytes.describe(result.image.size - before)
-            )
-        }
 
-        if (result.stoppedUnanswered && cycles >= MAX_LINK_CYCLES) {
-            transcript.note(
-                "gave up after $MAX_LINK_CYCLES link cycles; the bytes so far are saved"
-            )
+                // Carry the earlier segments' work forward. The rule lives in
+                // [FlashDownloader.Result.continuedBy] rather than here, so that
+                // what a link cycle must preserve is stated once and can be tested
+                // without a Context and a Bluetooth stack. See §16.4.
+                result = result.continuedBy(continued)
+
+                if (result.image.size <= before) {
+                    transcript.note(
+                        "link cycle $cycles recovered no further bytes; " +
+                            "stopping with ${Bytes.describe(result.image.size)}"
+                    )
+                    break
+                }
+                transcript.note(
+                    "link cycle $cycles recovered " +
+                        Bytes.describe(result.image.size - before)
+                )
+            }
+
+            if (result.stoppedUnanswered && cycles >= MAX_LINK_CYCLES) {
+                transcript.note(
+                    "gave up after $MAX_LINK_CYCLES link cycles; the bytes so far are saved"
+                )
+            }
+            return result
+        } finally {
+            transferOwnsLink = false
+            // A loss the loop could not recover is still a loss, and now it is
+            // the watcher's again: tear down and say so, as before.
+            if (owned && (linkDroppedMidTransfer || client == null)) {
+                onLinkLost("The logger disconnected and the link could not be rebuilt.")
+            }
         }
-        return result
+    }
+
+    /**
+     * Whether a pass ended because the radio link dropped under it. The ACL
+     * broadcast is the evidence, and it can land a moment after the read
+     * fails -- 13 ms before it on 2026-10-07, but not always before -- so a
+     * failed pass gives it a short while to arrive.
+     */
+    private suspend fun droppedDuring(result: FlashDownloader.Result): Boolean {
+        if (!transferOwnsLink || result.failure == null) return false
+        val until = System.nanoTime() + DROP_EVIDENCE_WAIT_NANOS
+        while (!linkDroppedMidTransfer && System.nanoTime() < until) delay(100)
+        return linkDroppedMidTransfer
     }
 
     /** Restart telemetry after a transfer, on whichever client survived it. */
@@ -2396,4 +2456,10 @@ class SessionController(
      * every cycle gain bytes is what actually bounds this.
      */
     private val MAX_LINK_CYCLES = 60
+
+    /** Pause after the logger drops the link before rebuilding it. */
+    private val DROP_SETTLE_MILLIS = 15_000L
+
+    /** How long a failed pass waits for the ACL broadcast that explains it. */
+    private val DROP_EVIDENCE_WAIT_NANOS = 3_000_000_000L
 }

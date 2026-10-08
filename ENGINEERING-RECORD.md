@@ -1718,6 +1718,39 @@ history, not state. Two dumps dated the same day were different files.
   behaviour (`Sectors fetched`, the monotonic readout, the corrected message)
   is still only verified by reading it; it needs a real transfer to watch.
 
+### 15.5 A drop is the same wedge, and the watcher was in recovery's way
+
+2026-10-07, 20:22–20:28. A resumed download read blocks `0x70000` and
+`0x80000` cleanly, each with the §15.3 shape (a burst, then ~7 s a chunk). The
+request for `0x90000` went out at 20:28:28.17; the NMEA stream stopped half a
+second later and **the logger dropped the ACL 4.6 s after the request**. 576 KB
+were saved as a partial. Logger on and next to the phone throughout.
+
+Same cause as §15.1 — sustained reading — with a different ending: not
+silence on a live link but the logger resetting its radio. Recovery only
+handled silence, so the transfer simply stopped.
+
+Reading the code showed it was worse than a missing case. The ACL watcher's
+`onLinkLost` tears the session down on *any* disconnect: cancel set, address
+forgotten, state Failed. `cycleLink` closes the old link on purpose, which
+raises the same broadcast — so the silence recovery would have been torn down
+mid-rebuild by the app's own watcher. The watcher (2026-09-05) predates the
+recovery (2026-09-08), and no `link cycle` line exists anywhere in the
+transcript the phone still holds.
+
+**Now:** while `downloadWithLinkRecovery` runs a Bluetooth transfer, it owns
+the link. A disconnect is noted ("link lost during the transfer") and handed to
+the loop instead of tearing down. A pass that fails with the ACL down — the
+broadcast is given 3 s to land, since it can trail the read failure — waits
+15 s for both sides to settle, then rebuilds and resumes exactly as for
+silence, under the same bounds: 60 cycles, and every cycle must gain bytes.
+If it cannot rebuild, or the user cancels, the loss goes back to the watcher
+and the session ends as before.
+
+**Still open:** none of this has hardware evidence yet. The next long
+Bluetooth read is the test: the transcript should show `link lost during the
+transfer`, the 15 s wait, `radio link rebuilt`, and `link cycle N recovered`.
+
 ## 16. The audit — seven holes found by reading, not by losing anything
 
 Found 2026-09-15 by going through the whole tree looking for them, after

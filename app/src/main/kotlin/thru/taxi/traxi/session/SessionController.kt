@@ -932,6 +932,17 @@ class SessionController(
             }
 
         startTelemetry(c, firmware.needsWeekRollover, attach = false)
+
+        // The watcher is registered after the interrogation, and a disconnect
+        // broadcast that arrived during it found nobody listening -- or found
+        // a session not yet Connected, which onLinkLost ignores. The session
+        // then showed Connected over a dead link (LinkExplorationTest, seed
+        // 1210). So ask the radio once, now that a loss would be heard.
+        connectedAddress?.let { address ->
+            if (platform.isLinkUp(address) == false) {
+                onLinkLost("The logger disconnected while connecting.")
+            }
+        }
     }
 
     /**
@@ -1394,7 +1405,20 @@ class SessionController(
      */
     private fun watchLink(address: String) {
         platform.watchLink(address) {
-            onLinkLost("The logger disconnected. It may be out of range, switched off, or flat.")
+            // A broadcast says *a* link to this address went down, not which
+            // one. A disconnect followed by a quick reconnect can deliver the
+            // old link's broadcast after the new link is up, and it ended a
+            // session seconds after a clean connect (LinkExplorationTest,
+            // seed 267). The radio knows whether the link is down now; if it
+            // is up, the broadcast is an earlier link's.
+            if (platform.isLinkUp(address) == true) {
+                transcript.note(
+                    "a disconnect broadcast arrived while the radio link is up; " +
+                        "it belongs to an earlier link, and is ignored"
+                )
+            } else {
+                onLinkLost("The logger disconnected. It may be out of range, switched off, or flat.")
+            }
         }
     }
 
@@ -1773,14 +1797,19 @@ class SessionController(
             val c = PmtkClient(t, transcript, clock = ::monotonicMillis)
             client = c
             // The wait above can run 30 s, and the user may have disconnected
-            // or cancelled inside it. Checked *after* publishing the new link,
-            // so either order is covered: a disconnect that already ran is seen
-            // here, and one that runs later closes `transport`, which is now t.
-            // Without this the new link stayed open, unwatched, under a UI
-            // saying Disconnected.
-            if (cancelRequested || connectedAddress == null ||
-                _connection.value !is ConnectionState.Connected
-            ) {
+            // inside it. Checked *after* publishing the new link, so either
+            // order is covered: a disconnect that already ran is seen here, and
+            // one that runs later closes `transport`, which is now t. Without
+            // this the new link stayed open, unwatched, under a UI saying
+            // Disconnected.
+            //
+            // A *cancel* is not a disconnect, and is not checked here: it
+            // stops the transfer, not the session. Treating it as one ended
+            // the session as "the logger disconnected and the link could not
+            // be rebuilt" when the user had only pressed Cancel
+            // (LinkExplorationTest, seed 227). The transfer loop sees the
+            // cancel itself and stops; the rebuilt link carries the session.
+            if (connectedAddress == null || _connection.value !is ConnectionState.Connected) {
                 transcript.note("the session ended during the rebuild; closing the new link")
                 runCatching { t.close() }
                 if (transport === t) { transport = null; client = null }
@@ -1905,15 +1934,21 @@ class SessionController(
     }
 
     /**
-     * Whether a pass ended because the radio link dropped under it. The ACL
-     * broadcast is the evidence, and it can land a moment after the read
-     * fails -- 13 ms before it on 2026-10-07, but not always before -- so a
-     * failed pass gives it a short while to arrive.
+     * Whether a pass ended because the radio link dropped under it.
+     *
+     * Asked of the radio, not only of the broadcast. The broadcast can trail
+     * the failed read -- 13 ms before it on 2026-10-07, but a phone can take
+     * seconds to declare a vanished device gone -- and waiting on it alone
+     * missed every drop whose broadcast came later than the wait: the
+     * transfer ended unrecovered, and the late broadcast then ended the
+     * session (found by LinkExplorationTest, seed 21). So a failed pass polls
+     * both, for as long as a supervision timeout can take.
      */
     private suspend fun droppedDuring(result: FlashDownloader.Result): Boolean {
         if (!transferOwnsLink || result.failure == null) return false
         val until = platform.nanoTime() + DROP_EVIDENCE_WAIT_NANOS
-        while (!linkDroppedMidTransfer && platform.nanoTime() < until) delay(100)
+        while (!linkDroppedMidTransfer && !aclDown() && platform.nanoTime() < until) delay(100)
+        if (aclDown()) linkDroppedMidTransfer = true
         return linkDroppedMidTransfer && aclDown()
     }
 
@@ -2495,6 +2530,6 @@ class SessionController(
     /** Pause after the logger drops the link before rebuilding it. */
     private val DROP_SETTLE_MILLIS = 15_000L
 
-    /** How long a failed pass waits for the ACL broadcast that explains it. */
-    private val DROP_EVIDENCE_WAIT_NANOS = 3_000_000_000L
+    /** How long a failed pass waits for the radio to say whether it dropped. */
+    private val DROP_EVIDENCE_WAIT_NANOS = 20_000_000_000L
 }

@@ -290,6 +290,80 @@ class LinkRaceTest {
         assertNotNull(rig.session.sinceLastSeen.value, "the rebuild forgot the session")
     }
 
+    // ---------------- found by LinkExplorationTest, 2026-10-07 ----------------
+
+    @Test
+    fun `explore 21 -- a drop whose broadcast comes late is still recovered`() = runTest {
+        // The read fails at once; the phone takes seconds to say the link is gone.
+        val rig = Rig(this)
+        rig.radio.broadcastLagMillis = 7_000
+        rig.connect()
+        rig.onBlockRequest(nth = 2, afterMillis = 5_000) { rig.radio.dropLink() }
+
+        rig.download()
+
+        rig.assertCompleteDump()
+        assertEquals(1, rig.session.download.value.linkResets)
+        assertIs<ConnectionState.Connected>(rig.session.connection.value)
+    }
+
+    @Test
+    fun `explore 227 -- Cancel during a rebuild stops the transfer, not the session`() = runTest {
+        val rig = Rig(this)
+        rig.radio.teardownMillis = 10_000
+        rig.connect()
+        rig.onBlockRequest(nth = 2) { it.silence() }
+        rig.radio.onAwaitDown = {
+            rig.radio.onAwaitDown = null
+            backgroundScope.launch { delay(2_000); rig.session.cancelDownload() }
+        }
+
+        rig.download()
+        rig.advance(30_000)
+
+        assertIs<ConnectionState.Connected>(
+            rig.session.connection.value,
+            "Cancel ended the session as a disconnect",
+        )
+        assertTrue(rig.partial(), "the transfer stopped, its bytes kept")
+        assertEquals(1, rig.radio.leakedLinks().size, "the rebuilt link carries the session")
+    }
+
+    @Test
+    fun `explore 267 -- the old link's late broadcast does not end a new session`() = runTest {
+        val rig = Rig(this)
+        rig.radio.teardownMillis = 8_000
+        rig.radio.broadcastLagMillis = 7_500
+        rig.connect()
+        rig.session.disconnect()
+        rig.advance(10_000)            // torn down; its broadcast still on the way
+
+        rig.connect()
+        rig.advance(30_000)
+
+        assertIs<ConnectionState.Connected>(rig.session.connection.value)
+        assertTrue(rig.notes.any { "belongs to an earlier link" in it })
+    }
+
+    @Test
+    fun `explore 1210 -- a link lost while connecting is not shown as Connected`() = runTest {
+        val rig = Rig(this)
+        // Goes down under the status query, before the watcher is listening.
+        rig.onSend = { link, cmd ->
+            if (cmd == "PMTK182,2,7" && rig.radio.links.size == 1) {
+                rig.onSend = null
+                link.silence(); rig.radio.announceDown()
+            }
+        }
+        rig.session.connect(address)
+        rig.advance(90_000)
+
+        assertFalse(
+            rig.session.connection.value is ConnectionState.Connected,
+            "Connected over a link that went down during the connect",
+        )
+    }
+
     // ---------------- two loggers ----------------
     //
     // 2026-10-07: a second, identical BT-Q1000XT was bought as a backup. Both

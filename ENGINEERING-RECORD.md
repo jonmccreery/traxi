@@ -1866,6 +1866,63 @@ Tests: two loggers with the same firmware keep separate baselines across a
 swap and back; the legacy mark and reading are each claimed once.
 Mutations `S`–`U`.
 
+### 15.8 The dynamic audit: random sessions against the same harness
+
+`LinkExplorationTest` runs seeded random sessions — user actions (connect,
+download, fetch-new, Start logging, read a setting, cancel, disconnect) and
+logger faults (drop, silence, the link going down under a waiting read,
+failed reconnects, logger switched off) on random radio timing — and checks
+properties that must hold whatever happened: one live link at most, none left
+after the session, no Connected over a down link, nothing stuck, check
+cadence, every dump byte-exact outside its recorded holes, no unexplained
+failure, and a single transfer fault recovered. Default 40 seeds on every
+build; `-Dtraxi.explore.seeds=2000` for a sweep (about 2½ minutes).
+
+**The first version was blind.** With events spread evenly it passed 2,000
+seeds with four audit fixes reverted, because the race windows are seconds
+wide and it checked only safety, not whether recovery did its job. Events now
+come in bursts, faults can be armed on a protocol command (fire 0–6 s after
+the next block request, status query, pointer check, enable or setting
+read), user actions can be armed on a rebuild, and two liveness properties
+were added. With those it rediscovers four of the eight reverted fixes from
+random sessions alone; two more are masked by a second fix covering the same
+case; the two narrowest are pinned by targeted tests instead.
+
+**What it found in the code as it stood** (each now a `LinkRaceTest` and a
+mutation, `V`–`Y`):
+
+- *Seed 21 — a drop whose broadcast came late was not recovered.* The
+  recovery waited 3 s for the broadcast and decided no drop; the broadcast
+  then ended the session. It now asks the radio as well, for up to 20 s.
+- *Seed 227 — Cancel during a rebuild ended the session as "the logger
+  disconnected".* Audit fix 2 treated a cancel as a disconnect. A cancel now
+  stops the transfer and the rebuilt link carries the session. (A
+  regression introduced by the static audit's own fix.)
+- *Seed 267 — the old link's late broadcast ended a new session* seconds
+  after a disconnect and quick reconnect. The watcher now ignores a
+  broadcast while the radio reports the link up, and says so.
+- *Seed 1210 — a link lost during the connect's interrogation showed
+  Connected.* The broadcast came before the watcher listened. The session
+  now checks the link once the watcher is registered.
+
+**Raised, not changed:**
+
+- *A second fault within one block of a rebuild ends recovery.* The rule
+  that every rebuild must gain bytes counts whole blocks, so a drop partway
+  through the first block after a rebuild reads as no progress. Deliberate
+  (it stops endless reconnects to a sick logger); allowing two or three
+  fruitless rebuilds would survive back-to-back faults at the cost of more
+  reconnects.
+- *An unanswered background check is re-sent twice*, 3 s apart — 401 of
+  5,212 check attempts across 2,000 seeds. The loop keeps the full retry
+  budget on purpose, but §15 says asking is what wears this logger down,
+  and these go out exactly when it is struggling.
+- *Disconnect during a connect is not honoured*: the connect carries on. The
+  UI offers no Disconnect while Connecting, so it is latent.
+
+Mutation `N` (believe a late rebuild broadcast) is masked by `X`, which now
+drops it at the watcher; `N` reverts both layers so it stays a real check.
+
 ## 16. The audit — seven holes found by reading, not by losing anything
 
 Found 2026-09-15 by going through the whole tree looking for them, after

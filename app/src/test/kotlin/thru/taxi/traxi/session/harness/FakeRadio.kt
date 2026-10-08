@@ -42,6 +42,21 @@ class FakeRadio(
     /** The next this-many opens fail, as a connect to an unreachable logger does. */
     var openFailures = 0
 
+    /** When each failed open happened. */
+    val failedOpens = mutableListOf<Long>()
+
+    /** Off: every open fails until it is switched back on. See [switchOff]. */
+    var loggerOn = true
+        private set
+
+    /** The logger is switched off: its link drops, and nothing connects. */
+    fun switchOff() {
+        loggerOn = false
+        if (links.isNotEmpty() && current.isOpen && !current.dropped) dropLink()
+    }
+
+    fun switchOn() { loggerOn = true }
+
     /** Runs as a rebuild starts waiting for the old link to drop. */
     var onAwaitDown: (() -> Unit)? = null
 
@@ -116,7 +131,12 @@ class FakeRadio(
 
     override suspend fun openBluetooth(address: String): Transport {
         delay(1_500)   // an RFCOMM connect is not instant, and the gap matters
+        if (!loggerOn) {
+            failedOpens += nowMillis
+            throw IOException("read failed, socket might closed or timeout, read ret: -1")
+        }
         if (openFailures > 0) {
+            failedOpens += nowMillis
             openFailures--
             throw IOException("read failed, socket might closed or timeout, read ret: -1")
         }

@@ -78,6 +78,11 @@ dependencies {
 // verified only by reading it. Anything worth asserting belongs in a pure
 // function this source set can reach.
 tasks.withType<Test>().configureEach {
+    // LinkExplorationTest's knobs: `-Dtraxi.explore.seeds=2000` on the gradle
+    // command line reaches the test JVM only if it is passed through here.
+    listOf("traxi.explore.seeds", "traxi.explore.first", "traxi.dataDir").forEach { key ->
+        System.getProperty(key)?.let { systemProperty(key, it) }
+    }
     testLogging {
         events("passed", "failed", "skipped")
     }

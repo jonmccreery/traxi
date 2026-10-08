@@ -171,14 +171,19 @@ MUTATIONS = {
 
     # Audit 1: believe the disconnect broadcast without asking the radio, so a
     # late one from the rebuild's own close ends a session that just succeeded.
+    # Since §15.8 the watcher also drops a broadcast while the link is up (X),
+    # which masks this layer alone -- so this reverts both, and X covers the
+    # watcher layer by itself.
     "N-late-broadcast": (SESSION, [
         ("        return platform.isLinkUp(address) != true", "        return true"),
+        ("            if (platform.isLinkUp(address) == true) {\n                transcript.note(",
+         "            if (false) {\n                transcript.note("),
     ]),
 
     # Audit 2: let a rebuild publish a new link after the user disconnected.
     "O-rebuild-after-disconnect": (SESSION, [
-        ("            if (cancelRequested || connectedAddress == null ||",
-         "            if (false &&"),
+        ("            if (connectedAddress == null || _connection.value !is ConnectionState.Connected) {",
+         "            if (false) {"),
     ]),
 
     # Audit 3: keep the ten-minute clock running through a transfer, so the
@@ -196,6 +201,36 @@ MUTATIONS = {
     # Audit 5: a rebuild ends the session's memory of the logger.
     "R-rebuild-forgets": (SESSION, [
         ("        stopTelemetry(endSession = false)", "        stopTelemetry()"),
+    ]),
+
+    # §15.8, found by LinkExplorationTest. Decide a drop from the broadcast
+    # alone, and only for three seconds.
+    "V-drop-evidence": (SESSION, [
+        ("        while (!linkDroppedMidTransfer && !aclDown() && platform.nanoTime() < until) delay(100)\n"
+         "        if (aclDown()) linkDroppedMidTransfer = true\n",
+         "        while (!linkDroppedMidTransfer && platform.nanoTime() < until) delay(100)\n"),
+        ("    private val DROP_EVIDENCE_WAIT_NANOS = 20_000_000_000L",
+         "    private val DROP_EVIDENCE_WAIT_NANOS = 3_000_000_000L"),
+    ]),
+
+    # §15.8: treat Cancel during a rebuild as a disconnect.
+    "W-cancel-is-disconnect": (SESSION, [
+        ("            if (connectedAddress == null || _connection.value !is ConnectionState.Connected) {",
+         "            if (cancelRequested || connectedAddress == null || _connection.value !is ConnectionState.Connected) {"),
+    ]),
+
+    # §15.8: believe a disconnect broadcast while the radio says the link is up.
+    "X-stale-broadcast": (SESSION, [
+        ("            if (platform.isLinkUp(address) == true) {\n                transcript.note(",
+         "            if (false) {\n                transcript.note("),
+    ]),
+
+    # §15.8: do not look at the link once the watcher is listening.
+    "Y-check-after-connect": (SESSION, [
+        ("            if (platform.isLinkUp(address) == false) {\n"
+         "                onLinkLost(\"The logger disconnected while connecting.\")",
+         "            if (false) {\n"
+         "                onLinkLost(\"The logger disconnected while connecting.\")"),
     ]),
 
     # §15.7: key per-logger state by model and firmware again, which a second

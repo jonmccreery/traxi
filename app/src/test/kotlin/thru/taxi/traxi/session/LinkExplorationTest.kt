@@ -53,8 +53,10 @@ import kotlin.test.fail
  *     minute before;
  *  9. a single drop or silence during a transfer -- no second fault, the
  *     logger reachable for the next three minutes, nobody cancelling --
- *     leaves the session connected. (Back-to-back faults may legitimately end
- *     it: recovery stops when a rebuild gains no whole block, by design.)
+ *     leaves the session connected or the dump whole. (Back-to-back faults
+ *     may legitimately end it: recovery stops when a rebuild gains no whole
+ *     block, by design; a link already silent when the transfer starts
+ *     counts as a fault at that moment.)
  *
  * Reproducible: a failure names its seed and prints the event log. Run more
  * with `-Dtraxi.explore.seeds=2000` (default 40, a few seconds).
@@ -209,9 +211,13 @@ class LinkExplorationTest {
                     roll < 16 && connected() && !downloading() -> {
                         val resume = latestDump(complete = false)?.takeIf { File(it.path + ".partial").exists() }
                         session.startDownload(resume); note("download${if (resume != null) " (resume)" else ""}")
+                        // A silence lasts until a rebuild clears it, so a
+                        // transfer started on a silent link meets it now.
+                        if (live().any { it.silent }) lastFaultAt = now
                     }
                     roll < 21 && connected() && !downloading() && latestDump(complete = true) != null -> {
                         session.startIncrementalDownload(latestDump(complete = true)!!); note("fetch new")
+                        if (live().any { it.silent }) lastFaultAt = now
                     }
                     roll < 27 && connected() && !downloading() -> { session.setLogging(true); note("start logging") }
                     roll < 31 && connected() && !downloading() -> { session.readRecordMethod(); note("read flash-full setting") }
@@ -304,7 +310,10 @@ class LinkExplorationTest {
                 if (spoiled) {
                     recoverableSince = -1
                 } else if (window >= 180_000) {
-                    if (!connected()) {
+                    // Recovered if the dump is whole: a drop after the
+                    // transfer finished ends the session like an idle drop.
+                    val whole = latestDump(complete = true)?.let { it.length() >= block * dataBlocks } == true
+                    if (!connected() && !whole) {
                         return violation(
                             "a transfer fault the logger could recover from ended the session " +
                                 "(${state()::class.simpleName})"

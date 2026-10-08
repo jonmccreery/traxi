@@ -1919,6 +1919,24 @@ mutation, `V`–`Y`):
   and these go out exactly when it is struggling.
 - *Disconnect during a connect is not honoured*: the connect carries on. The
   UI offers no Disconnect while Connecting, so it is latent.
+- *Cancel, then download again within about two minutes, reads one block out
+  of step.* Found in a 4,000-seed sweep (seeds 2,001–6,000, seed 3206).
+  PMTK182 has no abort, so a cancelled block keeps streaming; the next
+  request for that block is satisfied from the leftovers, its own reply then
+  arrives as stale chunks while the following block is being asked for, and
+  three empty attempts read as a wedge. Over Bluetooth a rebuild clears it,
+  at the cost of one needless reconnect — and a fault right after it then
+  meets the back-to-back rule. A fix would let chunks for another address
+  count as a busy logger rather than a silent one, within the 240 s block
+  limit; it changes when the downloader declares a wedge, so it waits on a
+  decision.
+
+The 4,000-seed sweep otherwise found nothing new: four failures were the
+back-to-back rule (a link already silent when the transfer began, then a
+drop on the rebuilt link), and one was the explorer being too strict (a drop
+after the dump was already whole). Property 9 now counts a silent link as a
+fault when a transfer starts on it, and accepts a whole dump; seed 3206 is
+the only seed of the 4,000 that still fails, for the reason above.
 
 Mutation `N` (believe a late rebuild broadcast) is masked by `X`, which now
 drops it at the watcher; `N` reverts both layers so it stays a real check.

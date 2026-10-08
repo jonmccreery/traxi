@@ -18,6 +18,26 @@ class WritePointerScheduleTest {
         now - last >= if (probed) steady else minOf(preflight, steady)
 
     @Test
+    fun `a Start logging confirmation fires at its time, not before`() {
+        // Steady reading at 200 s, Start acknowledged at 300 s, confirm at 320 s.
+        fun confirm(now: Long) = WritePointerSchedule.isDue(
+            now, lastProbeNanos = 200 * s, firstFixNanos = 100 * s, probedYet = true,
+            preflightNanos = preflight, steadyNanos = steady, confirmAtNanos = 320 * s,
+        )
+        assertFalse(confirm(319 * s))
+        assertTrue(confirm(320 * s), "ten minutes early, on purpose")
+    }
+
+    @Test
+    fun `without a confirmation pending nothing changes`() {
+        assertFalse(
+            WritePointerSchedule.isDue(
+                400 * s, 200 * s, 100 * s, true, preflight, steady, confirmAtNanos = null,
+            )
+        )
+    }
+
+    @Test
     fun `the 2026-10-02 connect -- no fix at 20 s, so no probe`() {
         // Recorded: connect 23:09:19, probe at +20 s against a pointer that
         // could not move, first fix at +133 s. That probe is the one removed.

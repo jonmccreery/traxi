@@ -1789,152 +1789,9 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
         mutableStateOf(info.timeIntervalSeconds.toString())
     }
 
-    SectionCard("Recording") {
-        val status = Pmtk.LogStatus.parse(info.logStatus)
-        var now by remember { mutableStateOf(System.nanoTime()) }
-        LaunchedEffect(Unit) { while (true) { now = System.nanoTime(); delay(1_000) } }
-        Row2("Status", status?.describe() ?: info.logStatus)
-        Text(
-            "Read ${describeAgo((now - info.logStatusAtNanos) / 1e9)}. This row is not " +
-                "refreshed while connected.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        // Standing faults come first and in error colour, because they are the
-        // one thing in this word that is unambiguous. A cleared logging bit is
-        // a state the logger enters constantly and leaves on its own; a
-        // need_format or a full flash is recording over until someone acts, and
-        // §13 spent hours on exactly that without the app ever being able to
-        // say so -- the bits were in every reply it ever read.
-        status?.faults?.forEach { fault ->
-            Text(
-                "The logger reports that $fault. It will not start recording " +
-                    "again on its own.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
-
-        // **Asymmetric, and that is the useful thing about it.** Settled on the
-        // hardware 2026-09-19 (§16.11): the word follows the enable flag, not
-        // the fix -- it went `256` -> `258` the instant PMTK182,4 was acked,
-        // with GPRMC void either side, and the logger then sat enabled and
-        // frozen for four more minutes waiting for the sky. So an armed logger
-        // with no fix reports `0x0102`, and `0x0100` means genuinely disabled.
-        //
-        // Believe it when it says no. Do not believe it when it says yes: with
-        // the switch in NAV it claims `0x0102` over a frozen pointer (§15.2),
-        // and a software pause does not move it at all (§16.10).
-        Text(
-            "Wrong in both directions: \"NOT logging\" on any cold connect, " +
-                "\"logging\" with the switch in NAV. Only the Device tab's recording " +
-                "indicator settles it.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        // Both actions, always. Gating the *recovery* control on
-        // `isLoggingEnabled != true` made it unreachable on this unit: the bit
-        // never clears, so "Resume logging" could never be drawn -- and it is
-        // the control withLoggingPaused's own failure message tells the user to
-        // go and press when the logger has been left switched off. A recovery
-        // path that depends on an untrustworthy signal is not a recovery path.
-        // Enabling logging that is already enabled costs one command and is
-        // harmless; not being able to enable it at all is §12.
-        Button(
-            onClick = {
-                busy = true
-                container.session.setLogging(true) { busy = false }
-            },
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("Resume logging") }
-        OutlinedButton(
-            onClick = {
-                busy = true
-                container.session.setLogging(false) { busy = false }
-            },
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("Pause logging") }
-    }
-
-    // Flash-full behaviour. Never queried by this app until now, and §13
-    // recorded that a format silently leaves it on STOP -- so on a device that
-    // has been through the §13 recovery, the setting that ends recording for
-    // good is both wrong by default and invisible. It is drawn as its own card
-    // rather than a row because the STOP case is a standing fault, not a
-    // preference.
-    SectionCard("When the flash fills") {
-        val method = info.recordMethod
-        Row2("Current", method?.describe() ?: "unknown — the logger did not answer")
-
-        when (method) {
-            Pmtk.RecordMethod.STOP -> {
-                Text(
-                    "RECORDING WILL STOP WHEN FULL",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.error,
-                )
-                Text(
-                    "About three weeks at this interval, then it stops for good. A flash " +
-                        "format leaves this setting behind, so nobody need have chosen it.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
-            Pmtk.RecordMethod.OVERLAP -> Text(
-                "A full log wraps over its oldest records, so recording never stops. " +
-                    "After a wrap the oldest data lives past the write pointer.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            null -> {
-                // Not read automatically, and the card says so rather than
-                // quietly looking empty. §15: every request is spent from a
-                // budget this logger runs out of, and this setting only
-                // changes when this app changes it -- so it is read when
-                // someone asks to see it, not on every connect during a ride.
-                Text(
-                    "Not read yet: it only changes when you change it, and every query " +
-                        "costs — asking this logger is what destabilises its link.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Button(
-                    onClick = {
-                        busy = true
-                        container.session.readRecordMethod { busy = false }
-                    },
-                    enabled = !busy,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("Read the setting") }
-            }
-        }
-
-        // Both written explicitly, and neither applied automatically. The app
-        // has never silently changed device configuration and §12 is why.
-        // Hidden until the setting has been read, so nobody writes a mode
-        // blind and spends two requests discovering it was already set.
-        if (method != null) {
-        Button(
-            onClick = {
-                busy = true
-                container.session.writeRecordMethod(Pmtk.RecordMethod.OVERLAP) { busy = false }
-            },
-            enabled = !busy && method != Pmtk.RecordMethod.OVERLAP,
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("Set to OVERLAP — keep recording when full") }
-        OutlinedButton(
-            onClick = {
-                busy = true
-                container.session.writeRecordMethod(Pmtk.RecordMethod.STOP) { busy = false }
-            },
-            enabled = !busy && method != Pmtk.RecordMethod.STOP,
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("Set to STOP — preserve the oldest data") }
-        }
-    }
-
+    // Ordered by use on trail: interval and erase are the two touched in
+    // normal hiking; recording is the one needed rarely but urgently; the
+    // flash-full setting and the log format change about once a year.
     SectionCard("Log interval") {
         Row2("Current", "${info.timeIntervalSeconds} s")
         OutlinedTextField(
@@ -1955,6 +1812,185 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
             enabled = !busy && interval.toDoubleOrNull() != null,
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Write interval") }
+    }
+
+    EraseCard(container, info, busy)
+
+    // Third, after the two that get used on trail. Rebuilt 2026-10-07: the
+    // card used to lead with the logger's status word and a paragraph on why
+    // not to trust it. The word is wrong in both directions -- "NOT logging"
+    // on any cold connect, "logging" with the switch in NAV (§15.2, §16.10)
+    // -- so it is gone, and only the parts of it that are never wrong, the
+    // standing faults, remain. What replaces it is the answer: the write
+    // pointer, read once shortly after Start is acknowledged.
+    SectionCard("Recording") {
+        val session = container.session
+        val status = Pmtk.LogStatus.parse(info.logStatus)
+        val recording by session.recording.collectAsState()
+        val activity by session.liveActivity.collectAsState()
+        val confirmAt by session.loggingConfirmAt.collectAsState()
+        var startedAt by remember { mutableStateOf(0L) }
+        var now by remember { mutableStateOf(System.nanoTime()) }
+        LaunchedEffect(Unit) { while (true) { now = System.nanoTime(); delay(1_000) } }
+
+        // A need_format or a full flash is recording over until someone acts;
+        // §13 spent hours on exactly that while the bits sat in every reply.
+        status?.faults?.forEach { fault ->
+            Text(
+                "The logger reports that $fault. It will not start recording " +
+                    "again on its own.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+
+        // Always drawn, whatever the status word says: gating it on that word
+        // once made it unreachable on this unit (§12). Starting a logger that
+        // is already started costs one command and is harmless.
+        Button(
+            onClick = {
+                busy = true
+                startedAt = System.nanoTime()
+                session.setLogging(true) { busy = false }
+            },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Start logging") }
+        NavSwitchNote()
+
+        if (startedAt != 0L) {
+            val pending = confirmAt
+            val hasFix = activity.lastFixAtNanos != 0L &&
+                (now - activity.lastFixAtNanos) < FIX_RECENT_NANOS
+            val (line, color) = when {
+                pending != null -> "Start accepted. Checking the write pointer in " +
+                    "${((pending - now) / 1e9).coerceAtLeast(0.0).toInt()} s." to
+                    MaterialTheme.colorScheme.onSurfaceVariant
+
+                recording.lastProbeAtNanos > startedAt ->
+                    when (recording.verdict(info.timeIntervalSeconds, hasFix)) {
+                        RecordingActivity.Verdict.RECORDING ->
+                            "Confirmed: recording. The write pointer moved." to
+                                MaterialTheme.colorScheme.primary
+
+                        RecordingActivity.Verdict.NOT_RECORDING ->
+                            "Not recording: good fix, and the write pointer did not move. " +
+                                "Check the slide switch is on LOG." to
+                                MaterialTheme.colorScheme.error
+
+                        RecordingActivity.Verdict.NO_FIX ->
+                            "No fix yet, so nothing to write. It starts once it sees the " +
+                                "sky; the Device tab confirms at the next check." to
+                                MaterialTheme.colorScheme.onSurfaceVariant
+
+                        else ->
+                            "Checked before there was anything to write. The Device tab " +
+                                "confirms at the next check." to
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+
+                busy -> "Sending…" to MaterialTheme.colorScheme.onSurfaceVariant
+
+                else -> "Not confirmed: the start or the check went unanswered. The " +
+                    "Device tab confirms at the next check." to
+                    MaterialTheme.colorScheme.onSurfaceVariant
+            }
+            Text(line, style = MaterialTheme.typography.bodyMedium, color = color)
+        }
+
+        // Kept, but small and last: rarely wanted, and the switch overrides it
+        // anyway -- the logger acks a pause and goes on writing (§16.10).
+        TextButton(
+            onClick = {
+                busy = true
+                startedAt = 0L
+                session.setLogging(false) { busy = false }
+            },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Pause logging") }
+    }
+
+    // Never queried at connect (§15: every request is spent from a budget this
+    // logger runs out of), and §13 recorded that a format silently leaves it
+    // on STOP. It only changes when this app changes it, so the last reading
+    // is remembered per logger and shown with its date: no request needed.
+    SectionCard("When the flash fills") {
+        val remembered by container.session.rememberedRecordMethod.collectAsState()
+        val fresh = info.recordMethod
+        val method = fresh ?: remembered?.method
+        Row2("Current", method?.describe() ?: "not read yet")
+        if (fresh == null) {
+            remembered?.let {
+                Text(
+                    "As last read on %s. It only changes when this app changes it.".format(
+                        java.time.format.DateTimeFormatter.ofPattern("MMM d")
+                            .withZone(java.time.ZoneId.systemDefault())
+                            .format(java.time.Instant.ofEpochMilli(it.atMillis))),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        when (method) {
+            Pmtk.RecordMethod.STOP -> {
+                Text(
+                    "RECORDING WILL STOP WHEN FULL",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                Text(
+                    "About three weeks at this interval, then it stops for good. A flash " +
+                        "format leaves this setting behind, so nobody need have chosen it.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+            Pmtk.RecordMethod.OVERLAP -> Text(
+                "A full log wraps over its oldest records, so recording never stops. " +
+                    "After a wrap the oldest data lives past the write pointer.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            null -> Text(
+                "Not read yet: reading it costs a query, and asking this logger is what " +
+                    "destabilises its link. Once read, it is remembered.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (fresh == null) {
+            OutlinedButton(
+                onClick = {
+                    busy = true
+                    container.session.readRecordMethod { busy = false }
+                },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(if (remembered != null) "Read it again" else "Read the setting") }
+        }
+
+        // Neither applied automatically; the app has never silently changed
+        // device configuration and §12 is why. Hidden until the setting is
+        // known, so nobody writes a mode blind.
+        if (method != null) {
+            Button(
+                onClick = {
+                    busy = true
+                    container.session.writeRecordMethod(Pmtk.RecordMethod.OVERLAP) { busy = false }
+                },
+                enabled = !busy && method != Pmtk.RecordMethod.OVERLAP,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Set to OVERLAP — keep recording when full") }
+            OutlinedButton(
+                onClick = {
+                    busy = true
+                    container.session.writeRecordMethod(Pmtk.RecordMethod.STOP) { busy = false }
+                },
+                enabled = !busy && method != Pmtk.RecordMethod.STOP,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Set to STOP — preserve the oldest data") }
+        }
     }
 
     SectionCard("Log format") {
@@ -1986,7 +2022,6 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
         ) { Text("Restore original format") }
     }
 
-    EraseCard(container, info, busy)
 }
 
 /**

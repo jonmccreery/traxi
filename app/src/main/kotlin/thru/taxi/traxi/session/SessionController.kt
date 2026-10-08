@@ -324,6 +324,7 @@ class SessionController(
     private val pairing: CompanionPairing,
     private val dumps: DumpRepository,
     private val marks: RecordingMarkStore,
+    private val recordMethods: thru.taxi.traxi.data.RecordMethodStore,
     private val scope: CoroutineScope,
 ) {
     val transcript = RingTranscript(capacity = 4000)
@@ -552,6 +553,28 @@ class SessionController(
     /** Set when the session is a simulation, so the UI can say so plainly. */
     var isSimulated: Boolean = false
         private set
+
+    private val _loggingConfirmAt = MutableStateFlow<Long?>(null)
+
+    /**
+     * When the one confirming write-pointer check after Start logging is due,
+     * or null when none is pending. Set when the logger acknowledges the start;
+     * cleared by the telemetry loop when it spends the check.
+     */
+    val loggingConfirmAt: StateFlow<Long?> = _loggingConfirmAt.asStateFlow()
+
+    private val _rememberedRecordMethod = MutableStateFlow<thru.taxi.traxi.data.RecordMethodStore.Reading?>(null)
+
+    /** The last flash-full setting read from this logger, in any session. */
+    val rememberedRecordMethod: StateFlow<thru.taxi.traxi.data.RecordMethodStore.Reading?> =
+        _rememberedRecordMethod.asStateFlow()
+
+    private fun rememberRecordMethod(method: Pmtk.RecordMethod) {
+        val key = markDeviceKey ?: return
+        val reading = thru.taxi.traxi.data.RecordMethodStore.Reading(method, System.currentTimeMillis())
+        recordMethods.put(key, reading)
+        _rememberedRecordMethod.value = reading
+    }
 
     /**
      * How often the write pointer is read on this link once the pre-flight is
@@ -855,6 +878,7 @@ class SessionController(
         // Overwriting it with "unknown" would discard the baseline at exactly
         // the moment the link is misbehaving.
         markDeviceKey = if (simulated) null else "${firmware.modelName}/${firmware.release}"
+        _rememberedRecordMethod.value = markDeviceKey?.let { recordMethods.get(it) }
         val mark = RecordingSince.markFor(pointer, markDeviceKey, System.currentTimeMillis())
         if (mark != null) {
             _sinceLastSeen.value = RecordingSince.compare(
@@ -1243,10 +1267,13 @@ class SessionController(
                     probedYet = probedYet,
                     preflightNanos = firstProbeNanos,
                     steadyNanos = steadyProbeNanos,
+                    confirmAtNanos = _loggingConfirmAt.value,
                 )
                 if (due && bytesSincePump > 0) {
                     lastProbeNanos = now
                     bytesSincePump = 0
+                    // Spent whether or not it is answered: one per press.
+                    _loggingConfirmAt.value = null
                     // After the first, settle to whatever this link tolerates.
                     probedYet = true
                     val ptr = try {
@@ -1292,6 +1319,7 @@ class SessionController(
         _liveActivity.value = LiveActivity()
         fixRunSinceNanos = 0L
         _recording.value = RecordingActivity()
+        _loggingConfirmAt.value = null
         _linkHealth.value = LinkHealth()
         // The verdict describes the interval this session closed, so it goes
         // when the session does. The stored *mark* stays: it is what the next
@@ -2089,7 +2117,7 @@ class SessionController(
      * state the user can see is a state they can fix.
      */
     fun setLogging(enabled: Boolean, onDone: () -> Unit = {}) {
-        val c = client ?: run { _message.value = "Not connected"; return }
+        val c = client ?: run { _message.value = "Not connected"; onDone(); return }
         if (downloadJob?.isActive == true || _erase.value.running) {
             _message.value = "The logger is busy"
             onDone()
@@ -2109,8 +2137,16 @@ class SessionController(
                 // So report what was actually established -- that the command
                 // was accepted -- and send the user to the one indicator that
                 // cannot lie.
+                if (enabled) {
+                    // One quick confirming check, timed like the pre-flight:
+                    // two log intervals, so a record has had time to land.
+                    val interval = (_connection.value as? ConnectionState.Connected)
+                        ?.info?.timeIntervalSeconds ?: 10.0
+                    val wait = (maxOf(interval * 2, 10.0) * 1e9).toLong()
+                    _loggingConfirmAt.value = System.nanoTime() + wait
+                }
                 _message.value = if (enabled) {
-                    "Logging resumed"
+                    "Start accepted — the write pointer will confirm it shortly"
                 } else {
                     "Pause accepted by the logger — but the slide switch " +
                         "overrides it. Check the Device tab's recording indicator, " +
@@ -2179,6 +2215,7 @@ class SessionController(
             if (method != null && current != null) {
                 _connection.value =
                     ConnectionState.Connected(current.info.copy(recordMethod = method))
+                rememberRecordMethod(method)
             } else if (method == null) {
                 _message.value = "The logger did not answer that query"
                 noticeIfLinkDied()
@@ -2275,7 +2312,8 @@ class SessionController(
         // keep the last known value rather than replacing a real reading with
         // an absence, which would make the STOP warning flicker off on a single
         // dropped reply.
-        val method = c.queryRecordMethod() ?: current.info.recordMethod
+        val method = c.queryRecordMethod()?.also { rememberRecordMethod(it) }
+            ?: current.info.recordMethod
         _connection.value = ConnectionState.Connected(
             current.info.copy(
                 logStatusAtNanos = statusAt,

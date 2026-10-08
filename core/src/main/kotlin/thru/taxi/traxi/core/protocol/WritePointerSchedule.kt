@@ -18,6 +18,14 @@ package thru.taxi.traxi.core.protocol
  * than the connect-timed schedule it replaces.** Without a fix the pre-flight
  * is simply skipped and the steady rate applies, because a frozen pointer with
  * no position to write is evidence of nothing.
+ *
+ * **One exception, approved 2026-10-07:** after the user presses Start logging
+ * and the logger acknowledges it, one confirming check at [confirmAtNanos].
+ * Starting the logger has been the hardest thing in this project to be sure
+ * of, and the ten-minute wait left the answer out of reach. It costs one query
+ * per press, the caller clears it once spent, and the steady schedule restarts
+ * from it -- so it brings the next reading forward rather than adding a stream
+ * of them.
  */
 object WritePointerSchedule {
 
@@ -36,7 +44,9 @@ object WritePointerSchedule {
         probedYet: Boolean,
         preflightNanos: Long,
         steadyNanos: Long,
+        confirmAtNanos: Long? = null,
     ): Boolean {
+        if (confirmAtNanos != null && nowNanos >= confirmAtNanos) return true
         val steadyDue = nowNanos - lastProbeNanos >= steadyNanos
         if (probedYet || firstFixNanos == null) return steadyDue
         // A fix already present at connect counts from connect, never before

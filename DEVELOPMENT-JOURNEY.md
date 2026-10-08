@@ -56,8 +56,10 @@ Three prep-doc claims died on contact with the raw bytes:
   `%.1f` rounding artifact — there was **one** bad record.
 - The format register never changed mid-log; the "segments" were power cycles.
 - The spike count was 42, not 26 — and 40 of the 42 carried `VALID == 2`
-  (estimated fix), so masking on VALID, not on float sentinels, became the
-  quality rule.
+  (SPS: a fix without differential correction, not an estimate), so fix
+  quality, not float sentinels, became the basis of the quality rule: SPS
+  fixes get a tighter spike threshold rather than being masked outright,
+  since rejecting the class would drop 2,333 good points to catch 40.
 
 Device format at this point: `FMT_REG 0x000A003F` (UTC, VALID, LAT, LON,
 HEIGHT, SPEED, RCR, DISTANCE — 42-byte records), firmware

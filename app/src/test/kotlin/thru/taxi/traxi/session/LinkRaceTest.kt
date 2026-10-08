@@ -364,6 +364,128 @@ class LinkRaceTest {
         )
     }
 
+    // ---------------- §16, re-audited 2026-10-07 ----------------
+
+    @Test
+    fun `16_7 -- a disconnect during a probe is not recorded as the logger ignoring it`() = runTest {
+        // The probe can take ~9 s with retries; a cancel usually lands inside it.
+        val rig = Rig(this)
+        var checks = 0
+        rig.onSend = { link, cmd ->
+            // The connect reads the pointer once; the next is the read loop's.
+            if (cmd == "PMTK182,2,8" && ++checks == 2) {
+                link.silence()
+                backgroundScope.launch { delay(1_000); rig.session.disconnect() }
+            }
+        }
+        rig.connect()
+        rig.advance(60_000)
+
+        assertEquals(2, checks, "the read loop's probe went out")
+        val after = rig.notes.dropWhile { "disconnected by the user" !in it }
+        assertTrue(after.isNotEmpty())
+        assertFalse(after.any { "probe went unanswered" in it }, "a cancel was logged as §15 evidence")
+        assertFalse(after.any { "STREAM ENDED" in it }, "a cancel was logged as the stream dying")
+    }
+
+    @Test
+    fun `16_19 -- the connect asks for the pointer once, briefly, however the logger behaves`() = runTest {
+        // A wedged logger at connect used to hold it for 3 x 3 s.
+        val rig = Rig(this)
+        rig.onSend = { link, cmd -> if (cmd == "PMTK182,2,8") { rig.onSend = null; link.silence() } }
+        rig.session.connect(address)
+        val started = rig.radio.nowMillis
+        rig.advanceUntil(5_000) { rig.session.connection.value is ConnectionState.Connecting }
+        rig.advanceUntil(30_000) { rig.session.connection.value !is ConnectionState.Connecting }
+
+        assertEquals(1, rig.sends.count { it.second == "PMTK182,2,8" }, "the connect retried its pointer query")
+        assertTrue(
+            rig.radio.nowMillis - started < 8_000,
+            "the connect took ${(rig.radio.nowMillis - started) / 1000.0} s on an unanswered pointer",
+        )
+    }
+
+    @Test
+    fun `16_5 -- clear pairing and re-pair goes on to connect`() = runTest {
+        val rig = Rig(this)
+        rig.session.clearPairingAndReconnect(address)
+        rig.advanceUntil(60_000) { rig.session.connection.value is ConnectionState.Connected }
+        assertIs<ConnectionState.Connected>(rig.session.connection.value, "re-pair never reconnected")
+    }
+
+    @Test
+    fun `16_5 -- a double tap on connect opens one link`() = runTest {
+        val rig = Rig(this)
+        rig.session.connect(address)
+        rig.session.connect(address)
+        rig.advanceUntil(60_000) { rig.session.connection.value is ConnectionState.Connected }
+        rig.advance(10_000)
+        assertEquals(1, rig.radio.links.size)
+    }
+
+    @Test
+    fun `16_6 -- drawing the erase gate asks the logger nothing`() = runTest {
+        val rig = Rig(this)
+        rig.connect()
+        val before = rig.sends.size
+        repeat(5) { rig.session.eraseBlockers() }   // five visits to the Config tab
+        rig.advance(1_000)
+        assertEquals(emptyList(), rig.sends.drop(before).map { it.second })
+    }
+
+    @Test
+    fun `16_8 -- a download asked for with no connection still lets its service stop`() = runTest {
+        val rig = Rig(this)
+        var finished = false
+        rig.session.startDownload { finished = true }
+        rig.advance(1_000)
+        assertTrue(finished, "DownloadService would never stop")
+    }
+
+    @Test
+    fun `16_8 -- a config write during a transfer is refused, not queued behind it`() = runTest {
+        val rig = Rig(this)
+        rig.connect()
+        rig.session.startDownload()
+        rig.advanceUntil(5_000) { rig.session.download.value.running }
+        var done = false
+        rig.session.writeTimeInterval(5.0) { done = true }
+        rig.advance(1_000)
+        assertTrue(done, "the write waited behind the transfer")
+
+        rig.advanceUntil(60 * 60_000L) { !rig.session.download.value.running }
+        rig.advance(60_000)
+        assertFalse(
+            rig.sends.any { it.second.startsWith("PMTK182,1,3,") },
+            "the interval was written after the transfer, pausing logging long after the user asked",
+        )
+    }
+
+    @Test
+    fun `16_17 -- an erase does not leave the flash-full setting shown as known`() = runTest {
+        val rig = Rig(this)
+        rig.connect()
+        rig.session.readRecordMethod()
+        rig.advance(10_000)
+        assertNotNull(rig.session.rememberedRecordMethod.value)
+
+        rig.download()
+        rig.advanceUntil(30_000) { rig.session.eraseEvidence.value != null }
+        val evidence = assertNotNull(rig.session.eraseEvidence.value)
+        // After the erase, the logger does not answer the re-read of the setting.
+        var erased = false
+        rig.onSend = { link, cmd ->
+            if (cmd.startsWith("PMTK182,6")) erased = true
+            if (erased && cmd == "PMTK182,2,6") link.silence()
+        }
+        rig.session.eraseFlash(thru.taxi.traxi.core.protocol.EraseGate.confirmationWord(evidence))
+        rig.advance(5 * 60_000)
+
+        assertTrue(erased, "the erase did not run: ${rig.session.message.value}")
+        assertEquals(null, rig.session.rememberedRecordMethod.value, "a reading from before the erase is shown as current")
+        assertEquals(null, (rig.session.connection.value as? ConnectionState.Connected)?.info?.recordMethod)
+    }
+
     // ---------------- two loggers ----------------
     //
     // 2026-10-07: a second, identical BT-Q1000XT was bought as a backup. Both

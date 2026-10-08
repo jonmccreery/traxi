@@ -174,4 +174,5 @@ class MemoryMethods(val legacy: MutableMap<String, RecordMethodStore.Reading> = 
         readings[deviceKey] = reading
     }
     override fun claimLegacy(legacyKey: String) = legacy.remove(legacyKey)
+    override fun forget(deviceKey: String) { readings.remove(deviceKey) }
 }

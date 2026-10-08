@@ -24,4 +24,7 @@ interface MethodStore {
 
     /** A reading an older version stored under [legacyKey]; removed as it is returned. */
     fun claimLegacy(legacyKey: String): RecordMethodStore.Reading?
+
+    /** Drop the reading for [deviceKey]: something may have changed the setting. */
+    fun forget(deviceKey: String)
 }

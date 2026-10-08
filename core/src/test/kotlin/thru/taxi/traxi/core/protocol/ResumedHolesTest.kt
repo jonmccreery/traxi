@@ -10,7 +10,9 @@ import org.junit.BeforeClass
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import java.io.File
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -174,6 +176,49 @@ class ResumedHolesTest {
                 throw AssertionError("byte mismatch at 0x%08X".format(i))
             }
         }
+    }
+
+    /** Fails like a dropped radio link once the [n]th block request is sent. */
+    private class DropsOnBlockRequest(private val inner: Transport, private val n: Int) : Transport {
+        private var requests = 0
+        private var dropped = false
+        override val description: String get() = inner.description
+        override val blockReadIdleTimeoutMillis: Long get() = 250
+        override val isOpen: Boolean get() = inner.isOpen
+        override suspend fun open() = inner.open()
+        override fun close() = inner.close()
+        override suspend fun write(bytes: ByteArray) {
+            if (dropped) throw java.io.IOException("Broken pipe")
+            if (String(bytes, Charsets.US_ASCII).startsWith("\$PMTK182,7,") && ++requests == n) dropped = true
+            inner.write(bytes)
+        }
+        override suspend fun read(dest: ByteArray, timeoutMillis: Long): Int =
+            if (dropped) -1 else inner.read(dest, timeoutMillis)
+    }
+
+    @Test
+    fun `a link lost while repairing a hole keeps everything already held`() = runBlocking {
+        // Re-audit of §16.1, 2026-10-07: the repair ran outside the download's
+        // failure handling, so this threw -- and the session, which saves only
+        // a returned result, lost every byte its earlier segments had gathered.
+        val damaged = downloader(
+            LosesOneChunk(SimulatedLoggerTransport(flash, chunkSize = 0x800)) { true }
+        ).download()
+        assertTrue(damaged.damagedBytes > 0)
+
+        val resumed = downloader(
+            DropsOnBlockRequest(SimulatedLoggerTransport(flash, chunkSize = 0x800), n = 1)
+        ).download(
+            existing = damaged.image,
+            resumeFrom = damaged.image.size,
+            priorDamage = damaged.damagedRanges,
+        )
+
+        assertNotNull(resumed.failure, "the drop is reported as how the pass ended")
+        assertEquals(damaged.image.size, resumed.image.size, "nothing already held is lost")
+        assertContentEquals(damaged.image, resumed.image)
+        assertEquals(damaged.damagedRanges, resumed.damagedRanges, "the hole is still a hole")
+        assertFalse(resumed.isComplete)
     }
 
     @Test

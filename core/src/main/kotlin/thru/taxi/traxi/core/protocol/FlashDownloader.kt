@@ -146,8 +146,9 @@ class FlashDownloader(
          *
          * Lives here, as a function over two results, because the version
          * written inline in `SessionController.downloadWithLinkRecovery` lost
-         * two facts and could not be tested where it stood -- that class needs
-         * a `Context` and a Bluetooth stack to build. [continued] comes from a
+         * two facts and could not be tested where it stood -- that class needed
+         * a `Context` and a Bluetooth stack to build at the time (it has since
+         * taken a `LinkPlatform`, §15.6). [continued] comes from a
          * plain [download] that never saw a wrap probe, so taking its
          * `fullReread` and `sectorsFetched` wholesale reverted the first to
          * false and dropped every earlier segment from the second. The flag is
@@ -435,14 +436,37 @@ class FlashDownloader(
         var stoppedUnanswered = false
         val damaged = mutableListOf<IntRange>()
 
+        // Any failure below returns the bytes already read rather than
+        // propagating. Losing a transfer that is most of the way done, on a
+        // link that manages 493 B/s, is the single most expensive thing this
+        // class can do -- and the resume path exists precisely so it never has
+        // to happen twice.
+        var failure: String? = null
+
         // The prefix is repaired in place before anything is appended to it, so
         // the bytes written below are the best copy available rather than the
         // one that arrived first.
+        //
+        // **Inside the same promise as everything else.** The repair used to
+        // run before the try below, so a link that failed while re-reading a
+        // hole threw straight out of this function -- and out of the session's
+        // link recovery, which saved nothing: every byte earlier segments had
+        // gathered in memory was lost (found re-auditing §16.1, 2026-10-07).
+        // Now a failed repair keeps the prefix as it stands, counts every hole
+        // it was asked to fix as still missing, and ends the call there.
         val prefix = existing.copyOf(minOf(existing.size, resumeFrom))
         if (priorDamage.isNotEmpty()) {
-            val repair = repair(prefix, priorDamage, onProgress, shouldContinue)
-            damaged += repair.stillMissing
-            fetched += repair.blocksRead
+            try {
+                val repair = repair(prefix, priorDamage, onProgress, shouldContinue)
+                damaged += repair.stillMissing
+                fetched += repair.blocksRead
+            } catch (e: Exception) {
+                failure = e.message ?: e.toString()
+                damaged += priorDamage
+                client.transcript.note(
+                    "repair of %d earlier hole(s) interrupted: %s".format(priorDamage.size, failure)
+                )
+            }
         }
 
         val out = java.io.ByteArrayOutputStream(maxOf(existing.size, blockSize))
@@ -452,15 +476,8 @@ class FlashDownloader(
             client.transcript.note("resuming download at 0x%08X".format(resumeFrom))
         }
 
-        // Any failure below returns the bytes already read rather than
-        // propagating. Losing a transfer that is most of the way done, on a
-        // link that manages 493 B/s, is the single most expensive thing this
-        // class can do -- and the resume path exists precisely so it never has
-        // to happen twice.
-        var failure: String? = null
-
         try {
-        while (address < maxBytes && shouldContinue()) {
+        while (failure == null && address < maxBytes && shouldContinue()) {
             var block = client.readLogBlock(
                 address, blockSize, blockIdleTimeoutMillis,
                 onChunk = { filledInBlock ->

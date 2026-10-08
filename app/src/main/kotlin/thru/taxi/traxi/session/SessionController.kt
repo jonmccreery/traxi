@@ -563,6 +563,14 @@ class SessionController(
     val rememberedRecordMethod: StateFlow<thru.taxi.traxi.data.RecordMethodStore.Reading?> =
         _rememberedRecordMethod.asStateFlow()
 
+    private fun forgetRecordMethod() {
+        markDeviceKey?.let { recordMethods.forget(it) }
+        _rememberedRecordMethod.value = null
+        (_connection.value as? ConnectionState.Connected)?.let {
+            _connection.value = ConnectionState.Connected(it.info.copy(recordMethod = null))
+        }
+    }
+
     private fun rememberRecordMethod(method: Pmtk.RecordMethod) {
         val key = markDeviceKey ?: return
         val reading = thru.taxi.traxi.data.RecordMethodStore.Reading(method, System.currentTimeMillis())
@@ -2025,12 +2033,13 @@ class SessionController(
     }
 
     /**
-     * Reasons the device may not be erased right now, re-checked against a
-     * **freshly read** write pointer.
+     * Reasons the device may not be erased right now, for drawing the gate.
      *
-     * Suspends because of that read. The UI calls this to render the gate, and
-     * again implicitly inside [eraseFlash] -- the displayed list is a courtesy,
-     * the one inside the action is the decision.
+     * Reads nothing from the device (§16.6): it renders from the pointer the
+     * telemetry loop already keeps. The decision is made inside [eraseFlash],
+     * against a pointer read fresh at that moment -- the displayed list is a
+     * courtesy, the one inside the action is the decision. Still `suspend` so
+     * callers need not change if that ever has to differ.
      */
     suspend fun eraseBlockers(): List<EraseGate.Blocker> {
         if (client == null) {
@@ -2132,6 +2141,12 @@ class SessionController(
 
                 // Whatever happened, what we know about the device is now stale.
                 invalidateEraseEvidence()
+                // Including the flash-full setting, which is otherwise shown as
+                // "it only changes when this app changes it". A format has been
+                // seen to leave it on STOP (§13); whether this erase does is
+                // unmeasured, so the remembered reading goes, and the refresh
+                // below restores it only if the logger answers.
+                forgetRecordMethod()
                 runCatching { refreshConfig() }
                 if (!result.isClean) noticeIfLinkDied()
             } catch (e: Exception) {

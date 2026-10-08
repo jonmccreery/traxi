@@ -30,6 +30,10 @@ class RecordMethodStore(context: Context) : MethodStore {
     // Before 2026-10-07 entries were keyed by model and firmware with no
     // prefix, which a second identical unit would share. New entries carry
     // [KEYED], so an old one can be claimed once and never confused with them.
+    override fun forget(deviceKey: String) {
+        prefs.edit().remove("$KEYED$deviceKey/method").remove("$KEYED$deviceKey/atMillis").apply()
+    }
+
     override fun claimLegacy(legacyKey: String): Reading? {
         val reading = read(legacyKey)
         prefs.edit().remove("$legacyKey/method").remove("$legacyKey/atMillis").apply()

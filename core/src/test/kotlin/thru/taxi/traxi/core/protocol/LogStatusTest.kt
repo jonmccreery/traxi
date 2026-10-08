@@ -115,8 +115,12 @@ class LogStatusTest {
     }
 
     @Test
-    fun `a clear logging bit is a disabled logger, not one waiting for a fix`() {
-        // Settled on the hardware 2026-09-19 (§16.11). An earlier reading of
+    fun `the logging bit decodes from 256 and 258`() {
+        // Bit decode only. What a clear bit *means* was argued three times:
+        // §16.11 read it as "disabled"; §16.14 settled it as "no fix" -- 0x0100
+        // is what an armed logger reports with no position to write, and only
+        // the write pointer says whether anything is recorded. The narrative
+        // below is §16.11's, kept as history. An earlier reading of
         // data/ had 0x0100 as the ordinary no-fix state, which would have made
         // alarming on it a false alarm on every indoor connect. The transcript
         // says otherwise: the word went 256 -> 258 the instant PMTK182,4 was
@@ -132,7 +136,7 @@ class LogStatusTest {
         // `faults` means "will not come back without intervening in the
         // hardware" -- a format, or an erase. A disable is one button press and
         // has its own, differently-worded alarm, so mixing them would send the
-        // user to the §13 recovery for something Resume logging fixes.
+        // user to the §13 recovery for something Start logging fixes.
         assertTrue(Pmtk.LogStatus(0x0100).faults.isEmpty())
         assertFalse(Pmtk.LogStatus(0x0100).isLoggingEnabled)
     }

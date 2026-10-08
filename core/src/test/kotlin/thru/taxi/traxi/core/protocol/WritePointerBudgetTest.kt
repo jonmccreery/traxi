@@ -1,5 +1,6 @@
 package thru.taxi.traxi.core.protocol
 
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import thru.taxi.traxi.core.transport.Transport
 import kotlin.test.Test
@@ -34,6 +35,34 @@ class WritePointerBudgetTest {
         }
         override suspend fun read(dest: ByteArray, timeoutMillis: Long): Int = 0
         override fun close() { isOpen = false }
+    }
+
+    @Test
+    fun `a cancel inside the query is a cancel, not a missing answer`() = runBlocking {
+        // §16.7 re-audit: runCatching turned the cancel into null, and the
+        // caller logged an unanswered probe the logger never ignored.
+        val waits = object : Transport {
+            override val description = "deaf, and slow about it"
+            override var isOpen = false
+            override suspend fun open() { isOpen = true }
+            override suspend fun write(bytes: ByteArray) = Unit
+            override suspend fun read(dest: ByteArray, timeoutMillis: Long): Int {
+                kotlinx.coroutines.delay(10); return 0
+            }
+            override fun close() { isOpen = false }
+        }
+        waits.open()
+        val client = PmtkClient(waits)
+        var carriedOn = false
+        val job = launch {
+            client.queryWritePointer()
+            carriedOn = true
+        }
+        kotlinx.coroutines.delay(200)
+        job.cancel()
+        job.join()
+        assertTrue(job.isCancelled)
+        assertEquals(false, carriedOn, "a cancelled query returned to its caller as if unanswered")
     }
 
     @Test

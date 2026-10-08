@@ -1954,6 +1954,8 @@ Those tests now assert the fixed behaviour instead, so each one is a regression
 test for exactly one of these. §16.9 records how that claim was checked, and
 what checking it caught.
 
+> **Re-audit, 2026-10-07 (§16.20):** that held for §16.1–16.4. §16.5–16.8 shipped with no test at all, and two fixes were incomplete (§16.1's repair path, §16.7's probe branch); all now have tests and mutation entries.
+
 The two that matter most are §16.1 and §16.3. Both defeat a protection this
 project already built, on purpose, after a real incident.
 
@@ -1963,6 +1965,9 @@ assumption in §16.3 and turned up two things about the hardware that no
 simulator could have told us.
 
 ### 16.1 A resume launders a holed dump into a verified one
+
+> **Re-audit, 2026-10-07 (§16.20):** the fix below was incomplete — the repair of earlier holes ran outside the download's failure handling, so a link lost during it lost the whole transfer in memory. Fixed and tested.
+
 
 **`FlashDownloader.Result.damagedRanges` describes one `download()` call, not
 the image on disk.** The resume path passes the previous image in as `existing`
@@ -2130,7 +2135,7 @@ buffer when the next query is sent will be matched by it.
 
 The exposure is now small and bounded — it needs a retry, and then a second
 request inside the round trip that follows, where the steady probe interval is
-60 s — but it is not zero, and a stale write pointer is exactly the input the
+60 s (600 s since §15; see §16.20) — but it is not zero, and a stale write pointer is exactly the input the
 erase gate's coverage rule trusts. The `retry` note in the transcript is what
 makes such a reading explicable after the fact. A proper fix needs a
 correlating field the protocol does not have, or a rule that treats a repeated
@@ -2186,6 +2191,8 @@ state. One flag fixes both halves.
 Bluetooth, because 17 probes in three minutes took the link down. Only the
 telemetry loop honoured it.
 
+> **Re-audit, 2026-10-07 (§16.20):** the Bluetooth interval is now 600 s. The fix below held but had no test; `16_6 -- drawing the erase gate asks the logger nothing` now pins it.
+
 `EraseCard`'s `LaunchedEffect` calls `eraseBlockers()`, which queries the write
 pointer, and `when (tab)` disposes the tab — so **every entry to the Config tab
 fired one probe**, unlimited. Five tab flips in a minute is one probe per 12 s,
@@ -2198,6 +2205,9 @@ proportionate, and that was always the intent: the displayed list is a
 courtesy, the one inside the action is the decision.
 
 ### 16.7 Cancellation was caught and re-reported as the device misbehaving
+
+> **Re-audit, 2026-10-07 (§16.20):** the probe-branch half of this fix was defeated by `runCatching` inside `queryWritePointer`, which swallowed the cancel before the loop could rethrow it. Fixed and tested.
+
 
 `kotlinx.coroutines.CancellationException` is an `Exception`, and the telemetry
 loop caught it twice:
@@ -2425,6 +2435,8 @@ enabled costs one command and is harmless; being unable to enable it at all is
 the failure this project exists to prevent. The status row now says in words
 that it is the device's claim rather than evidence, and points at the Device
 tab, where the indicator is computed from the write pointer.
+
+> **Re-audit, 2026-10-07 (§16.20):** that status row was removed with the Config rebuild (b6763b3); only its standing faults remain, beside **Start logging** (formerly Resume logging). Both controls are still always drawn. Separately, the erase-ack reasoning in this section does not match the code: `Ack.from` gives a 3-field `PMTK001,182,6` no subcommand, so the tightened match would never accept it and the erase would end in a 90 s timeout, not "rejected". Same outcome, wrong mechanism; the erase ack's real shape is still unobserved.
 
 The pause message changed for the same reason. "Logging paused" was a claim
 about the device inferred from an acknowledgement; it now reports that the
@@ -2808,6 +2820,8 @@ and names the run that would confirm the implication; the `NothingWritten` card
 says outright, in error colour, that a beep over a failed write means the beep
 is not a recording check.
 
+> **Re-audit, 2026-10-07 (§16.20):** tightened by 691532d (2026-09-25): the `Proven` card now credits the beep only when more records landed than the interval timer can account for (`MarkProof.markIsolated`), after a hardware run where 21 records in four minutes at 10 s were all the timer's.
+
 Until that experiment is run, **the beep is unvalidated and the app does not
 tell the user to trust it.**
 
@@ -2819,6 +2833,7 @@ tell the user to trust it.**
   is not load-bearing. Worth one measurement indoors.
 - The check has not been run against the hardware. The arithmetic is tested;
   the ceremony is not.
+  *Re-audit, 2026-10-07:* run on 2026-09-25 (see above); this item is closed.
 
 
 ### 16.14 The status word, third time: §15.2 was right and I should have left it alone
@@ -2923,6 +2938,8 @@ entire job is that verdict it can only compete with the reading that can.
 
 So the raw bit is no longer drawn on the Device tab. It stays on the Config tab,
 dated, where it is a settings readout on the screen used to change settings.
+
+> **Re-audit, 2026-10-07 (§16.20):** the dated Config row went too, on 2026-10-07 (b6763b3). The raw word is now drawn nowhere in a real session; its decoded faults remain.
 What remains on the live card is the part that is actionable and does not
 flicker with fix state: the standing faults, and the NAV warning, both of which
 require a measurement before they say anything.
@@ -2959,6 +2976,8 @@ one of these detours came back to.
   and needs ~217 KB off the device.
 - `RECORD_METHOD` (field 6) is still never queried by the app, and a format
   leaves it on STOP. Unrelated to this, still a silent-loss trap.
+  *Re-audit, 2026-10-07:* both items are closed — the journal was read in §16.15,
+  and the record method is read on demand (§16.17) and remembered per logger.
 
 
 ### 16.15 The flash journal, finally read — and what a fetch costs while it runs
@@ -3057,9 +3076,13 @@ mid-ride is data loss**, which nothing in the app currently says.
   "Fetch new" with no indication that the logger stops writing while it works.
   That is exactly the shape §12 was about: a deliberate action with a silent
   cost. It should say so, and say roughly how much.
+  *Re-audit, 2026-10-07: closed.* Over Bluetooth the Download card and the
+  running transfer now say the logger records about one fix every 2¾ minutes
+  while it reads out, and to read at camp rather than mid-ride.
 - `RECORD_METHOD` (field 6) is **still never queried**, and a format leaves it on
   STOP. It is not in the flash image either, so this dump could not settle it.
   One query. Last untested silent-loss path.
+  *Re-audit, 2026-10-07: closed* by §16.17–16.18 (read: OVERLAP).
 
 ### 16.16 The download estimate pays off a debt it took on before it started
 
@@ -3161,6 +3184,10 @@ ending on a date nobody chose.
 - **What it is actually set to on this device.** The card will say the moment
   the app next connects. The dump cannot answer it; this setting is not in the
   flash image.
+  *Re-audit, 2026-10-07: closed* — OVERLAP (§16.18). One gap found instead: an
+  erase may reset this setting, and the remembered reading was still shown as
+  current afterwards. It is now forgotten on every erase and restored only if the
+  logger answers the re-read (test `16_17`, mutation `AG`).
 
 ### 16.18 The connect budget, enforced instead of remembered
 
@@ -3252,8 +3279,60 @@ every 60 s regardless, so the saving is one request per session, against losing
 the `RecordingSince` mark for any session shorter than the first probe. The
 damage was never the request existing. It was the request blocking.
 
+> **Re-audit, 2026-10-07 (§16.20):** the steady interval is 600 s now, and the pre-flight is timed from the first fix, so Option C's saving is still about one request per session. The connect's 2 s × 1 budget had no test at its call site; `16_19 -- the connect asks for the pointer once, briefly` now pins it (mutation `AF`).
+
 `WritePointerBudgetTest` pins that the budget is honoured — a default silently
 ignoring the argument would restore the twelve seconds with nothing to show.
+
+### 16.20 Re-audit, 2026-10-07: what held, what did not, what was stale
+
+Every §16 claim was re-checked against the code by three read-only reviews,
+and the serious findings confirmed by hand. Nothing had regressed, and the
+day's `LinkPlatform` and recovery rework undid none of it. But:
+
+**Two fixes were incomplete.**
+
+- **§16.1 — a repair could lose a whole recovered transfer.** Re-reading
+  earlier holes ran *before* the download's failure handling, so a link lost
+  during it threw out of the download and out of link recovery, and the
+  session saved nothing: every byte earlier segments had gathered was gone.
+  Present since the original fix; more likely since recovery began answering
+  drops (§15.5). The repair is now inside the same "keep what you have"
+  promise: a failed repair keeps the prefix, counts its holes as still
+  missing, and ends the pass. `ResumedHolesTest`, mutation `Z`.
+- **§16.7 — the probe branch's cancellation fix was defeated one layer
+  down.** `queryWritePointer` (and the record-method and flash-id queries)
+  wrapped themselves in `runCatching`, which catches `CancellationException`
+  too. A Disconnect or link loss inside a probe — up to ~9 s with retries —
+  came back as "no answer", and the loop wrote *"write-pointer probe went
+  unanswered; this logger's Bluetooth link often drops immediately after
+  one"*: §15 evidence the app invented. They now rethrow cancellation
+  (`answeredOrNull`). `WritePointerBudgetTest` and `LinkRaceTest 16_7`,
+  mutation `AA`.
+
+**Four fixes had no test.** §16.5 (re-pair reaches connect; a double tap
+opens one link), §16.6 (drawing the erase gate asks nothing), §16.8 (a
+refused download still stops its service; a config write during a transfer
+is refused, not queued) and §16.19's connect budget now each have a
+`LinkRaceTest` and a mutation (`AB`–`AF`); each mutation is killed.
+
+**Two gaps closed on the way:** a remembered flash-full reading is forgotten
+on erase (§16.17, `AG`); and the Dumps tab now says what a Bluetooth read
+costs the recording (§16.15).
+
+**Doc corrections**, marked where they occur: the 60 s probe interval is
+600 s; the status row (§16.10) and the dated Config row (§16.14) were removed
+on 2026-10-07; §16.13's proof ran on the hardware on 2026-09-25 and the beep
+claim was tightened then; several "Still open" items were closed by later
+sections. Stale code comments on `eraseBlockers`, the erase card and the
+Device card were corrected, and two tests renamed: one claimed a clear
+logging bit means disabled (§16.14 says otherwise), one called a frozen
+pointer "the one unambiguous alarm" (§16.12 forbids alarming on it).
+
+**Still open, unchanged:** the erase acknowledgement's shape has never been
+observed (§16.10); there is still no request correlation in the protocol
+(§16.3); `DumpRepository`'s sidecar and the `SharedPreferences` stores have no
+on-device test; `ConnectBudgetTest` checks query names, not counts.
 
 ### The rule
 

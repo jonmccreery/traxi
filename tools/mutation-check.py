@@ -233,6 +233,69 @@ MUTATIONS = {
          "                onLinkLost(\"The logger disconnected while connecting.\")"),
     ]),
 
+    # §16 re-audit, 2026-10-07. Each of these protections had no test.
+
+    # §16.1: let a link lost while repairing an earlier hole throw out of the
+    # download, so nothing earlier segments gathered is saved.
+    "Z-repair-in-try": (DOWNLOADER, [
+        ("            } catch (e: Exception) {\n"
+         "                failure = e.message ?: e.toString()\n"
+         "                damaged += priorDamage\n",
+         "            } catch (e: UnsupportedOperationException) {\n"
+         "                failure = e.message ?: e.toString()\n"
+         "                damaged += priorDamage\n"),
+    ]),
+
+    # §16.7: turn a cancel inside a query into "no answer" again.
+    "AA-cancel-swallowed": (CLIENT, [
+        ("        } catch (e: kotlinx.coroutines.CancellationException) {\n            throw e\n", ""),
+    ]),
+
+    # §16.5: guard connect on the visible state, which the re-pair path has
+    # already set to Connecting, instead of an atomic claim.
+    "AB-connect-claim": (SESSION, [
+        ("    fun connect(address: String) {\n        if (!connectAttempt.compareAndSet(false, true)) return",
+         "    fun connect(address: String) {\n        if (_connection.value is ConnectionState.Connecting) return"),
+    ]),
+
+    # §16.6: let drawing the erase gate ask the logger for its pointer.
+    "AC-gate-queries": (SESSION, [
+        ("        // **Renders from the pointer the telemetry loop already keeps**, and",
+         "        runCatching { client?.queryWritePointer() }\n"
+         "        // **Renders from the pointer the telemetry loop already keeps**, and"),
+    ]),
+
+    # §16.8: a download refused for want of a connection never stops its service.
+    "AD-download-on-finished": (SESSION, [
+        ("        // See startIncrementalDownload: onFinished is DownloadService.stopSelf.\n"
+         "        if (client == null) {\n"
+         "            _message.value = \"Not connected\"\n"
+         "            onFinished()\n",
+         "        // See startIncrementalDownload: onFinished is DownloadService.stopSelf.\n"
+         "        if (client == null) {\n"
+         "            _message.value = \"Not connected\"\n"),
+    ]),
+
+    # §16.8: let a config write queue behind a transfer.
+    "AE-write-busy": (SESSION, [
+        ("    fun writeTimeInterval(seconds: Double, onDone: () -> Unit = {}) {\n"
+         "        val c = client ?: run { _message.value = \"Not connected\"; onDone(); return }\n"
+         "        if (isBusy(onDone)) return\n",
+         "    fun writeTimeInterval(seconds: Double, onDone: () -> Unit = {}) {\n"
+         "        val c = client ?: run { _message.value = \"Not connected\"; onDone(); return }\n"),
+    ]),
+
+    # §16.19: give the connect-time pointer query the full 3 x 3 s budget.
+    "AF-connect-pointer-budget": (SESSION, [
+        ("c.queryWritePointer(timeoutMillis = 2_000, retries = 1)", "c.queryWritePointer()"),
+    ]),
+
+    # §16.17: keep showing the pre-erase flash-full reading as current.
+    "AG-erase-forgets-method": (SESSION, [
+        ("                forgetRecordMethod()\n                runCatching { refreshConfig() }",
+         "                runCatching { refreshConfig() }"),
+    ]),
+
     # §15.7: key per-logger state by model and firmware again, which a second
     # identical BT-Q1000XT shares.
     "S-model-key": (SESSION, [

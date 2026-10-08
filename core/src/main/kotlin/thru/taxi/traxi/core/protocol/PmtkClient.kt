@@ -260,8 +260,7 @@ class PmtkClient(
      * must not block an otherwise usable session.
      */
     suspend fun queryRecordMethod(): Pmtk.RecordMethod? =
-        runCatching { Pmtk.RecordMethod.parse(queryConfig(Pmtk.ConfigField.RECORD_METHOD)) }
-            .getOrNull()
+        answeredOrNull { Pmtk.RecordMethod.parse(queryConfig(Pmtk.ConfigField.RECORD_METHOD)) }
 
     /**
      * Flash identity, decoded from the JEDEC RDID the device returns.
@@ -271,7 +270,7 @@ class PmtkClient(
      *   worse than none, because a download sized from it truncates silently.
      */
     suspend fun queryFlashId(): Pmtk.FlashId? =
-        runCatching { Pmtk.FlashId.parse(queryConfig(Pmtk.ConfigField.FLASH_SIZE)) }.getOrNull()
+        answeredOrNull { Pmtk.FlashId.parse(queryConfig(Pmtk.ConfigField.FLASH_SIZE)) }
 
     /**
      * Next write address in bytes.
@@ -297,10 +296,31 @@ class PmtkClient(
     suspend fun queryWritePointer(
         timeoutMillis: Long = defaultTimeoutMillis,
         retries: Int = defaultRetries,
-    ): Long? = runCatching {
+    ): Long? = answeredOrNull {
         queryConfig(Pmtk.ConfigField.WRITE_POINTER, timeoutMillis, retries)
             .trim().toLong(16)
-    }.getOrNull()
+    }
+
+    /**
+     * [block]'s value, or null if the device did not answer it usably -- but
+     * a **cancellation is rethrown**, never turned into "no answer".
+     *
+     * These queries used `runCatching`, which catches `CancellationException`
+     * with everything else. So a Disconnect or link loss landing inside a
+     * write-pointer probe -- up to ~9 s with retries, where a cancel usually
+     * lands -- came back as null, and the read loop then wrote "write-pointer
+     * probe went unanswered; this logger's Bluetooth link often drops
+     * immediately after one": evidence §15 counts, invented by the app. §16.7
+     * fixed the loop's own catch and this one undid it (re-audit, 2026-10-07).
+     */
+    private inline fun <T> answeredOrNull(block: () -> T): T? =
+        try {
+            block()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
 
     /**
      * Read [length] bytes of raw log at [address].

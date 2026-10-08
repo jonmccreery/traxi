@@ -1069,8 +1069,10 @@ private fun DeviceInfoCard(
             // condemn a logger or clear one, so on the card whose whole job is
             // that verdict it can only compete with the reading that can.
             //
-            // It stays on the Config tab, dated, where it belongs: a settings
-            // readout on the screen you use to change settings. What survives
+            // It was kept on the Config tab, dated, until 2026-10-07, when that
+            // row went too: wrong in both directions, it explained itself in a
+            // paragraph and settled nothing. Only its standing faults remain
+            // there, beside Start logging. What survives
             // here is the part that is genuinely actionable and does not flicker
             // with fix state -- the standing faults below, and the NAV warning,
             // both of which require a measurement before they say anything.
@@ -1502,6 +1504,24 @@ private fun utcStamp(millis: Long): String =
 
 // ---------------- dumps ----------------
 
+/**
+ * What a Bluetooth read costs the recording, said where it is started.
+ *
+ * Measured 2026-09-24 (§16.15): while the logger reads its flash out it writes
+ * about one fix per 64 KB block -- one every ~2¾ minutes instead of one every
+ * interval, roughly 96% of fixes lost for as long as the read runs. A fetch
+ * started mid-ride is data loss, and until this nothing said so.
+ */
+@Composable
+private fun FetchCostsRecording() {
+    Text(
+        "While reading over Bluetooth the logger records only about one fix every " +
+            "2¾ minutes. Read at camp, not mid-ride; USB takes seconds.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
 @Composable
 private fun DumpsTab(
     container: AppContainer,
@@ -1510,6 +1530,8 @@ private fun DumpsTab(
     summary: ParseSummary?,
 ) {
     val context = LocalContext.current
+    val overBluetooth = (connection as? ConnectionState.Connected)
+        ?.info?.transportDescription?.startsWith("bluetooth ") == true
     val scope = rememberCoroutineScope()
     var dumps by remember { mutableStateOf<List<DumpRepository.Dump>>(emptyList()) }
 
@@ -1559,6 +1581,7 @@ private fun DumpsTab(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            if (overBluetooth) FetchCostsRecording()
             OutlinedButton(
                 onClick = { container.session.cancelDownload() },
                 modifier = Modifier.fillMaxWidth(),
@@ -1570,6 +1593,7 @@ private fun DumpsTab(
                 onClick = { DownloadService.start(context) },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Download flash") }
+            if (overBluetooth) FetchCostsRecording()
         }
     }
 
@@ -2078,8 +2102,8 @@ private fun EraseCard(container: AppContainer, info: DeviceInfo, parentBusy: Boo
     var typed by remember { mutableStateOf("") }
 
     // Re-check whenever the evidence changes or the device stops being busy.
-    // The pointer is read from the device, so this cannot be a pure function of
-    // UI state -- and it must not run mid-transfer, which eraseBlockers guards.
+    // eraseBlockers reads nothing from the device (§16.6) -- it uses the pointer
+    // the read loop already holds -- and refuses mid-transfer on its own.
     LaunchedEffect(evidence, eraseState.running, downloadState.running) {
         blockers = session.eraseBlockers()
     }

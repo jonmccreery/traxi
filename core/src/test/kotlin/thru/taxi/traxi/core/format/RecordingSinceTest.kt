@@ -61,7 +61,7 @@ class RecordingSinceTest {
     }
 
     @Test
-    fun `a pointer that never moved is the one unambiguous alarm`() {
+    fun `a pointer that never moved is reported as nothing written, not as an alarm`() {
         val v = compare(mark(191_904, 0L), mark(191_904, 3 * 3600 * 1000L))
         assertIs<RecordingSince.Verdict.WroteNothing>(v)
         assertEquals(3 * 3600L, v.elapsedSeconds)

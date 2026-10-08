@@ -84,6 +84,26 @@ private fun describeAgo(seconds: Double): String = when {
 }
 
 /**
+ * When the next write-pointer reading is due, so a quiet card can be told apart
+ * from a hung one.
+ *
+ * The steady schedule is exact -- the next reading comes [intervalSeconds]
+ * after the last -- so this is arithmetic, not a guess, and it asks the logger
+ * nothing. Overdue only past a 30 s grace: the loop also waits for the logger
+ * to be sending before it asks, and an unanswered reading leaves the last
+ * answered one in place, so "overdue" is worth noticing but is not, alone, a
+ * fault.
+ */
+internal fun describeNextCheck(checkedAgo: Double, intervalSeconds: Double): String {
+    val left = intervalSeconds - checkedAgo
+    return when {
+        left > 60 -> "next in ${kotlin.math.ceil(left / 60).toInt()} min"
+        left > -30 -> "next in under a minute"
+        else -> "next check ${kotlin.math.ceil(-left / 60).toInt()} min overdue"
+    }
+}
+
+/**
  * A span, for the gaps between sessions.
  *
  * [describeAgo] tops out at "over an hour ago", which is right for the age of a
@@ -693,8 +713,14 @@ private fun DeviceTab(
 
     when (connection) {
         is ConnectionState.Connected -> {
+            DeviceInfoCard(
+                connection.info, session.isSimulated, recording, liveActivity,
+                session.writePointerProbeIntervalSeconds,
+            )
+            // Below the logger, not above it: "is it recording now" is the
+            // question this tab answers first; what happened while the app was
+            // away is history.
             sinceLastSeen?.let { SinceLastSeenCard(it) }
-            DeviceInfoCard(connection.info, session.isSimulated, recording, liveActivity)
             if (!session.isSimulated) ProveRecordingCard(session, markProof)
             BatteryExemptionCard()
             OutlinedButton(
@@ -891,6 +917,7 @@ private fun DeviceInfoCard(
     simulated: Boolean,
     recording: RecordingActivity,
     activity: LiveActivity,
+    probeIntervalSeconds: Double,
 ) {
     SectionCard(if (simulated) "Simulated logger" else "Logger") {
         Text(info.displayModel, style = MaterialTheme.typography.titleLarge)
@@ -921,6 +948,7 @@ private fun DeviceInfoCard(
             // logger that was recording perfectly. A false alarm here is worse
             // than no alarm: it is the one reading the user is asked to trust.
             val checkedAgo = (now - recording.lastProbeAtNanos) / 1e9
+            val nextCheck = describeNextCheck(checkedAgo, probeIntervalSeconds)
             // A frozen pointer means nothing without knowing whether the
             // receiver had anything to write. Indoors this logger holds no fix
             // for hours and correctly records nothing; calling that "not
@@ -958,7 +986,7 @@ private fun DeviceInfoCard(
                     // reading is a checked observation, not a live feed, and
                     // pretending otherwise is what the old rule did wrong.
                     Text(
-                        "Last checked ${describeAgo(checkedAgo)}.",
+                        "Last checked ${describeAgo(checkedAgo)} · $nextCheck.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -984,8 +1012,8 @@ private fun DeviceInfoCard(
                     Row2("Recording", "not checked since the fix")
                     Text(
                         ("Last checked %s, before the fix — nothing to write then. " +
-                            "The next scheduled check will confirm.").format(
-                            describeAgo(checkedAgo)),
+                            "The next scheduled check will confirm: %s.").format(
+                            describeAgo(checkedAgo), nextCheck),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -998,9 +1026,10 @@ private fun DeviceInfoCard(
                         color = MaterialTheme.colorScheme.error,
                     )
                     Text(
-                        ("Good fix, pointer unmoved after %.0f s. Checked %s. " +
+                        ("Good fix, pointer unmoved after %.0f s. Checked %s · %s. " +
                             "Fixes are being lost.").format(
-                            recording.frozenUnderFixNanos / 1e9, describeAgo(checkedAgo)),
+                            recording.frozenUnderFixNanos / 1e9, describeAgo(checkedAgo),
+                            nextCheck),
                         style = MaterialTheme.typography.bodySmall,
                     )
                     // The switch comes first because it is the likelier cause

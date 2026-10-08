@@ -553,6 +553,15 @@ class SessionController(
     var isSimulated: Boolean = false
         private set
 
+    /**
+     * How often the write pointer is read on this link once the pre-flight is
+     * done -- the same figure the telemetry loop schedules from. Read-only, for
+     * the Device card's "next check in" countdown; a reading that states only
+     * its age looks the same whether the app is waiting or hung.
+     */
+    val writePointerProbeIntervalSeconds: Double
+        get() = (transport?.writePointerProbeIntervalMillis ?: 600_000L) / 1000.0
+
     fun clearMessage() { _message.value = null }
 
     // ---------------- connect ----------------

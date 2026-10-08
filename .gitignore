@@ -50,3 +50,6 @@ __pycache__/
 
 # --- local, machine-specific Claude Code settings ---
 .claude/settings.local.json
+
+# --- local Claude Code session transcripts ---
+/session*.txt

@@ -21,10 +21,17 @@ import java.util.Locale
  * scoped-storage rules — which broke the vendor app — do not apply. Export to a
  * user-visible location is a separate, explicit action.
  */
-class DumpRepository(private val context: Context) {
+class DumpRepository(
+    private val filesDir: File,
+    private val cacheDir: File,
+    /** Where file work runs. Tests pass their own, so it follows virtual time. */
+    private val io: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO,
+) {
+
+    constructor(context: Context) : this(context.filesDir, context.cacheDir)
 
     private val directory: File
-        get() = File(context.filesDir, "dumps").apply { mkdirs() }
+        get() = File(filesDir, "dumps").apply { mkdirs() }
 
     data class Dump(
         val file: File,
@@ -57,7 +64,7 @@ class DumpRepository(private val context: Context) {
         val sectorSpan: Int get() = (sizeBytes / 0x10000).toInt()
     }
 
-    suspend fun list(): List<Dump> = withContext(Dispatchers.IO) {
+    suspend fun list(): List<Dump> = withContext(io) {
         directory.listFiles { f -> f.isFile && f.name.endsWith(BIN_SUFFIX) }
             .orEmpty()
             .map { file ->
@@ -78,7 +85,7 @@ class DumpRepository(private val context: Context) {
         return File(directory, "flash-$stamp$BIN_SUFFIX")
     }
 
-    suspend fun read(file: File): ByteArray = withContext(Dispatchers.IO) {
+    suspend fun read(file: File): ByteArray = withContext(io) {
         file.readBytes()
     }
 
@@ -102,7 +109,7 @@ class DumpRepository(private val context: Context) {
          * opened on a dump that was missing data. See §16.1.
          */
         damaged: List<IntRange> = emptyList(),
-    ) = withContext(Dispatchers.IO) {
+    ) = withContext(io) {
             val temp = File(file.path + ".tmp")
             temp.writeBytes(bytes)
             if (!temp.renameTo(file)) {
@@ -137,7 +144,7 @@ class DumpRepository(private val context: Context) {
      * one, which is why the fix had to be paired with re-reading rather than
      * with detection.
      */
-    suspend fun damagedRanges(file: File): List<IntRange> = withContext(Dispatchers.IO) {
+    suspend fun damagedRanges(file: File): List<IntRange> = withContext(io) {
         val marker = File(file.path + PARTIAL_MARKER)
         if (!marker.exists()) return@withContext emptyList()
         val line = runCatching { marker.readLines() }.getOrNull()
@@ -153,7 +160,7 @@ class DumpRepository(private val context: Context) {
     }
 
     /** Byte offset a partial dump should resume from, or 0 if not resumable. */
-    suspend fun resumeOffset(file: File): Int = withContext(Dispatchers.IO) {
+    suspend fun resumeOffset(file: File): Int = withContext(io) {
         if (!File(file.path + PARTIAL_MARKER).exists()) return@withContext 0
         // Resume must land on a block boundary; truncate to the last complete
         // block rather than trusting a byte count that may straddle one.
@@ -161,15 +168,15 @@ class DumpRepository(private val context: Context) {
         whole.toInt()
     }
 
-    suspend fun delete(file: File) = withContext(Dispatchers.IO) {
+    suspend fun delete(file: File) = withContext(io) {
         file.delete()
         File(file.path + PARTIAL_MARKER).delete()
     }
 
     /** Write text (a GPX export or a transcript) to the app's cache for sharing. */
     suspend fun writeShareable(name: String, content: String): File =
-        withContext(Dispatchers.IO) {
-            val exports = File(context.cacheDir, "exports").apply { mkdirs() }
+        withContext(io) {
+            val exports = File(cacheDir, "exports").apply { mkdirs() }
             File(exports, name).apply { writeText(content) }
         }
 

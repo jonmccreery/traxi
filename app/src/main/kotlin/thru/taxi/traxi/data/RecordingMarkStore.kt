@@ -15,7 +15,7 @@ import thru.taxi.traxi.core.format.RecordingSince
  * Deliberately one mark, not a history. The question is "what has it done since
  * I last looked", and a second entry would only invite showing a stale answer.
  */
-class RecordingMarkStore(context: Context) {
+class RecordingMarkStore(context: Context) : MarkStore {
 
     private val prefs = context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
 
@@ -27,7 +27,7 @@ class RecordingMarkStore(context: Context) {
      * discarding one is a single session that says "no earlier reading" --
      * against a wrong duration presented as fact.
      */
-    fun last(): RecordingSince.Mark? {
+    override fun last(): RecordingSince.Mark? {
         val pointer = prefs.getLong(KEY_POINTER, -1L)
         val at = prefs.getLong(KEY_AT_MILLIS, -1L)
         val device = prefs.getString(KEY_DEVICE, null)
@@ -35,7 +35,7 @@ class RecordingMarkStore(context: Context) {
         return RecordingSince.Mark(pointer = pointer, atMillis = at, deviceKey = device)
     }
 
-    fun put(mark: RecordingSince.Mark) {
+    override fun put(mark: RecordingSince.Mark) {
         prefs.edit()
             .putLong(KEY_POINTER, mark.pointer)
             .putLong(KEY_AT_MILLIS, mark.atMillis)

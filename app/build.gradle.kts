@@ -70,6 +70,7 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(kotlin("test"))
     testImplementation(kotlin("test-junit"))
+    testImplementation(libs.kotlinx.coroutines.test)
 }
 
 // The app module had no unit tests at all until 2026-09-15, so every piece of

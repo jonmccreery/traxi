@@ -1795,6 +1795,51 @@ The pattern behind all six: each mechanism was right alone, and each failure
 needed two of them reacting to the same event — which needs Android's real
 Bluetooth stack, so no unit test reached it.
 
+### 15.6 The link races, as tests
+
+Every bug in §15.5 needed two mechanisms reacting to one event, and each
+needed Android's Bluetooth stack to happen, so none could be unit-tested.
+That is now closed.
+
+`SessionController` takes a `LinkPlatform` instead of a `Context`: opening
+RFCOMM, waiting out the old ACL, asking whether it is up, the
+`ACL_DISCONNECTED` and USB-detach watches, the foreground hold, bonding, and
+the clock. `AndroidLinkPlatform` holds exactly the calls the session used to
+make, moved and unchanged; `PmtkClient` now takes the platform's monotonic
+clock instead of `currentTimeMillis`, which only its deadline arithmetic
+reads. The stores sit behind `MarkStore` and `MethodStore`, and
+`DumpRepository` takes its folders and dispatcher.
+
+`LinkRaceTest` runs the real session — connect, download, recovery, watcher,
+read loop — against `FakeLoggerLink` and `FakeRadio` on virtual time:
+
+- `FakeLoggerLink` speaks the protocol (via `SimulatedLoggerTransport`) at a
+  wire rate, so a block takes about two minutes; streams a fix a second;
+  can be **silenced** (commands unanswered, NMEA flowing — the §15 wedge) or
+  **dropped** (reads fail, while `isOpen` stays true, as `isConnected` does).
+- `FakeRadio` models the ACL and its broadcast separately, with the two gaps
+  the races live in: how long a closed link takes to read as down
+  (`teardownMillis`), and how long after that the broadcast lands
+  (`broadcastLagMillis`).
+
+The flash is the first six blocks of `cdt_v2.bin`, so every download ends in
+a real parse. Ten tests: the 2026-10-07 drop, a silence, a drop while idle,
+the five audit findings that have behaviour (1–5), cancelling inside the
+settle, and a rebuild that cannot reconnect. The whole class runs in seconds.
+
+Each audit fix, and the 403bd01 change, is a mutation in
+`tools/mutation-check.py` (`M`–`R`), and each is killed by its test. Two were
+not at first: the post-transfer check fired inside the step that saw the
+transfer end, before the test took its baseline; and an abrupt drop failed the
+refresh's remaining queries instantly, so the broadcast never arrived while
+one was still waiting. The fake gained `announceDown()` — the ACL goes and
+the broadcast lands while a read is still in progress — which is the window
+the phone actually has.
+
+One correction found on the way: the pointer check at 21:03:32, 0.3 s after
+that evening's download, was not the downloader's — it never reads the
+pointer. It was the read loop's overdue check, finding 3, observed live.
+
 ## 16. The audit — seven holes found by reading, not by losing anything
 
 Found 2026-09-15 by going through the whole tree looking for them, after

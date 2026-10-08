@@ -1,9 +1,6 @@
 package thru.taxi.traxi.session
 
-import thru.taxi.traxi.bt.AclLink
-import thru.taxi.traxi.bt.BluetoothSppTransport
 import thru.taxi.traxi.bt.Bonding
-import thru.taxi.traxi.bt.CompanionPairing
 import thru.taxi.traxi.core.format.Bytes
 import thru.taxi.traxi.core.format.GpsRollover
 import thru.taxi.traxi.core.format.LogFormat
@@ -13,7 +10,6 @@ import thru.taxi.traxi.core.format.RecordingAudit
 import thru.taxi.traxi.core.format.MarkProof
 import thru.taxi.traxi.core.format.RecordingSince
 import thru.taxi.traxi.core.protocol.TransferEstimate
-import thru.taxi.traxi.data.RecordingMarkStore
 import thru.taxi.traxi.core.protocol.EraseGate
 import thru.taxi.traxi.core.protocol.FlashDownloader
 import thru.taxi.traxi.core.protocol.FlashEraser
@@ -50,7 +46,7 @@ data class DeviceInfo(
     val timeIntervalSeconds: Double,
     val logStatus: String,
     /**
-     * When [logStatus] was read, as `System.nanoTime()`.
+     * When [logStatus] was read, as `platform.nanoTime()`.
      *
      * Carried with the value because the value is only ever read at connect and
      * after a config write -- never on a timer -- so by mid-session it can be
@@ -320,11 +316,10 @@ sealed interface ConnectionState {
  * from the prep doc, and the round-trip test in :core asserts it holds.
  */
 class SessionController(
-    private val context: android.content.Context,
-    private val pairing: CompanionPairing,
+    private val platform: LinkPlatform,
     private val dumps: DumpRepository,
-    private val marks: RecordingMarkStore,
-    private val recordMethods: thru.taxi.traxi.data.RecordMethodStore,
+    private val marks: thru.taxi.traxi.data.MarkStore,
+    private val recordMethods: thru.taxi.traxi.data.MethodStore,
     private val scope: CoroutineScope,
 ) {
     val transcript = RingTranscript(capacity = 4000)
@@ -535,7 +530,6 @@ class SessionController(
     private var telemetryJob: Job? = null
     private var cancelRequested = false
     private var connectedAddress: String? = null
-    private var linkWatcher: android.content.BroadcastReceiver? = null
 
     /**
      * Address whose last connect failed while bonded, or null.
@@ -601,15 +595,12 @@ class SessionController(
             _connection.value = ConnectionState.Connecting(address)
             disconnectQuietly()
             try {
-                val device = pairing.deviceFor(address)
-                    ?: throw IllegalStateException("No Bluetooth device at $address")
-
                 // Bond before opening a socket. Choosing a device in the
                 // companion chooser associates it but does not pair it, and an
                 // RFCOMM connect to an unpaired device fails with an opaque
                 // socket error rather than saying "not paired".
                 transcript.note("ensuring $address is bonded")
-                when (val bond = Bonding.ensureBonded(context, device)) {
+                when (val bond = platform.ensureBonded(address)) {
                     is Bonding.Result.Failed -> {
                         transcript.note("bonding failed: ${bond.reason}")
                         _connection.value = ConnectionState.Failed(bond.reason)
@@ -638,7 +629,7 @@ class SessionController(
                 // with it any wedged session state -- which is how a reconnect
                 // four seconds after a disconnect got silence from a logger
                 // that was streaming NMEA. See [AclLink].
-                AclLink.awaitDown(context, device, note = transcript::note)
+                platform.awaitLinkDown(address, transcript::note)
 
                 // **The pairing is never destroyed automatically.**
                 //
@@ -663,9 +654,9 @@ class SessionController(
                 //
                 // So: offer it, and let the person holding the phone decide.
                 val opened = try {
-                    BluetoothSppTransport(device).also { it.open() }
+                    platform.openBluetooth(address)
                 } catch (first: Exception) {
-                    if (Bonding.looksStale(device)) {
+                    if (platform.looksStale(address)) {
                         transcript.note(
                             "connect failed while bonded; the pairing may be stale, " +
                                 "offering a re-pair rather than clearing it"
@@ -700,21 +691,18 @@ class SessionController(
             _connection.value = ConnectionState.Connecting(address)
             stalePairingSuspectedFor = null
             try {
-                val device = pairing.deviceFor(address)
-                    ?: throw IllegalStateException("No Bluetooth device at $address")
-
                 transcript.note("user asked to clear the pairing for $address")
-                if (!Bonding.removeBond(device)) {
+                if (!platform.removeBond(address)) {
                     throw IllegalStateException(
                         "The pairing could not be cleared automatically.\n\n" +
-                            "Forget \"${runCatching { device.name }.getOrNull() ?: address}\" " +
+                            "Forget \"${platform.deviceName(address) ?: address}\" " +
                             "in Android's Bluetooth settings, then connect again and " +
                             "enter ${Bonding.KNOWN_PIN}."
                     )
                 }
                 // Let the stack settle into BOND_NONE before asking again.
                 delay(1_500)
-                when (val again = Bonding.ensureBonded(context, device)) {
+                when (val again = platform.ensureBonded(address)) {
                     is Bonding.Result.Failed -> throw IllegalStateException(again.reason)
                     else -> transcript.note("re-paired at the user's request")
                 }
@@ -795,7 +783,7 @@ class SessionController(
     private suspend fun openWith(t: Transport, simulated: Boolean) {
         transport = t
         isSimulated = simulated
-        val c = PmtkClient(t, transcript)
+        val c = PmtkClient(t, transcript, clock = ::monotonicMillis)
         client = c
 
         val firmware = c.queryFirmware()
@@ -835,7 +823,7 @@ class SessionController(
                 logFormat = format,
                 timeIntervalSeconds = interval,
                 logStatus = status,
-                logStatusAtNanos = System.nanoTime(),
+                logStatusAtNanos = platform.nanoTime(),
                 needsWeekRollover = firmware.needsWeekRollover,
                 flash = flash,
                 // **Not queried here.** §15 is unambiguous that requests are
@@ -860,7 +848,7 @@ class SessionController(
         // sample can already show whether fixes have been written since.
         recordingBaseline = pointer
         lastProbedPointer = pointer
-        connectedAtNanos = System.nanoTime()
+        connectedAtNanos = platform.nanoTime()
         _recording.value = RecordingActivity()
 
         // Close the interval that has been open since the app last saw this
@@ -914,7 +902,7 @@ class SessionController(
         // A failure here is never fatal to the session, but it must not be
         // silent either: it means the protection against that freeze is not in
         // place, and the next stall would look like the same mystery again.
-        runCatching { thru.taxi.traxi.service.LinkService.start(context) }
+        platform.holdForeground()
             .onFailure {
                 transcript.note(
                     "WARNING: could not start the foreground link service (${it.message}). " +
@@ -938,7 +926,7 @@ class SessionController(
     /** Arm the throughput meter and the ETA targets for a starting download. */
     private fun resetRateMeter() {
         rateLastBlockBytes = 0
-        rateLastNanos = System.nanoTime()
+        rateLastNanos = platform.nanoTime()
         rateEmaBps = 0.0
         rateSamples = 0
         etaBaseline = null
@@ -956,7 +944,7 @@ class SessionController(
 
     /** Fold one progress callback into [_download], including a smoothed rate. */
     private fun applyDownloadProgress(p: FlashDownloader.Progress) {
-        val now = System.nanoTime()
+        val now = platform.nanoTime()
 
         // A transfer holds the read lock for its whole duration, so the
         // telemetry loop -- the only other thing that reports bytes arriving --
@@ -1048,12 +1036,12 @@ class SessionController(
     private fun noteReadResult(bytes: Int) {
         val cur = _linkHealth.value
         _linkHealth.value = if (bytes > 0) {
-            cur.copy(lastBytesAtNanos = System.nanoTime(), silentReads = 0)
+            cur.copy(lastBytesAtNanos = platform.nanoTime(), silentReads = 0)
         } else {
             // Seed the clock on the first read so a stream that never delivers
             // anything still shows an honest, climbing silence.
             cur.copy(
-                lastBytesAtNanos = if (cur.lastBytesAtNanos == 0L) System.nanoTime()
+                lastBytesAtNanos = if (cur.lastBytesAtNanos == 0L) platform.nanoTime()
                     else cur.lastBytesAtNanos,
                 silentReads = cur.silentReads + 1,
             )
@@ -1075,7 +1063,7 @@ class SessionController(
 
     /** Record that a position fix just arrived, for the Live heartbeat. */
     private fun noteFixArrived() {
-        val now = System.nanoTime()
+        val now = platform.nanoTime()
         val prev = _liveActivity.value.lastFixAtNanos
         if (prev == 0L || now - prev >= FIX_RECENT_NANOS) fixRunSinceNanos = now
         val rate: Double
@@ -1188,7 +1176,7 @@ class SessionController(
             // on the first iteration hits the link at its least settled moment,
             // right after connect, while openWith's own flash/pointer queries may
             // still be echoing. Wait a full interval before the first probe.
-            var lastProbeNanos = System.nanoTime()
+            var lastProbeNanos = platform.nanoTime()
             var bytesSincePump = 0
             // How often this link tolerates being asked. Over Bluetooth the
             // query is destabilising, so the steady rate is rare; the first
@@ -1260,7 +1248,7 @@ class SessionController(
                 // fatal and forced a fragile manual reconnect. A genuine dead
                 // link still surfaces -- through the ACL-disconnect broadcast
                 // (watchLink), which is the real signal, not a guess from silence.
-                val now = System.nanoTime()
+                val now = platform.nanoTime()
                 // A transfer just ended: restart the steady clock from its end
                 // and skip any pre-flight. The loop sat blocked behind the
                 // transfer while this clock ran on, so the next check was
@@ -1302,7 +1290,7 @@ class SessionController(
                         null
                     }
                     if (ptr != null) {
-                        noteWritePointer(ptr, System.nanoTime())
+                        noteWritePointer(ptr, platform.nanoTime())
                     } else {
                         // An unanswered probe is how a Bluetooth link dies on
                         // this hardware: the query wedges the logger's radio
@@ -1384,23 +1372,9 @@ class SessionController(
      * being discovered on the next failed read.
      */
     private fun watchLink(address: String) {
-        stopWatchingLink()
-        val receiver = object : android.content.BroadcastReceiver() {
-            override fun onReceive(ctx: android.content.Context?, intent: android.content.Intent?) {
-                if (intent?.action != android.bluetooth.BluetoothDevice.ACTION_ACL_DISCONNECTED) return
-                val device: android.bluetooth.BluetoothDevice? =
-                    intent.getParcelableExtra(android.bluetooth.BluetoothDevice.EXTRA_DEVICE)
-                if (!address.equals(device?.address, ignoreCase = true)) return
-                onLinkLost("The logger disconnected. It may be out of range, switched off, or flat.")
-            }
+        platform.watchLink(address) {
+            onLinkLost("The logger disconnected. It may be out of range, switched off, or flat.")
         }
-        context.registerReceiver(
-            receiver,
-            android.content.IntentFilter(
-                android.bluetooth.BluetoothDevice.ACTION_ACL_DISCONNECTED
-            ),
-        )
-        linkWatcher = receiver
     }
 
     /**
@@ -1417,29 +1391,13 @@ class SessionController(
      * does not compare usefully across processes.
      */
     private fun watchUsbDetach() {
-        stopWatchingLink()
-        val receiver = object : android.content.BroadcastReceiver() {
-            override fun onReceive(ctx: android.content.Context?, intent: android.content.Intent?) {
-                if (intent?.action != android.hardware.usb.UsbManager.ACTION_USB_DEVICE_DETACHED) return
-                val gone: android.hardware.usb.UsbDevice? =
-                    intent.getParcelableExtra(android.hardware.usb.UsbManager.EXTRA_DEVICE)
-                if (gone != null && gone.vendorId != UsbSerialTransport.VENDOR_MEDIATEK) return
-                onLinkLost("The logger was unplugged.")
-            }
-        }
-        context.registerReceiver(
-            receiver,
-            android.content.IntentFilter(
-                android.hardware.usb.UsbManager.ACTION_USB_DEVICE_DETACHED
-            ),
-        )
-        linkWatcher = receiver
+        platform.watchUsbDetach { onLinkLost("The logger was unplugged.") }
     }
 
-    private fun stopWatchingLink() {
-        linkWatcher?.let { runCatching { context.unregisterReceiver(it) } }
-        linkWatcher = null
-    }
+    private fun stopWatchingLink() = platform.stopWatching()
+
+    /** The platform's clock in milliseconds, for [PmtkClient]'s deadlines. */
+    private fun monotonicMillis(): Long = platform.nanoTime() / 1_000_000
 
     /**
      * Set while [downloadWithLinkRecovery] runs a Bluetooth transfer. A link
@@ -1492,7 +1450,7 @@ class SessionController(
         // The session is over, so the foreground notification must go with it.
         // LinkService also retires itself when the connection flow leaves
         // Connected; this covers the paths that close the transport first.
-        runCatching { thru.taxi.traxi.service.LinkService.stop(context) }
+        platform.releaseForeground()
         connectedAddress = null
         transferEndedAtNanos = 0L
         runCatching { transport?.close() }
@@ -1775,7 +1733,6 @@ class SessionController(
      */
     private suspend fun cycleLink(): PmtkClient? {
         val address = connectedAddress ?: return null
-        val device = runCatching { pairing.deviceFor(address) }.getOrNull() ?: return null
 
         transcript.note("cycling the radio link to clear a wedged read session")
         // Stop telemetry against the client that is about to be discarded; it
@@ -1787,13 +1744,12 @@ class SessionController(
 
         // The whole point: a *new* ACL is what clears the wedge, and a socket
         // opened while the old link lingers would inherit it.
-        AclLink.awaitDown(context, device, note = transcript::note)
+        platform.awaitLinkDown(address, transcript::note)
 
         return try {
-            val t = BluetoothSppTransport(device)
-            t.open()
+            val t = platform.openBluetooth(address)
             transport = t
-            val c = PmtkClient(t, transcript)
+            val c = PmtkClient(t, transcript, clock = ::monotonicMillis)
             client = c
             // The wait above can run 30 s, and the user may have disconnected
             // or cancelled inside it. Checked *after* publishing the new link,
@@ -1915,7 +1871,7 @@ class SessionController(
             return result
         } finally {
             transferOwnsLink = false
-            transferEndedAtNanos = System.nanoTime()
+            transferEndedAtNanos = platform.nanoTime()
             // A loss the loop could not recover is still a loss, and now it is
             // the watcher's again: tear down and say so, as before. The flag
             // alone is not enough: cycleLink's own close raises a broadcast
@@ -1935,8 +1891,8 @@ class SessionController(
      */
     private suspend fun droppedDuring(result: FlashDownloader.Result): Boolean {
         if (!transferOwnsLink || result.failure == null) return false
-        val until = System.nanoTime() + DROP_EVIDENCE_WAIT_NANOS
-        while (!linkDroppedMidTransfer && System.nanoTime() < until) delay(100)
+        val until = platform.nanoTime() + DROP_EVIDENCE_WAIT_NANOS
+        while (!linkDroppedMidTransfer && platform.nanoTime() < until) delay(100)
         return linkDroppedMidTransfer && aclDown()
     }
 
@@ -1946,9 +1902,8 @@ class SessionController(
      * Unknown counts as down: that is the behaviour before this check existed.
      */
     private fun aclDown(): Boolean {
-        val device = connectedAddress?.let { runCatching { pairing.deviceFor(it) }.getOrNull() }
-            ?: return true
-        return AclLink.isConnected(device) != true
+        val address = connectedAddress ?: return true
+        return platform.isLinkUp(address) != true
     }
 
     /** Restart telemetry after a transfer, on whichever client survived it. */
@@ -2176,7 +2131,7 @@ class SessionController(
                 MarkProofState(
                     awaitingPress = true,
                     baseline = ptr,
-                    baselineAtNanos = System.nanoTime(),
+                    baselineAtNanos = platform.nanoTime(),
                 )
             }
             onDone()
@@ -2200,9 +2155,9 @@ class SessionController(
             // Fold the reading into the ordinary recording state too: it is an
             // honest pointer sample and there is no reason to spend the query
             // twice.
-            if (ptr != null) noteWritePointer(ptr, System.nanoTime())
+            if (ptr != null) noteWritePointer(ptr, platform.nanoTime())
             val hadFix = _liveActivity.value.lastFixAtNanos != 0L &&
-                (System.nanoTime() - _liveActivity.value.lastFixAtNanos) < FIX_RECENT_NANOS
+                (platform.nanoTime() - _liveActivity.value.lastFixAtNanos) < FIX_RECENT_NANOS
             _markProof.value = MarkProofState(
                 result = MarkProof.of(
                     before = baseline,
@@ -2213,7 +2168,7 @@ class SessionController(
                     }.getOrDefault(0),
                     hadFix = hadFix,
                     elapsedSeconds = baselineAt?.let {
-                        (System.nanoTime() - it) / 1_000_000_000.0
+                        (platform.nanoTime() - it) / 1_000_000_000.0
                     },
                     intervalSeconds = (_connection.value as? ConnectionState.Connected)
                         ?.info?.timeIntervalSeconds?.takeIf { it > 0 },
@@ -2262,7 +2217,7 @@ class SessionController(
                     val interval = (_connection.value as? ConnectionState.Connected)
                         ?.info?.timeIntervalSeconds ?: 10.0
                     val wait = (maxOf(interval * 2, 10.0) * 1e9).toLong()
-                    _loggingConfirmAt.value = System.nanoTime() + wait
+                    _loggingConfirmAt.value = platform.nanoTime() + wait
                 }
                 _message.value = if (enabled) {
                     "Start accepted — the write pointer will confirm it shortly"
@@ -2426,7 +2381,7 @@ class SessionController(
         val previous = current.info.logStatus
         val status = runCatching { c.queryLogStatus() }.getOrDefault(previous)
         val statusAt =
-            if (status === previous) current.info.logStatusAtNanos else System.nanoTime()
+            if (status === previous) current.info.logStatusAtNanos else platform.nanoTime()
         // Null means "the device did not answer this time", never "OVERLAP":
         // keep the last known value rather than replacing a real reading with
         // an absence, which would make the STOP warning flicker off on a single

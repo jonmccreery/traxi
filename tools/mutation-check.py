@@ -73,6 +73,7 @@ SINCE = "core/src/main/kotlin/thru/taxi/traxi/core/format/RecordingSince.kt"
 PROOF = "core/src/main/kotlin/thru/taxi/traxi/core/format/MarkProof.kt"
 ETA = "core/src/main/kotlin/thru/taxi/traxi/core/protocol/TransferEstimate.kt"
 PMTKQ = "core/src/main/kotlin/thru/taxi/traxi/core/protocol/Pmtk.kt"
+SESSION = "app/src/main/kotlin/thru/taxi/traxi/session/SessionController.kt"
 
 # name -> (file, [(old, new), ...]). Each entry reverts exactly one fix.
 MUTATIONS = {
@@ -156,6 +157,45 @@ MUTATIONS = {
     "L-record-method-guess": (PMTKQ, [
         ("                return entries.firstOrNull { it.code == value }",
          "                return entries.firstOrNull { it.code == value } ?: OVERLAP"),
+    ]),
+
+    # §15.5, the link races. Each is caught by LinkRaceTest, which runs the
+    # real session against a scripted logger and radio on virtual time.
+
+    # Before 403bd01: the ACL watcher tears down any session it sees drop,
+    # including one a transfer is recovering -- and its own rebuild's.
+    "M-watcher-owns-drops": (SESSION, [
+        ("        if (transferOwnsLink) {\n            linkDroppedMidTransfer = true",
+         "        if (false) {\n            linkDroppedMidTransfer = true"),
+    ]),
+
+    # Audit 1: believe the disconnect broadcast without asking the radio, so a
+    # late one from the rebuild's own close ends a session that just succeeded.
+    "N-late-broadcast": (SESSION, [
+        ("        return platform.isLinkUp(address) != true", "        return true"),
+    ]),
+
+    # Audit 2: let a rebuild publish a new link after the user disconnected.
+    "O-rebuild-after-disconnect": (SESSION, [
+        ("            if (cancelRequested || connectedAddress == null ||",
+         "            if (false &&"),
+    ]),
+
+    # Audit 3: keep the ten-minute clock running through a transfer, so the
+    # overdue check fires the instant a long read releases the link.
+    "P-check-after-transfer": (SESSION, [
+        ("                if (ended > seenTransferEnd) {", "                if (false) {"),
+    ]),
+
+    # Audit 4: let a config refresh write Connected over a lost session.
+    "Q-refresh-resurrects": (SESSION, [
+        ("        if (_connection.value !is ConnectionState.Connected || client !== c) return\n",
+         ""),
+    ]),
+
+    # Audit 5: a rebuild ends the session's memory of the logger.
+    "R-rebuild-forgets": (SESSION, [
+        ("        stopTelemetry(endSession = false)", "        stopTelemetry()"),
     ]),
 
     # §16.4: drop what the earlier segments established.

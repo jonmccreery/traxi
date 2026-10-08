@@ -61,7 +61,8 @@ class AppContainer(application: Application) {
     val recordingMarks = RecordingMarkStore(application)
     val recordMethods = RecordMethodStore(application)
     val session = SessionController(
-        application, pairing, dumpRepository, recordingMarks, recordMethods, applicationScope,
+        thru.taxi.traxi.session.AndroidLinkPlatform(application, pairing),
+        dumpRepository, recordingMarks, recordMethods, applicationScope,
     )
 
     /**

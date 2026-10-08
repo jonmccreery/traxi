@@ -1211,6 +1211,7 @@ class SessionController(
             // spends its request on a pointer that cannot move. Learned by
             // listening; see [WritePointerSchedule].
             var probedYet = false
+            var seenTransferEnd = 0L
             while (isActive) {
                 // A read while another operation holds the lock would take
                 // bytes belonging to that operation.
@@ -1260,6 +1261,18 @@ class SessionController(
                 // link still surfaces -- through the ACL-disconnect broadcast
                 // (watchLink), which is the real signal, not a guess from silence.
                 val now = System.nanoTime()
+                // A transfer just ended: restart the steady clock from its end
+                // and skip any pre-flight. The loop sat blocked behind the
+                // transfer while this clock ran on, so the next check was
+                // otherwise already overdue -- and fired the moment a long read
+                // released the link, the moment §15.1 found it least able to
+                // answer. Fewer requests, never more.
+                val ended = transferEndedAtNanos
+                if (ended > seenTransferEnd) {
+                    seenTransferEnd = ended
+                    lastProbeNanos = maxOf(lastProbeNanos, ended)
+                    probedYet = true
+                }
                 val due = WritePointerSchedule.isDue(
                     nowNanos = now,
                     lastProbeNanos = lastProbeNanos,
@@ -1311,16 +1324,25 @@ class SessionController(
         }
     }
 
-    private fun stopTelemetry() {
+    /**
+     * Stop the read loop, and -- when [endSession] -- forget the session.
+     *
+     * [cycleLink] passes false. A rebuilt radio link is the same logger in the
+     * same session, and wiping its identity there stopped the "since last
+     * looked" mark advancing and the flash-full reading being remembered for
+     * the rest of the session.
+     */
+    private fun stopTelemetry(endSession: Boolean = true) {
         telemetryJob?.cancel()
         telemetryJob = null
         client?.onSentence = null
         _telemetry.value = null
         _liveActivity.value = LiveActivity()
         fixRunSinceNanos = 0L
+        _linkHealth.value = LinkHealth()
+        if (!endSession) return
         _recording.value = RecordingActivity()
         _loggingConfirmAt.value = null
-        _linkHealth.value = LinkHealth()
         // The verdict describes the interval this session closed, so it goes
         // when the session does. The stored *mark* stays: it is what the next
         // connect measures from, and it is the only thing that survives the
@@ -1433,6 +1455,9 @@ class SessionController(
      */
     @Volatile private var transferOwnsLink = false
 
+    /** When the last transfer released the link, this session; 0 if none. */
+    @Volatile private var transferEndedAtNanos = 0L
+
     /** The ACL dropped while [transferOwnsLink]; cleared by each rebuild. */
     @Volatile private var linkDroppedMidTransfer = false
 
@@ -1469,6 +1494,7 @@ class SessionController(
         // Connected; this covers the paths that close the transport first.
         runCatching { thru.taxi.traxi.service.LinkService.stop(context) }
         connectedAddress = null
+        transferEndedAtNanos = 0L
         runCatching { transport?.close() }
         transport = null
         client = null
@@ -1754,7 +1780,7 @@ class SessionController(
         transcript.note("cycling the radio link to clear a wedged read session")
         // Stop telemetry against the client that is about to be discarded; it
         // is restarted on the new one once the transfer ends.
-        stopTelemetry()
+        stopTelemetry(endSession = false)
         runCatching { transport?.close() }
         transport = null
         client = null
@@ -1769,6 +1795,20 @@ class SessionController(
             transport = t
             val c = PmtkClient(t, transcript)
             client = c
+            // The wait above can run 30 s, and the user may have disconnected
+            // or cancelled inside it. Checked *after* publishing the new link,
+            // so either order is covered: a disconnect that already ran is seen
+            // here, and one that runs later closes `transport`, which is now t.
+            // Without this the new link stayed open, unwatched, under a UI
+            // saying Disconnected.
+            if (cancelRequested || connectedAddress == null ||
+                _connection.value !is ConnectionState.Connected
+            ) {
+                transcript.note("the session ended during the rebuild; closing the new link")
+                runCatching { t.close() }
+                if (transport === t) { transport = null; client = null }
+                return null
+            }
             transcript.note("radio link rebuilt; resuming the transfer")
             c
         } catch (e: Exception) {
@@ -1875,9 +1915,13 @@ class SessionController(
             return result
         } finally {
             transferOwnsLink = false
+            transferEndedAtNanos = System.nanoTime()
             // A loss the loop could not recover is still a loss, and now it is
-            // the watcher's again: tear down and say so, as before.
-            if (owned && (linkDroppedMidTransfer || client == null)) {
+            // the watcher's again: tear down and say so, as before. The flag
+            // alone is not enough: cycleLink's own close raises a broadcast
+            // that can land after the flag was reset for it, and believing that
+            // would end a session whose transfer had just succeeded.
+            if (owned && (client == null || (linkDroppedMidTransfer && aclDown()))) {
                 onLinkLost("The logger disconnected and the link could not be rebuilt.")
             }
         }
@@ -1893,7 +1937,18 @@ class SessionController(
         if (!transferOwnsLink || result.failure == null) return false
         val until = System.nanoTime() + DROP_EVIDENCE_WAIT_NANOS
         while (!linkDroppedMidTransfer && System.nanoTime() < until) delay(100)
-        return linkDroppedMidTransfer
+        return linkDroppedMidTransfer && aclDown()
+    }
+
+    /**
+     * Whether the radio link to the connected logger is down right now, asked
+     * of the system rather than inferred from a broadcast that may be stale.
+     * Unknown counts as down: that is the behaviour before this check existed.
+     */
+    private fun aclDown(): Boolean {
+        val device = connectedAddress?.let { runCatching { pairing.deviceFor(it) }.getOrNull() }
+            ?: return true
+        return AclLink.isConnected(device) != true
     }
 
     /** Restart telemetry after a transfer, on whichever client survived it. */
@@ -2094,7 +2149,7 @@ class SessionController(
             onRestoreFailed = { failure ->
                 _message.value =
                     "The logger is NOT recording — re-enabling it failed ($failure). " +
-                        "Use Resume logging on the Config tab, or power-cycle the device."
+                        "Use Start logging on the Config tab, or power-cycle the device."
             },
             body = body,
         )
@@ -2378,6 +2433,10 @@ class SessionController(
         // dropped reply.
         val method = c.queryRecordMethod()?.also { rememberRecordMethod(it) }
             ?: current.info.recordMethod
+        // The link can drop during the four queries above, and onLinkLost will
+        // have set Failed. Writing Connected now would put a live state back
+        // over a dead link.
+        if (_connection.value !is ConnectionState.Connected || client !== c) return
         _connection.value = ConnectionState.Connected(
             current.info.copy(
                 logStatusAtNanos = statusAt,

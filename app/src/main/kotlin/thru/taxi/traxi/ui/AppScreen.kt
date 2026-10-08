@@ -217,7 +217,7 @@ private fun ProveRecordingCard(
                         )
                         NavSwitchNote(emphasis = true)
                         Text(
-                            "If it is already on LOG: Resume logging on the Config tab, " +
+                            "If it is already on LOG: Start logging on the Config tab, " +
                                 "then run this again.",
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -1040,7 +1040,7 @@ private fun DeviceInfoCard(
                     // and no reassuring status word -- overrides the slider.
                     NavSwitchNote(emphasis = true)
                     Text(
-                        "If it is already on LOG: Resume logging on the Config tab.",
+                        "If it is already on LOG: Start logging on the Config tab.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -1107,7 +1107,7 @@ private fun DeviceInfoCard(
                     // say -- that the device agrees it is not logging.
                     Text(
                         "Logging reported off, good fix, nothing reaching flash. " +
-                            "Resume logging on the Config tab.",
+                            "Start logging on the Config tab.",
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
@@ -1867,9 +1867,14 @@ private fun ConfigTab(container: AppContainer, connection: ConnectionState) {
             val hasFix = activity.lastFixAtNanos != 0L &&
                 (now - activity.lastFixAtNanos) < FIX_RECENT_NANOS
             val (line, color) = when {
-                pending != null -> "Start accepted. Checking the write pointer in " +
-                    "${((pending - now) / 1e9).coerceAtLeast(0.0).toInt()} s." to
+                // The check waits for the logger to be sending, so past its
+                // time it is waiting on the logger, not counting down.
+                pending != null && pending > now -> "Start accepted. Checking the write " +
+                    "pointer in ${((pending - now) / 1e9).toInt()} s." to
                     MaterialTheme.colorScheme.onSurfaceVariant
+
+                pending != null -> "Start accepted. The check is waiting for the logger " +
+                    "to send data." to MaterialTheme.colorScheme.onSurfaceVariant
 
                 recording.lastProbeAtNanos > startedAt ->
                     when (recording.verdict(info.timeIntervalSeconds, hasFix)) {

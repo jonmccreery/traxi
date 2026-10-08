@@ -1416,8 +1416,9 @@ is proposed.
 - **Pace-and-recover has not yet been proven against a full 84-block read.**
   Everything above is measured; that specific claim is not, and §11 item 2
   stays open until a full Bluetooth download actually completes.
-- **`eraseBlockers()` still probes the write pointer** on Dumps-tab
-  composition — the same unattended-intervention blind spot, untouched.
+- ~~`eraseBlockers()` still probes the write pointer on Dumps-tab
+  composition.~~ Closed by §16.6: it renders from the pointer the telemetry
+  loop already keeps and reads nothing itself.
 
 ### 15.2 The slide switch beats the firmware, and the status word will lie about it
 
@@ -1750,6 +1751,49 @@ and the session ends as before.
 **Still open:** none of this has hardware evidence yet. The next long
 Bluetooth read is the test: the transcript should show `link lost during the
 transfer`, the 15 s wait, `radio link rebuilt`, and `link cycle N recovered`.
+
+#### The audit that followed, same day
+
+A read-only pass over every path that reacts to link state found six more,
+fixed together. None adds a request to the logger; one removes one.
+
+1. **A late broadcast could end a healthy session** (introduced above).
+   `cycleLink`'s own close raises `ACL_DISCONNECTED`; `awaitDown` polls, so it
+   can see the link down before the broadcast lands, and a broadcast landing
+   after the flag was reset left it set — and a transfer that then succeeded
+   ended its session. Now a drop is believed only if the system also reports
+   the ACL down (`aclDown()`).
+2. **Disconnect during a rebuild left the logger's link open, unwatched.** The
+   rebuild can wait 30 s; a Disconnect inside that window tore the session
+   down, then the rebuild opened a new socket anyway. It now checks, after
+   publishing the new link, that the session still exists, and closes it if not.
+3. **A check fired the instant a long read finished.** The telemetry loop sits
+   blocked behind a transfer while its ten-minute clock runs on, so any
+   transfer over ten minutes ended with an immediate `PMTK182,2,8` — when
+   §15.1 found the link least able to answer. The steady clock now restarts
+   from the end of the transfer, and no pre-flight follows one.
+4. **A drop during a config refresh could restore "Connected".** `refreshConfig`
+   wrote its result unconditionally after four queries; a drop among them set
+   Failed, then this put Connected back over a dead link. It now writes only if
+   the session and client are unchanged.
+5. **A rebuild wiped the session's identity.** `cycleLink` used the full
+   `stopTelemetry`, which forgot the device key and baselines — so the
+   "since last looked" mark stopped advancing and a flash-full reading went
+   unremembered for the rest of the session. A rebuild now stops only the read
+   loop.
+6. **Wording:** "Checking the write pointer in 0 s" could sit indefinitely while
+   the check waited for the logger to send; it now says so. Three messages
+   still named the old "Resume logging" button.
+
+What the audit found sound: connect waits out the old ACL and never deletes a
+bond on its own; the connect budget is pinned by `ConnectBudgetTest`; the
+watcher filters on address; a dead read loop is surfaced, not torn down; the
+erase gate reads nothing; `LinkService` only follows state; turning the phone's
+Bluetooth off mid-download fails the rebuild cleanly and keeps the bytes.
+
+The pattern behind all six: each mechanism was right alone, and each failure
+needed two of them reacting to the same event — which needs Android's real
+Bluetooth stack, so no unit test reached it.
 
 ## 16. The audit — seven holes found by reading, not by losing anything
 
